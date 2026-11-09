@@ -151,6 +151,24 @@ That's from the first message (6 Nov 2026, 22:42) to the first public release (9
 | 💬 **Messages** | About 190 from Sami, and 9,560 model responses from the lead plus 32 sub-agents |
 | 🔤 **Tokens** | 7.8 million generated, 3.55 billion processed in total (3.51 billion of those were re-reads of the cached project context) |
 
+## 💡 Ideas for the community: offline user-created missions
+
+inFAMOUS 2 shipped with a mission editor: players built their own missions (UGC) and shared them online.
+The online service that stored and shared those missions is gone, so that part of the game is dead today.
+
+Because this port runs the game's own code on your PC, there is a chance to bring it back offline:
+- point the game's mission upload/download at **local files** instead of the old servers
+- save, load and play your own created missions without a network
+- share missions as plain files, for example in this repository
+
+This is only an idea for now. Nothing is built, and it is not planned yet. Open questions:
+- How does the game talk to the UGC service?
+- What format are created missions stored in?
+- How much of the editor works with no network at all?
+
+If you know how inFAMOUS 2's UGC worked, have notes or captures from back then, or want to think it
+through with us, please open an [issue](../../issues).
+
 ## 🙏 Thanks and credits
 
 This port stands on other people's work:
