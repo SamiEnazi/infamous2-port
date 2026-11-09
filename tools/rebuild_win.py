@@ -96,6 +96,16 @@ def run(step, cmd, cwd=PORT, env_defaults=None):
         # in the environment = the old lift.
         if step in ("spu", "jobs"):
             env.setdefault("SPU_LIFT_MERGE_CHUNKS", "1")
+            # cpu agent (2026-11-09): a constant-target `bi` inside a merged group is a guarded
+            # goto (toolkit spu_lifter.py --const-bi; exact by the replay; PS3_SPU_CONST_BI=0 at
+            # run time = the indirect branch again). SPU_LIFT_CONST_BI=0 = the old lift.
+            env.setdefault("SPU_LIFT_CONST_BI", "1")
+            # Native rewrites of lifted SPU functions (game-derived C in work/rewrites/spu, gitignored):
+            # the lift hooks the functions natives.txt names; step_compile builds the rewrites.
+            # PORT_SPU_NATIVES=0 = no hooks (and no rewrites compiled).
+            nat = os.path.join(WORK, "rewrites", "spu", "natives.txt")
+            if os.environ.get("PORT_SPU_NATIVES", "1") != "0" and os.path.isfile(nat):
+                env.setdefault("SPU_NATIVE_FILE", nat)
         p = subprocess.run(cmd, cwd=cwd, stdout=lf, stderr=subprocess.STDOUT, env=env)
         lf.write(f"[exit {p.returncode} after {time.time() - t0:.1f}s]\n")
     if p.returncode != 0:
@@ -170,23 +180,20 @@ def step_port():
         shutil.copy2(s, d)
         n += 1
     print(f"  {n} port file(s) copied")
-    # work/ sits inside our project repo, and inside a repo `git apply` resolves
-    # paths from the repo root and silently SKIPS the rest. The ceiling makes it
-    # a plain patcher in work/port.
-    env = dict(os.environ, GIT_CEILING_DIRECTORIES=WORK)
+    # tools/apply_patch.py, not git: the build needs no git (byte-identical to `git apply` on these patches)
+    from apply_patch import apply_patch, PatchError
     for p in sorted(os.listdir(PORT_PATCHES)):
         if p.endswith(".patch"):
             files = [ln[6:].strip() for ln in open(os.path.join(PORT_PATCHES, p), encoding="utf-8")
                      if ln.startswith("+++ b/")]
-            r = subprocess.run(["git", "-c", "core.autocrlf=false", "apply", "-p1", os.path.join(PORT_PATCHES, p)], cwd=PORT,
-                               capture_output=True, text=True, env=env)
+            try:
+                apply_patch(os.path.join(PORT_PATCHES, p), PORT, strip=1)
+            except PatchError as e:
+                raise StepError(f"patch {p} does not apply: {e}")
             for f in files:   # never trust a silent apply
                 src = os.path.join(PORT_SRC, f)
-                if r.returncode == 0 and os.path.isfile(src) and \
-                        open(src, "rb").read() == open(os.path.join(PORT, f), "rb").read():
+                if os.path.isfile(src) and open(src, "rb").read() == open(os.path.join(PORT, f), "rb").read():
                     raise StepError(f"patch {p} reported success but {f} is unchanged")
-            if r.returncode != 0:
-                raise StepError(f"patch {p} does not apply: {r.stderr.strip()}")
             print(f"  applied {p}")
     # The exe's icon: tools/make_icon.ps1 makes work/icon/app.ico from the player's own
     # PS3_GAME/ICON0.PNG; the port's CMakeLists compiles app.rc when it exists.
@@ -200,10 +207,46 @@ def step_port():
             print("  app.rc: the exe gets work/icon/app.ico")
 
 
+def spu_rewrites():
+    """work/rewrites/spu/*.c into the port tree, one lifted-SPU-like TU each (spu/zz_native_<name>:
+    the port's CMake globs spu/*/spu_recomp.c and builds them with the SPU flags; one TU per file,
+    each rewrite has its own statics), only when the lift hooked them (a lifted spu_recomp.c calls
+    spu_native_entry); else those directories are removed."""
+    spu = os.path.join(PORT, "spu")
+    src = os.path.join(WORK, "rewrites", "spu")
+    hooked = False
+    for root_, _, files in os.walk(spu):
+        if "spu_recomp.c" in files and not os.path.basename(root_).startswith("zz_native_"):
+            with open(os.path.join(root_, "spu_recomp.c"), encoding="utf-8", errors="replace") as f:
+                if "if (spu_native_entry(ctx," in f.read():
+                    hooked = True
+                    break
+    cs = sorted(f for f in os.listdir(src) if f.endswith(".c")) if os.path.isdir(src) else []
+    if not hooked or os.environ.get("PORT_SPU_NATIVES", "1") == "0":
+        cs = []
+    want = {"zz_native_" + os.path.splitext(f)[0]: f for f in cs}
+    for n in (os.listdir(spu) if os.path.isdir(spu) else []):
+        if n.startswith("zz_native_") and n not in want:
+            shutil.rmtree(os.path.join(spu, n))
+    for n, f in sorted(want.items()):
+        os.makedirs(os.path.join(spu, n), exist_ok=True)
+        text = ("/* native SPU rewrite (work/rewrites/spu: game-derived, gitignored), built like the lifted SPU TUs */\n"
+                '#include "%s"\n' % os.path.join(src, f).replace("\\", "/"))
+        p = os.path.join(spu, n, "spu_recomp.c")
+        if not os.path.isfile(p) or open(p, encoding="utf-8").read() != text:
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(text)
+    if cs:
+        print("  native SPU rewrites:", ", ".join(cs))
+
+
 def step_compile():
+    spu_rewrites()
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from vsenv import vs_env
+    from vsenv import vs_env, rc_compiler
     env = dict(vs_env(), PS3RECOMP=TK)
+    cmake = port_paths.get("cmake")     # tools-cache, config.local.json, or this PC's
+    rc = rc_compiler()                  # the portable SDK's rc.exe (None: Visual Studio's, found by CMake)
     build = os.environ.get("PORT_BUILD") or os.path.join(PORT, "build")   # PORT_BUILD: a separate build tree
     jobs = os.environ.get("PORT_JOBS", "8")   # each lifted TU is ~150k lines: bound the RAM
     # PORT_PGO=gen | use:<profdata>: clang PGO over every C/C++ TU (lifted PPU/SPU/firmware +
@@ -238,7 +281,7 @@ def step_compile():
         lift_opt += ";" + u; spu_arch += ";" + u; c_rel += " " + u + " " + w; cxx_rel += " " + u + " " + w
     elif pgo:
         raise StepError("PORT_PGO must be gen or use:<profdata>, not %r" % pgo)
-    for cmd in (["cmake", "-S", PORT, "-B", build, "-G", "Ninja",
+    for cmd in ([cmake, "-S", PORT, "-B", build, "-G", "Ninja"] + (["-DCMAKE_RC_COMPILER=" + rc] if rc else []) + [
                  "-DCMAKE_MAKE_PROGRAM=" + port_paths.get("ninja"),
                  "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl",
                  "-DCMAKE_BUILD_TYPE=Release", "-DPS3RECOMP_DIR=" + TK, "-DPython3_EXECUTABLE=" + PY,
@@ -265,7 +308,7 @@ def step_compile():
                  # The C++ flags are always passed (CMake's own Release default) so a PGO
                  # build's flags never linger in the cache of a later normal build.
                  "-DCMAKE_C_FLAGS_RELEASE=" + c_rel, "-DCMAKE_CXX_FLAGS_RELEASE=" + cxx_rel],
-                ["cmake", "--build", build, "-j", jobs, "--", "-k", "0"]):
+                [cmake, "--build", build, "-j", jobs, "--", "-k", "0"]):
         with open(os.path.join(LOGS, "compile%s.log" % (("-" + os.path.basename(os.environ["PORT_BUILD"])) if os.environ.get("PORT_BUILD") else "")), "a", encoding="utf-8", errors="replace") as lf:
             lf.write("\n$ " + " ".join(cmd) + "\n")
             lf.flush()

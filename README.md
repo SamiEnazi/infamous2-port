@@ -15,6 +15,7 @@ No emulator while you play.
 [![Status: early public test](https://img.shields.io/badge/status-early%20public%20test-eb6834)](#-status)
 [![License: MIT](https://img.shields.io/badge/license-MIT-1baf7a)](LICENSE)
 [![Made with Claude Code](https://img.shields.io/badge/made%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](#-made-with-claude-code)
+[![Visitors](https://komarev.com/ghpvc/?username=SamiEnazi-infamous2-port&label=visitors&color=3fa9ff&style=flat)](https://github.com/SamiEnazi/infamous2-port)
 
 </div>
 
@@ -31,7 +32,7 @@ No emulator while you play.
 |---|:-:|:-:|
 | 🏙️ City: the dock right after loading (720p) | 43 fps (39–46) | **91 fps** |
 | 🎥 Camera turned to three more views (720p) | not measured | **95 / 119 / 127 fps** |
-| 🖥️ The same four views at **native 1080p** with every picture extra on | | **60 / 81 / 91 / 85 fps** |
+| 🖥️ The same four views at **native 1080p** with every picture extra on | | **102 / 110 / 136 / 143 fps** |
 | 🔧 Developer build with profile-guided optimisation, dock view (720p) | | 99 fps |
 
 <sub>
@@ -154,30 +155,45 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
   - a CPU with AVX2 (Intel 4th gen / AMD Ryzen or newer)
   - a Vulkan graphics card
   - 16 GB RAM
-  - about 30 GB free disk space
-- 🛠️ **Build tools.** Setup checks for them and can install the missing ones with winget:
-  - Git
-  - Python 3.10+
-  - Visual Studio 2022 Build Tools (C++)
-  - LLVM (clang-cl)
-  - CMake
-  - Ninja
+  - about 15 GB free disk space while it builds (about 4 GB after)
+- 🌐 **Internet.** Setup downloads its build tools (about 1.3 GB) and deletes them after the build.
+  **Nothing is installed on Windows**, nothing needs admin rights, and you need no Git, Python or Visual Studio.
 
 ## 📦 Install
+
+1. ⬇️ Download **`Setup.exe`** from the [latest release](../../releases/latest) and run it.
+2. ▶️ Press **Install**. That's all. Setup:
+   - 📥 downloads the port's files (about 40 MB) into a folder next to itself
+   - 🔎 finds RPCS3 and your game by itself (it asks only if it can't)
+   - 🛠️ downloads the build tools into that folder: Python, CMake, Ninja, LLVM and Microsoft's C++ headers and
+     libraries (portable copies, about 1.3 GB)
+   - 🏗️ builds the game from your copy: 20–60 minutes, one time only (about 15 minutes on the test PC)
+   - 🧹 deletes the build tools again and leaves a desktop shortcut. Its icon is taken from your own copy.
+3. 🎮 Press **Play**.
+
+![Setup: one Install button, one progress bar, then Play](docs/setup.png)
+
+> ⚠️ Setup.exe is not signed, so Windows may say *"Windows protected your PC"* the first time: click
+> **More info**, then **Run anyway**.
+
+> 📜 Pressing Install accepts Microsoft's [Visual Studio Build Tools license](https://go.microsoft.com/fwlink/?LinkId=2179911)
+> for the C++ headers and libraries Setup downloads from Microsoft.
+
+<details>
+<summary>🧰 Without Setup.exe (git)</summary>
 
 ```
 git clone --recursive https://github.com/SamiEnazi/infamous2-port
 ```
 
-(The ZIP download does not include the two submodules: use `git clone --recursive`, or run
-`git submodule update --init` afterwards.)
+Then run **`Setup.cmd`** (the PowerShell window), or straight from PowerShell:
 
-Then run **`Setup.cmd`**:
+```
+tools\setup_build.ps1 -Disc <your game folder> -Rpcs3 <your RPCS3 folder> -AcceptMsvcLicense -Cleanup
+```
 
-1. 📁 Pick your **game disc folder** and your **RPCS3 folder**.
-2. 🧩 **Install missing tools** if anything is red, then restart Setup.
-3. 🏗️ **Build the game.** It takes 10–40 minutes, one time only (about 10 minutes on the test PC).
-4. ▶️ **Play**, or use the new desktop shortcut. Its icon is taken from your own copy.
+Updating later is the same: Setup downloads the build tools again and deletes them afterwards.
+</details>
 
 ## 🎮 Playing
 

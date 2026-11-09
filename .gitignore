@@ -25,3 +25,5 @@ __pycache__/
 /input.toml
 /saves-backup/
 /config.local.json
+/tools-cache/
+/Setup.exe

@@ -86,10 +86,21 @@ if ($ds4w) {
     $ds4w | Stop-Process -Force
     Start-Sleep -Milliseconds 500
 }
-$probe = & python -I (Join-Path $PSScriptRoot "pad_probe.py") --positional 2>&1 |
-         Where-Object { $_ -match '^\s+\[\d+\]' }
-if ($probe) { "Controller(s):"; $probe | ForEach-Object { "  " + $_.Trim() } }
-else { "No controller connected yet -- switch it on (8BitDo: Start), it is picked up while the game runs." }
+# The controller list and the session summary are Python helpers: optional. Setup deletes its
+# build tools (Python among them) after the build, so a player's PC may have none; the game
+# starts the same without them. Not the Microsoft Store's "python" stand-in (it only offers an install).
+$pyCmd = Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
+         Where-Object { $_.Source -notlike "*\WindowsApps\*" } | Select-Object -First 1
+function Invoke-PyHelper([string[]]$PyArgs) {
+    if (-not $pyCmd) { return }
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { & $pyCmd.Source @PyArgs 2>&1 | ForEach-Object { "$_" } } catch {} finally { $ErrorActionPreference = $eap }
+}
+if ($pyCmd) {
+    $probe = Invoke-PyHelper @("-I", (Join-Path $PSScriptRoot "pad_probe.py"), "--positional") | Where-Object { $_ -match '^\s+\[\d+\]' }
+    if ($probe) { "Controller(s):"; $probe | ForEach-Object { "  " + $_.Trim() } }
+    else { "No controller connected yet -- switch it on (8BitDo: Start), it is picked up while the game runs." }
+}
 
 # controls file: input.toml in the project folder (survives rebuilds), first made from the example
 $inputToml = Join-Path $root "input.toml"
@@ -254,5 +265,5 @@ if (-not $NoLog -and (Test-Path "$out\playlog.tsv")) {
     $cap = 60
     $capLine = Select-String -Path "$out\stderr.log" -Pattern 'frame cap (off|[\d.]+)' -ErrorAction SilentlyContinue | Select-Object -Last 1
     if ($capLine) { $c = $capLine.Matches[0].Groups[1].Value; $cap = $(if ($c -eq 'off') { 0 } else { [double]$c }) }
-    & python -I (Join-Path $PSScriptRoot "playlog_report.py") $out --cap $cap
+    Invoke-PyHelper @("-I", (Join-Path $PSScriptRoot "playlog_report.py"), $out, "--cap", [string]$cap)
 }

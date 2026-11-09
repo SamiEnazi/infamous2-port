@@ -1,5 +1,5 @@
-# Shared by tools\setup.ps1 (the window) and tools\setup_build.ps1 (the work): reading a
-# PARAM.SFO, and the list of checks (this PC, the tools, the player's game and RPCS3).
+# Shared by Setup (tools\setup.ps1, Setup.exe) and the scripts it runs: reading a PARAM.SFO, the
+# list of checks (this PC, the build tools, the player's game and RPCS3), downloads, tool paths.
 
 # PARAM.SFO -> hashtable (strings and integers)
 function Read-Sfo([string]$Path) {
@@ -29,7 +29,64 @@ $script:KnownTitles = @{
     "BCUS98125" = "USA disc"; "NPUA80638" = "USA PSN"
 }
 
-# One row per check: Ok (true/false/$null = warning), Name, Detail
+# A build tool's path, the way tools\port_paths.py finds it for Setup: environment variable
+# (PORT_PYTHON ...), then config.local.json, then tools-cache\ (fetch_tools.ps1). PORT_ONLY_CACHE=1:
+# only the environment variable and tools-cache. Setup never uses tools found on PATH: it downloads
+# its own, so every player builds with the same versions. $null when not there (yet).
+function Get-PortTool([string]$Key) {
+    $root = Split-Path -Parent $PSScriptRoot
+    $v = [Environment]::GetEnvironmentVariable("PORT_" + $Key.ToUpper())
+    if (-not $v -and $env:PORT_ONLY_CACHE -ne "1") {
+        $cfg = Join-Path $root "config.local.json"
+        if (Test-Path $cfg) { try { $v = (Get-Content $cfg -Raw | ConvertFrom-Json).$Key } catch {} }
+    }
+    if (-not $v) {
+        $cache = @{ python = "python\python.exe"; cmake = "cmake\bin\cmake.exe"; ninja = "ninja\ninja.exe"; llvm = "llvm"; msvc = "msvc"; sdk = "sdk" }[$Key]
+        if ($cache) {
+            $dir = Join-Path (Join-Path $root "tools-cache") ($cache -split '\\')[0]
+            if (Test-Path (Join-Path $dir ".ready")) { $v = Join-Path (Join-Path $root "tools-cache") $cache }
+        }
+    }
+    $v
+}
+
+# Download a file: progress lines ("  progress: 45% <what> (12 of 27 MB)"), retried once, checked
+# against a SHA-256 when one is given. Only what Windows has (.NET's HttpWebRequest).
+function Save-Url([string]$Url, [string]$Out, [string]$What, [string]$Sha256 = "", [long]$Size = 0) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    for ($try = 1; $try -le 2; $try++) {
+        try {
+            $req = [Net.HttpWebRequest]::Create($Url)
+            $req.UserAgent = "inFAMOUS2-port-setup"; $req.Timeout = 60000; $req.ReadWriteTimeout = 120000
+            $resp = $req.GetResponse()
+            $total = if ($resp.ContentLength -gt 0) { $resp.ContentLength } else { $Size }
+            $in = $resp.GetResponseStream(); $fs = [IO.File]::Create("$Out.part")
+            try {
+                $buf = New-Object byte[] 1048576; $done = 0L; $last = Get-Date
+                while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                    $fs.Write($buf, 0, $n); $done += $n
+                    if (((Get-Date) - $last).TotalSeconds -ge 1) {
+                        $last = Get-Date
+                        if ($total -gt 0) { "  progress: {0}% {1} ({2:N0} of {3:N0} MB)" -f [int][Math]::Min(99, 100 * $done / $total), $What, ($done / 1MB), ($total / 1MB) }
+                        else { "  {0}: {1:N0} MB" -f $What, ($done / 1MB) }
+                    }
+                }
+            } finally { $fs.Close(); $in.Close(); $resp.Close() }
+            if ($Sha256) {
+                $h = (Get-FileHash "$Out.part" -Algorithm SHA256).Hash
+                if ($h -ne $Sha256) { Remove-Item "$Out.part"; throw "$What has the wrong SHA-256 ($h)" }
+            }
+            Move-Item -Force "$Out.part" $Out
+            return
+        } catch {
+            if ($try -eq 2) { throw "downloading $What failed: $($_.Exception.Message). Check the internet connection and try again." }
+            "  ${What}: $($_.Exception.Message) -- trying once more"
+            Start-Sleep -Seconds 3
+        }
+    }
+}
+
+# One row per check: Ok (true/false/$null = a note, never blocking), Name, Detail
 function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     $root = Split-Path -Parent $PSScriptRoot
     $rows = New-Object System.Collections.ArrayList
@@ -43,31 +100,21 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     Add $(if ($ram -ge 16) { $true } else { $null }) "Memory" "$ram GB$(if ($ram -lt 16) { ' (16 GB or more recommended: the build is large)' })"
     $drive = (Get-Item $root).PSDrive
     $free = [math]::Round($drive.Free / 1GB)
-    Add $(if ($free -ge 30) { $true } else { $null }) "Free disk space on $($drive.Name):" "$free GB (the build needs about 15-25 GB)"
+    Add $(if ($free -ge 30) { $true } else { $null }) "Free disk space on $($drive.Name):" "$free GB (the build needs about 15 GB while it runs, 4 GB after)"
     $vk = Test-Path (Join-Path $env:WINDIR "System32\vulkan-1.dll")
     Add $vk "Vulkan graphics driver" $(if ($vk) { "found" } else { "update your graphics driver (NVIDIA, AMD or Intel)" })
 
-    # --- tools
-    $git = Get-Command git -ErrorAction SilentlyContinue
-    Add ([bool]$git) "Git" $(if ($git) { $git.Source } else { "missing (winget install Git.Git)" })
-    $py = Get-Command python -ErrorAction SilentlyContinue
-    $pyv = $null; if ($py) { $pyv = (& $py.Source -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null) }
-    $pyok = $pyv -and ([version]$pyv -ge [version]"3.10")
-    Add $pyok "Python 3.10+" $(if ($pyok) { "$pyv ($($py.Source))" } else { "missing (winget install Python.Python.3.12)" })
-    foreach ($t in @(@("vcvars", "Visual Studio 2022 C++ build tools", "winget install Microsoft.VisualStudio.2022.BuildTools"),
-                     @("llvm", "LLVM (clang-cl)", "winget install LLVM.LLVM"),
-                     @("ninja", "Ninja", "winget install Ninja-build.Ninja"))) {
-        $v = $null
-        if ($pyok) { $v = (& $py.Source (Join-Path $PSScriptRoot "port_paths.py") $t[0] 2>$null) }
-        Add ([bool]$v) $t[1] $(if ($v) { $v } else { "missing ($($t[2]))" })
+    # --- the build tools: downloaded into tools-cache\ during the build (tools\fetch_tools.ps1) and
+    # deleted after it, so a missing one is a note, never a blocker. Nothing is installed.
+    $later = "downloaded during the build, deleted after it"
+    foreach ($t in @(@("python", "Python", "CPython 3.12, ~47 MB"), @("cmake", "CMake", "CMake 3.31, ~47 MB"),
+                     @("ninja", "Ninja", "Ninja 1.11, under 1 MB"), @("llvm", "LLVM (clang-cl)", "LLVM 22.1.8, ~862 MB"))) {
+        $p = Get-PortTool $t[0]
+        Add $(if ($p) { $true } else { $null }) $t[1] $(if ($p) { $p } else { "$later ($($t[2]))" })
     }
-    $cm = Get-Command cmake -ErrorAction SilentlyContinue
-    $vsCmake = $false
-    if (-not $cm -and $pyok) {
-        $vc = (& $py.Source (Join-Path $PSScriptRoot "port_paths.py") vcvars 2>$null)
-        if ($vc) { $vsCmake = Test-Path (Join-Path (Split-Path (Split-Path (Split-Path (Split-Path $vc)))) "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe") }
-    }
-    Add ($cm -or $vsCmake) "CMake" $(if ($cm) { $cm.Source } elseif ($vsCmake) { "Visual Studio's" } else { "missing (winget install Kitware.CMake)" })
+    $msvc = (Get-PortTool msvc) -and (Get-PortTool sdk)
+    $vcvars = if ($env:PORT_ONLY_CACHE -ne "1") { Get-PortTool vcvars } else { $null }
+    Add $(if ($msvc -or $vcvars) { $true } else { $null }) "MSVC + Windows SDK" $(if ($msvc) { "tools-cache\msvc, tools-cache\sdk" } elseif ($vcvars) { $vcvars } else { "$later (Microsoft's C++ headers and libraries, ~400 MB)" })
 
     # --- the player's game
     $title = $null
