@@ -14,3 +14,11 @@ function Get-PortPath([string]$Key, [switch]$Optional) {
     }
     $v
 }
+
+# The PS3 firmware files the game reads while it runs (fonts, system data): Setup's copy in
+# game\dev_flash (then RPCS3 is no longer needed), else RPCS3's own dev_flash.
+function Get-DevFlash {
+    $own = Join-Path (Split-Path -Parent $PSScriptRoot) "game\dev_flash"
+    if (Test-Path (Join-Path $own "sys")) { return $own }
+    Join-Path (Get-PortPath rpcs3) "dev_flash"
+}

@@ -48,7 +48,7 @@ Remove-Item "$out\settings.ini" -ErrorAction SilentlyContinue   # a re-used tag 
 $vars = @{
     PS3_VFS_ROOT          = "$game\disc"
     PS3_HDD0_ROOT         = "$game\dev_hdd0"
-    PS3_DEV_FLASH         = (Join-Path (Get-PortPath rpcs3) "dev_flash")
+    PS3_DEV_FLASH         = (Get-DevFlash)
     PS3_GAMEDATA_ROOT     = $gamedata
     PS3_TITLE             = "inFAMOUS 2"
     PS3_LANG              = "en"          # the EU disc ships the English dub

@@ -30,8 +30,10 @@ optimised build; a one-click training step for that is planned.
   - The disc's files: the folder that holds `PS3_GAME`.
   - The **1.04 update** installed in RPCS3.
 - **[RPCS3](https://rpcs3.net)** with the **PS3 firmware** installed (*File > Install Firmware*, using
-  `PS3UPDAT.PUP` from playstation.com). Setup uses it to decrypt your game, and the port reads the
-  firmware's fonts and system files.
+  `PS3UPDAT.PUP` from playstation.com). It is needed **only during Setup**: Setup uses it to decrypt
+  your game, and copies the update, the firmware files the game reads (fonts, system data) and the
+  game's HDD install into the port's folder. After Setup you can remove RPCS3; keep your game disc
+  folder where it is.
   - Start the game once in RPCS3 until the main menu: it installs 2.4 GB of data that Setup copies.
 - **A PC with:**
   - Windows 10/11 64-bit

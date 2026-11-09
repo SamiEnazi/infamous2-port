@@ -1,7 +1,8 @@
 # The work behind Setup.cmd (also usable on its own):
 #   1. check this PC, the tools, the game and RPCS3            (tools\setup_common.ps1)
-#   2. link the player's game into game\ (nothing big is copied, except the 2.4 GB HDD install)
-#   3. decrypt the 1.04 EBOOT with the player's RPCS3          -> eboot\EBOOT_upd104.elf
+#   2. your game: the disc folder linked into game\disc; the 1.04 update, the firmware files and
+#      the game's HDD install copied into game\ (so RPCS3 is not needed after Setup)
+#   3. decrypt the 1.04 EBOOT with RPCS3                       -> eboot\EBOOT_upd104.elf
 #   4. Python tools                                            -> work\venv
 #   5. SDL2, Vulkan headers, glslang                           -> deps\
 #   6. the exe's icon from the player's own ICON0.PNG          -> work\icon\app.ico
@@ -19,6 +20,22 @@ $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "setup_common.ps1")
 $sw = [Diagnostics.Stopwatch]::StartNew()
 function Step([int]$n, [string]$text) { "== [$n/8] $text   ($([int]$sw.Elapsed.TotalMinutes) min so far)" }
+# Native tools (git, pip, cmd, python, robocopy) write progress and warnings to stderr; under
+# "Stop" with the output redirected to Setup's log, Windows PowerShell would turn the first such
+# line into a failure. Run them under "Continue", keep their lines, judge them by exit code.
+function Invoke-Native([scriptblock]$Cmd) {
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { & $Cmd 2>&1 | ForEach-Object { "    $_" } } finally { $ErrorActionPreference = $eap }
+}
+function Copy-Tree([string]$Src, [string]$Dst, [string]$What) {
+    if (Test-Path $Dst) {
+        $i = Get-Item $Dst -Force
+        if ($i.LinkType -eq "Junction") { cmd /c rmdir "$Dst" | Out-Null }   # an older Setup linked it
+    }
+    "  copying $What"
+    Invoke-Native { robocopy $Src $Dst /E /NFL /NDL /NJH /NJS /NP } | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "copying $Src failed (robocopy $LASTEXITCODE)" }
+}
 $Disc = (Resolve-Path $Disc).Path.TrimEnd('\'); $Rpcs3 = (Resolve-Path $Rpcs3).Path.TrimEnd('\')
 
 Step 1 "checking"
@@ -28,12 +45,13 @@ foreach ($sub in "toolkit", "community\erikomis-infamous2-recomp") {
     $p = Join-Path $root $sub
     if (-not (Test-Path (Join-Path $p ".git"))) {
         if (-not (Test-Path (Join-Path $root ".git"))) { throw "$sub is missing: get the source with 'git clone --recursive' (the ZIP download lacks the submodules)" }
-        & git -C $root submodule update --init -- ($sub -replace '\\', '/')
+        Invoke-Native { git -C $root submodule update --init -- ($sub -replace '\\', '/') }
         if ($LASTEXITCODE) { throw "git submodule update --init $sub failed" }
     }
-    if ((& git -C $p config --get core.autocrlf) -ne "false") {
-        & git -C $p config core.autocrlf false
-        & git -C $p rm -rq --cached . ; & git -C $p reset -q --hard
+    if ((Invoke-Native { git -C $p config --get core.autocrlf }) -notmatch 'false') {
+        Invoke-Native { git -C $p config core.autocrlf false }
+        Invoke-Native { git -C $p rm -rq --cached . } | Out-Null
+        Invoke-Native { git -C $p reset -q --hard }
         "  $sub checked out with LF line ends"
     }
 }
@@ -47,30 +65,24 @@ if (Test-Path $cfgPath) { (Get-Content $cfgPath -Raw | ConvertFrom-Json).psobjec
 $cfg["rpcs3"] = $Rpcs3
 [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json))
 
-Step 2 "linking your game into game\"
+Step 2 "your game: the disc linked, the update, firmware files and HDD install copied into game\"
 $game = Join-Path $root "game"
 New-Item -ItemType Directory -Force (Join-Path $game "dev_hdd0\game"), (Join-Path $game "gamedata") | Out-Null
-function Set-Link([string]$Link, [string]$Target) {
-    if (Test-Path $Link) {
-        $i = Get-Item $Link -Force
-        if ($i.LinkType -ne "Junction") { "  $Link is a real folder: kept as it is"; return }
-        if (@($i.Target) -contains $Target) { "  $Link -> $Target"; return }
-        cmd /c rmdir "$Link" | Out-Null
-    }
-    New-Item -ItemType Junction -Path $Link -Target $Target | Out-Null
-    "  $Link -> $Target"
+$discLink = Join-Path $game "disc"
+if (Test-Path $discLink) {
+    $i = Get-Item $discLink -Force
+    if ($i.LinkType -eq "Junction" -and -not (@($i.Target) -contains $Disc)) { cmd /c rmdir "$discLink" | Out-Null }
 }
-Set-Link (Join-Path $game "disc") $Disc
-Set-Link (Join-Path $game "dev_hdd0\game\$title") (Join-Path $Rpcs3 "dev_hdd0\game\$title")
-# The game copies 2.4 GB to the HDD on its first boot (<title>_INSTALL). A copy of RPCS3's keeps
-# the two apart; without one the port's first boot does the install itself.
+if (-not (Test-Path $discLink)) { New-Item -ItemType Junction -Path $discLink -Target $Disc | Out-Null }
+"  $discLink -> $Disc (keep your disc folder where it is)"
+Copy-Tree (Join-Path $Rpcs3 "dev_hdd0\game\$title") (Join-Path $game "dev_hdd0\game\$title") "the 1.04 update (0.2 GB)"
+Copy-Tree (Join-Path $Rpcs3 "dev_flash") (Join-Path $game "dev_flash") "the PS3 firmware files the game reads (0.2 GB)"
+# The game copies 2.4 GB to the HDD on its first boot (<title>_INSTALL): RPCS3's copy if there is
+# one, else the port's first boot does the install itself.
 $inst = Join-Path $Rpcs3 "dev_hdd0\game\${title}_INSTALL"
 $instDst = Join-Path $game "dev_hdd0\game\${title}_INSTALL"
-if ((Test-Path $inst) -and -not (Test-Path $instDst)) {
-    "  copying the game's HDD install from RPCS3 (2.4 GB)"
-    robocopy $inst $instDst /E /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "copying $inst failed (robocopy $LASTEXITCODE)" }
-} elseif (-not (Test-Path $instDst)) { "  note: no ${title}_INSTALL in RPCS3 -- the port's first boot installs it (if that fails: start the game once in RPCS3)" }
+if ((Test-Path $inst) -and -not (Test-Path $instDst)) { Copy-Tree $inst $instDst "the game's HDD install (2.4 GB)" }
+elseif (-not (Test-Path $instDst)) { "  note: no ${title}_INSTALL in RPCS3 -- the port's first boot installs it (if that fails: start the game once in RPCS3)" }
 
 Step 3 "decrypting the game's 1.04 EBOOT with RPCS3"
 $eb = Join-Path $root "eboot"
@@ -87,14 +99,18 @@ if (-not (Test-Path $elf)) {
 
 Step 4 "Python tools (work\venv)"
 $venvPy = Join-Path $root "work\venv\Scripts\python.exe"
-if (-not (Test-Path $venvPy)) { & python -m venv (Join-Path $root "work\venv"); if ($LASTEXITCODE) { throw "python -m venv failed" } }
-& $venvPy -m pip install --disable-pip-version-check -q -r (Join-Path $root "toolkit\requirements.txt")
+if (-not (Test-Path $venvPy)) {
+    Invoke-Native { python -m venv (Join-Path $root "work\venv") }
+    if ($LASTEXITCODE) { throw "python -m venv failed" }
+}
+Invoke-Native { & $venvPy -m pip install --disable-pip-version-check -q -r (Join-Path $root "toolkit\requirements.txt") }
 if ($LASTEXITCODE) { throw "pip install failed" }
 
 Step 5 "SDL2, Vulkan headers and glslang (download, then build glslang: a few minutes)"
-& (Join-Path $PSScriptRoot "fetch_deps.ps1")
+Invoke-Native { & (Join-Path $PSScriptRoot "fetch_deps.ps1") }
+if (-not (Test-Path (Join-Path $root "deps\SDL2-2.30.10\cmake"))) { throw "fetching the libraries failed (see above)" }
 if (-not (Test-Path (Join-Path $root "deps\glslang-install\lib\cmake\glslang"))) {
-    cmd /c "`"$(Join-Path $PSScriptRoot 'build_deps.cmd')`""
+    Invoke-Native { cmd /c "`"$(Join-Path $PSScriptRoot 'build_deps.cmd')`"" }
     if ($LASTEXITCODE) { throw "building glslang failed" }
 }
 
@@ -102,7 +118,7 @@ Step 6 "the exe's icon (from your copy's ICON0.PNG)"
 try { & (Join-Path $PSScriptRoot "make_icon.ps1") -Icon0 (Join-Path $Disc "PS3_GAME\ICON0.PNG") } catch { "  no icon: $_ (the game still builds)" }
 
 Step 7 "translating and compiling the game (the long part: 15-40 minutes)"
-& $venvPy -I (Join-Path $PSScriptRoot "rebuild_win.py")
+Invoke-Native { & $venvPy -I (Join-Path $PSScriptRoot "rebuild_win.py") }
 if ($LASTEXITCODE) { throw "the build failed: see work\logs\ (python -I tools\build_errors.py work\logs\compile.log)" }
 $exe = Join-Path $root "work\port\build\Infamous2Recomp.exe"
 if (-not (Test-Path $exe)) { throw "no $exe after the build" }
@@ -121,5 +137,5 @@ if (-not $NoShortcut) {
     $lnk.Save()
     "  $lnkPath"
 }
-"== done in $([int]$sw.Elapsed.TotalMinutes) min: play with the desktop shortcut or 'Play inFAMOUS 2.cmd'"
+"== done in $([int]$sw.Elapsed.TotalMinutes) min: play with the desktop shortcut or 'Play inFAMOUS 2.cmd'. RPCS3 is no longer needed."
 exit 0
