@@ -12,6 +12,8 @@
 #   press <mask> [polls]                          one press (PAD_FILE; polls = frames held, default 40)
 #   sleep <s>
 #   anchor                                        t=0 of the measured part: anchor.flag + run.json anchor_s
+#   anchorafter <s>                               t=0 = <s> after the game-log time of the last matched 'wait' line
+#                                                 (the opening cutscenes run on real time: +-0.1 s across exes)
 #   anchorfile [timeout_s]                        t=0 = when the GAME created anchor.flag (PS3RECOMP_ENG_WORLD_MARK=<rec>\anchor.flag:
 #                                                 the first world frame, > 2500 draws; frame-exact, no driver latency)
 #   at    <s>                                     sleep until anchor + <s>
@@ -41,6 +43,7 @@ function Note([string]$step, [string]$info) { "{0}`t{1}`t{2}" -f (Now), $step, $
 $pad = Join-Path $Rec "pad.txt"
 $anchorFlag = Join-Path $Rec "anchor.flag"
 $script:anchorMs = -1
+$script:lastLineMs = -1
 
 # live stderr reader: lines "<ms>\t<text>", read incrementally
 $script:lines = New-Object System.Collections.Generic.List[string]
@@ -67,7 +70,7 @@ function WaitLine([string]$re, [double]$timeout) {
         Pump
         for (; $script:cursor -lt $script:lines.Count; $script:cursor++) {
             $l = $script:lines[$script:cursor]
-            if ($l -match $re) { $script:cursor++; return $l }
+            if ($l -match $re) { $script:cursor++; $script:lastLineMs = [int](($l -split "`t")[0]); return $l }
         }
         Start-Sleep -Milliseconds 40
     }
@@ -154,6 +157,16 @@ foreach ($raw in $stepsTxt) {
             $script:anchorMs = Now
             Set-Content -Path $anchorFlag -Value $script:anchorMs
             Note "anchor" "$script:anchorMs"
+        }
+        "anchorafter" {   # t=0 = <s> after the last matched 'wait' line, on the game's own log clock (no screen polling)
+            if ($script:lastLineMs -lt 0) { Note "error" "anchorafter without a matched wait"; Stop "anchorafter: no wait line"; exit 2 }
+            $t = $script:lastLineMs + [int]([double]$rest * 1000)
+            $w = $t - (Now)
+            while ($w -gt 0 -and (Alive)) { Start-Sleep -Milliseconds ([Math]::Min($w, 50)); $w = $t - (Now) }
+            $script:anchorMs = Now
+            Set-Content -Path $anchorFlag -Value $script:anchorMs
+            Note "anchor" "$script:anchorMs"
+            Note "anchorafter" ("line ms {0} + {1} s" -f $script:lastLineMs, $rest)
         }
         "anchorfile" {
             $to = if ($rest) { [double]$rest } else { 300 }; $dl = (Get-Date).AddSeconds($to)

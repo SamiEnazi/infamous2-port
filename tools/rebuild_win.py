@@ -30,6 +30,10 @@ ELF_SRC = os.path.join(ROOT, "eboot", "EBOOT_upd104.elf")
 ELF = os.path.join(WORK, "EBOOT.elf")
 PY = os.path.join(WORK, "venv", "Scripts", "python.exe")
 DEPS = os.path.join(ROOT, "deps")
+# PORT_SPU_REWRITES: another native SPU rewrite directory (an agent's own copy; holds natives.txt + *.c),
+# PORT_SPU_NATIVES_FILE: another natives.txt. Defaults: work/rewrites/spu and its natives.txt.
+SPU_REWRITES = os.path.abspath(os.environ.get("PORT_SPU_REWRITES") or os.path.join(WORK, "rewrites", "spu"))
+SPU_NATIVES = os.path.abspath(os.environ.get("PORT_SPU_NATIVES_FILE") or os.path.join(SPU_REWRITES, "natives.txt"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import port_paths   # RPCS3 / Visual Studio / LLVM / Ninja on this PC (config.local.json, Setup.cmd)
 
@@ -103,9 +107,8 @@ def run(step, cmd, cwd=PORT, env_defaults=None):
             # Native rewrites of lifted SPU functions (game-derived C in work/rewrites/spu, gitignored):
             # the lift hooks the functions natives.txt names; step_compile builds the rewrites.
             # PORT_SPU_NATIVES=0 = no hooks (and no rewrites compiled).
-            nat = os.path.join(WORK, "rewrites", "spu", "natives.txt")
-            if os.environ.get("PORT_SPU_NATIVES", "1") != "0" and os.path.isfile(nat):
-                env.setdefault("SPU_NATIVE_FILE", nat)
+            if os.environ.get("PORT_SPU_NATIVES", "1") != "0" and os.path.isfile(SPU_NATIVES):
+                env.setdefault("SPU_NATIVE_FILE", SPU_NATIVES)
         p = subprocess.run(cmd, cwd=cwd, stdout=lf, stderr=subprocess.STDOUT, env=env)
         lf.write(f"[exit {p.returncode} after {time.time() - t0:.1f}s]\n")
     if p.returncode != 0:
@@ -213,7 +216,7 @@ def spu_rewrites():
     each rewrite has its own statics), only when the lift hooked them (a lifted spu_recomp.c calls
     spu_native_entry); else those directories are removed."""
     spu = os.path.join(PORT, "spu")
-    src = os.path.join(WORK, "rewrites", "spu")
+    src = SPU_REWRITES
     hooked = False
     for root_, _, files in os.walk(spu):
         if "spu_recomp.c" in files and not os.path.basename(root_).startswith("zz_native_"):
@@ -327,6 +330,43 @@ def step_compile():
     print("  built:", os.path.join(build, "Infamous2Recomp.exe"))
 
 
+# The three SPU code bodies libsre's SPURS kernel DMAs into local store (system service,
+# taskset policy module, ...): offset in firmware 4.93's module image, size, the rest of the
+# --body spec (LS address, entry, ...), and the SHA-256 of their bytes there. Other firmware
+# versions put them elsewhere (an older 4.9x libsre has them 0x100 earlier, GitHub issue #1),
+# and a lift registered at the wrong address never matches what the kernel loads, so they
+# ran on the SPU interpreter. Found by content instead; not found = interpreter, as before.
+LIBSRE_BODIES = (
+    (0x21480, 0x2200, "0xA00:0xA00:0x2110", "fbe18b5448c86bda5545b387b55de37022d6992317d785a526f38a5b4c7cf81a"),
+    (0x23680, 0x1E40, "0xA00:0xA00:0x1C80", "c514efddd5d2a9a5f4e5c206deda3698c7726fd564762da33f49738ca3592cf2"),
+    (0x2A180, 0x3DA0, "0xA00:0xA00:0x3D00", "b4bc8e292ee05064e3edd7111d2aeb20bff4c76bde82a1e148d2efb7d0795539"),
+)
+
+
+def libsre_body_args():
+    with open(os.path.join(PORT, "lle", "libsre", "meta", "libsre_image.bin"), "rb") as f:
+        img = f.read()
+    args = []
+    for off, size, rest, sha in LIBSRE_BODIES:
+        found = None
+        # nearest first: SPU code is 16-byte aligned; a shifted module finds it in a few steps
+        for k in range(0, len(img) // 0x10 + 1):
+            for o in ((off,) if k == 0 else (off - k * 0x10, off + k * 0x10)):
+                if 0 <= o <= len(img) - size and hashlib.sha256(img[o:o + size]).hexdigest() == sha:
+                    found = o
+                    break
+            if found is not None or (off - k * 0x10 < 0 and off + k * 0x10 > len(img) - size):
+                break
+        if found is None:
+            print(f"  libsre SPU body {off:#x}: not in this firmware's libsre, it runs on the SPU "
+                  "interpreter (slower; firmware 4.93 is the tested one)")
+            continue
+        if found != off:
+            print(f"  libsre SPU body {off:#x}: at {found:#x} in this firmware's libsre")
+        args += ["--body", f"{found:#x}:{size:#x}:{rest}"]
+    return args
+
+
 def step_firmware():
     fresh("lle", "lle_spu")
     bases = {"liblv2": "0x30000000", "libsysmodule": "0x30180000", "libsre": "0x30100000"}
@@ -334,11 +374,8 @@ def step_firmware():
         run("firmware", [PY, T("lift_firmware_module.py"), os.path.join(FW, m + ".prx"),
                          "--base", bases[m], "--out", os.path.join("lle", m)])
     run("firmware", [PY, T("lift_firmware_spu.py"), "--module-dir", "lle/libsre",
-                     "--base", "0x30100000", "--name", "libsre", "--first-image-id", "100",
-                     "--body", "0x21480:0x2200:0xA00:0xA00:0x2110",
-                     "--body", "0x23680:0x1E40:0xA00:0xA00:0x1C80",
-                     "--body", "0x2A180:0x3DA0:0xA00:0xA00:0x3D00",
-                     "--out", "lle_spu"])
+                     "--base", "0x30100000", "--name", "libsre", "--first-image-id", "100"]
+        + libsre_body_args() + ["--out", "lle_spu"])
 
 
 def step_ppu():

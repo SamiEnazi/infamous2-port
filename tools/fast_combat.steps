@@ -2,8 +2,9 @@
 # left/right in the burning pier view, aim + fire, the dock walk, aim + fire) with the same inputs, but
 #  - the 96 s opening montage and the 12 s splash are the 4 s placeholder movie (fastmovies),
 #  - the title is passed by pressing START until the montage starts (no fixed 35 s wait),
-#  - the measured part is timed from the moment the "look up" tutorial prompt is on screen (screen
-#    state, work\fast_refs\combat_lookup.png), not from boot: old combat time T = anchor + (T - 238).
+#  - the measured part is timed from the end of the city-falls cutscene, just before the "look up" tutorial
+#    prompt (was a screen match, work\fast_refs\combat_lookup.png; now the game's log clock, see below),
+#    not from boot: old combat time T = anchor + (T - 238).
 # Windows (old -> anchor): 262-270 -> 24-32, 322-352 -> 84-114, 354-378 -> 116-140.
 #! seconds 330
 #! fastmovies 1
@@ -14,9 +15,12 @@ wait load_menu_catalog 90
 spam 0x0008 1.5 intro_montage 60
 # the prompt is matched only after the city-falls cutscene began (its subtitle file is opened): the boat
 # cutscene's sky matched the prompt reference with diff 8.9 in wake's wko-off (anchor 37.8 s, frozen prompt)
+# 2026-11-09 (edge2): the screen match (the statue shot at the end of the city-falls cutscene) missed in ~1 of 3
+# runs on new builds; the cutscene runs on real time (matches came 17.8-18.0 s after the subtitle open in every
+# good run, the next log lines at +20.79 s in good AND timed-out runs), so t=0 is now the subtitle-open log time
+# + 17.9 s on the game's own clock (fast_driver 'anchorafter'): same game moment, no screen polling.
 wait h_jbi_cityfalls 200
-waitimg combat_lookup 300,20,700,90 6 120
-anchor
+anchorafter 17.9
 at 28
 shot a28
 at 62

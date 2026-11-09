@@ -14,7 +14,7 @@ $wins = @(for ($w = 2; $w + $Window -le $L; $w += $Window) { "{0}:{1}" -f $w, ($
 $o = @("# Replay of work\routes\$Route.pad ($L s, from the $From); made by tools\make_route_steps.ps1")
 if ($From -eq "opening") {
     $o += "#! seconds $($L + 200)", "#! anchor_range 60:130", "#! replay work\routes\$Route.pad", "#! windows $($wins -join ',')"
-    $o += "wait load_menu_catalog 90", "spam 0x0008 1.5 intro_montage 60", "wait h_jbi_cityfalls 200", "waitimg combat_lookup 300,20,700,90 6 120", "anchor"
+    $o += "wait load_menu_catalog 90", "spam 0x0008 1.5 intro_montage 60", "wait h_jbi_cityfalls 200", "anchorafter 17.9"
 } else {
     $o += "#! seconds $($L + 160)", "#! anchor_range 55:100", "#! savefrom work\saves\first-save\gamedata", "#! replay work\routes\$Route.pad", "#! windows $($wins -join ',')"
     $o += "wait v_02_city_intro 120", "sleep 2", "waitimg city_hud 40,20,340,130 15 120", "sleep 2", "anchor"
