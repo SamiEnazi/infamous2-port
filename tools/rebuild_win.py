@@ -136,6 +136,9 @@ def step_inputs():
 
 
 OUR_PORT_SRC = os.path.join(ROOT, "port_src")          # new files we add to the port
+CHEATS = os.path.join(WORK, "cheats")                  # the cheats' title side: the working copy
+if not os.path.isfile(os.path.join(CHEATS, "cheats.cpp")):   # ... or the published one (cheats/)
+    CHEATS = os.path.join(ROOT, "cheats")
 PORT_PATCHES = os.path.join(ROOT, "patches", "port")   # our edits to community port files
 
 
@@ -149,6 +152,9 @@ def step_port():
     pairs += [(os.path.join(tsrc, f), os.path.join(PORT, "tools", f)) for f in sorted(os.listdir(tsrc))
               if f.endswith((".py", ".sh")) or f in TOOL_DATA]
     pairs += [(os.path.join(OUR_PORT_SRC, f), os.path.join(PORT, f)) for f in sorted(os.listdir(OUR_PORT_SRC))]
+    # The in-game Cheats page's title side (cheats agent, 2026-11-09): title knowledge, so it
+    # lives in work/cheats (gitignored), not port_src; patches/port 0008 builds it when present.
+    pairs += [(os.path.join(CHEATS, "cheats.cpp"), os.path.join(PORT, "cheats.cpp"))]
     patched = set()
     for p in sorted(os.listdir(PORT_PATCHES)):
         if p.endswith(".patch"):
@@ -318,6 +324,13 @@ def step_ppu():
     if os.environ.get("PORT_WAKE_HOOKS", "0") != "0":
         fast["PPU_WAKE_HOOKS"] = ("note:0054C744:r4:16,note:0054CEB8:r9:16,"
                                   "progress:0029A9B4,pass:0029AB44")
+    # The cheats' hook slots and instruction alternatives (toolkit agent/cheats; a lifter
+    # without the feature ignores the variables): empty slots cost a load and a never-taken
+    # branch. PORT_CHEATS=0 = a lift without them (the Cheats page then says so).
+    if os.environ.get("PORT_CHEATS", "1") != "0":
+        for var, f in (("PPU_HOOK_FILE", "hooks.txt"), ("PPU_PATCH_FILE", "patches.txt")):
+            if os.path.isfile(os.path.join(CHEATS, f)):
+                fast[var] = os.path.join(CHEATS, f)
     run("ppu", [PY, T("ppu_lifter.py"), ELF,
                 "--functions", "out/EBOOT.functions.json", "--hle-stubs", "out/EBOOT.imports.json",
                 "--code-end", "0x742e18", "--max-chunk-lines", "150000",

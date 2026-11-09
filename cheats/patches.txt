@@ -1,0 +1,10 @@
+# inFAMOUS 2 v1.04 (PPU-41a7d047c573c78c0307506c9d1b52d15a66e4f5): run-time instruction
+# alternatives (PPU_PATCH_FILE, toolkit tools/ppu_fastpath.py), used by cheats.cpp.
+# <address> <slot> <original word> <alternative>[,<alternative>...]   (slot value 0 = original)
+# The words are the community Artemis codes by bungholio for this exact EBOOT
+# (bucanero/ArtemisPS3 docs/codes "inFamous 2 BCES01443 01.04.ncl"), turned into switchable
+# alternatives; the originals were checked against our EBOOT (work\cheats\ppcdis.py).
+# Title knowledge for v1.04, published with the port (credits: cheats/NOTES.md).
+0022A104 1 3C003F80 3C004000,3C004040,3C0040A0,3C004120   # jump height: lis r0,1.0f -> 2, 3, 5, 10
+001D99BC 2 3CC03F80 3CC00000,3CC03E80,3CC03F00,3CC04000   # AI movement speed: lis r6,1.0f -> 0, 0.25, 0.5, 2
+001F4764 3 3C00BF80 3C000000                               # "most enemies never attack": lis r0,-1.0f -> 0

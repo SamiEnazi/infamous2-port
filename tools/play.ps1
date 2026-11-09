@@ -115,8 +115,16 @@ $vars = @{
     # stderr goes to the session's stderr.log, and a redirected stderr turns the per-wait
     # diagnostics on (ps3_log.h): ~500 lines/s through one FILE lock. Off for play.
     PS3_VERBOSE                 = $(if ($env:PS3_VERBOSE) { $env:PS3_VERBOSE } else { "0" })
-    # defaults below settings.ini (the in-game menu); -Fps/-Volume/-Fullscreen override both
-    PS3_OVERLAY_DEFAULTS        = "PS3RECOMP_FPS_CAP=60;PS3_AUDIO_VOLUME=100"
+    # defaults below settings.ini (the in-game menu); -Fps/-Volume/-Fullscreen override both.
+    # The picture defaults are the best look for the cost (Sami, 2026-11-09: "best visuals to
+    # performance ratio, 60-70+ fps"): softer sun shadows, full-res AO at 125%, dithered light,
+    # full-resolution effects, light sharpening; together ~1 ms of GPU per frame (city ~88 -> ~83
+    # fps uncapped on an RTX 2070 Super). The engine's own defaults stay the PS3 look (tests).
+    # Native 1080p (PS3RECOMP_RENDER_SCALE=1.5; inf2-resolution 2026-11-09): heaviest city view
+    # 81 -> 60 fps with the extras (lows 58), other views 81-91; F2 > Graphics sets 720p back.
+    PS3_OVERLAY_DEFAULTS        = ("PS3RECOMP_FPS_CAP=60;PS3_AUDIO_VOLUME=100;PS3RECOMP_RENDER_SCALE=1.5;PS3RECOMP_SOFT_SHADOWS=2;PS3RECOMP_SSAO=2;" +
+                                   "PS3RECOMP_SSAO_STRENGTH=125;PS3RECOMP_LIGHT_DITHER=1;PS3RECOMP_FX_RES=full;PS3RECOMP_SHARPEN=0.1" +
+                                   $(if (Test-Path (Join-Path $root "work\texpacks\fire-smoke-hd")) { ";PS3_MODS=fire-smoke-hd" } else { "" }))
     # Buttons by position (a Nintendo-layout pad's bottom button is Cross, not Circle), and
     # controller input even when the game window does not have focus: SDL otherwise drops it,
     # and a game started from a console window often starts without focus.

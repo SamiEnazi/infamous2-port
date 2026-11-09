@@ -1,0 +1,19 @@
+From: SamiEnazi <85966743+SamiEnazi@users.noreply.github.com>
+Subject: [PATCH] build cheats.cpp when the port tree has it (the in-game Cheats page)
+
+cheats.cpp is title knowledge (work\cheats\, gitignored): rebuild_win copies it in when it
+exists. Without it the build is unchanged.
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f892fce..f09d5ad 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -390,3 +390,9 @@ endif()
+ # Install
+ # ---------------------------------------------------------------------------
+ install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin BUNDLE DESTINATION .)
++
++# The title's cheats (cheats.cpp beside this file: title knowledge, kept out of git; the
++# in-game menu's Cheats page). Built only when the tree has it.
++if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cheats.cpp")
++    target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/cheats.cpp")
++endif()
