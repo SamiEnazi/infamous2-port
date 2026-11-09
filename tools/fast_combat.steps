@@ -1,0 +1,33 @@
+# Fast opening (combat) test (testspeed, 2026-11-08): the same scenes as tools\combat.ps1 (tutorial look
+# left/right in the burning pier view, aim + fire, the dock walk, aim + fire) with the same inputs, but
+#  - the 96 s opening montage and the 12 s splash are the 4 s placeholder movie (fastmovies),
+#  - the title is passed by pressing START until the montage starts (no fixed 35 s wait),
+#  - the measured part is timed from the moment the "look up" tutorial prompt is on screen (screen
+#    state, work\fast_refs\combat_lookup.png), not from boot: old combat time T = anchor + (T - 238).
+# Windows (old -> anchor): 262-270 -> 24-32, 322-352 -> 84-114, 354-378 -> 116-140.
+#! seconds 330
+#! fastmovies 1
+#! windows 24:32,84:114,116:140
+#! anchor_range 60:130
+#! pad w2:0x100000:3,w8:0x4000,w14:0x100000:3,w20:0x10000:4,w24:0x400000:3,w29:0x800000:3,w34:0x100000:2,w40:0x400:42,w42:0x800,w45:0x800,w48:0x800,w51:0x800,w54:0x800,w57:0x800,w84:0x10000:30,w116:0x400:24,w119:0x800,w123:0x800,w127:0x800,w131:0x800,w135:0x800
+wait load_menu_catalog 90
+spam 0x0008 1.5 intro_montage 60
+# the prompt is matched only after the city-falls cutscene began (its subtitle file is opened): the boat
+# cutscene's sky matched the prompt reference with diff 8.9 in wake's wko-off (anchor 37.8 s, frozen prompt)
+wait h_jbi_cityfalls 200
+waitimg combat_lookup 300,20,700,90 6 120
+anchor
+at 28
+shot a28
+at 62
+shot a62
+at 92
+shot a92
+at 107
+shot a107
+at 122
+shot a122
+at 137
+shot a137
+at 141
+close

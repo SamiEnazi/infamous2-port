@@ -1,0 +1,6 @@
+# LF everywhere (the patches must match the submodules' LF sources), CRLF only for batch files.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ico binary
+*.png binary

@@ -1,0 +1,39 @@
+From: SamiEnazi <85966743+SamiEnazi@users.noreply.github.com>
+Subject: [PATCH] frame clock: idle wait woken by the FIFO kick, not a blind Sleep
+
+The frame clock thread (drains the GCM FIFO, encodes draws, presents) slept
+1-2 ms between passes. The guest's main thread polls the ref register for its
+frame N-1 fence every frame; cellGcm_ref_on_poll already signals a kick event
+when it finds no fence queued, but nobody waited on it. Waiting on it instead
+of Sleep. Same exe back to back (combat.ps1, 2026-11-08): docks walk 262-270 s
+64.2 -> 68.4 fps (p50 17.8 -> 14.0 ms, p99 24.7 -> 23.6 ms), RSX idle gaps between
+drains p50 ~2.3 -> ~1 ms; other windows and the 262-378 s average unchanged
+(84.9 both). GCM_FIFO_KICK=0 restores the plain Sleep.
+diff --git a/main.cpp b/main.cpp
+index e46a2bf..eed7d86 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -233,6 +233,8 @@ static void present_guest_frame(void)
+ 
+ /* cellSysutil.c: the in-game menu's Quit game (REQUEST_EXITGAME, then exit 0). */
+ extern "C" void ps3_host_quit(const char* why);
++/* cellGcmSys.c: the frame clock's idle wait, woken early by a FIFO kick. */
++extern "C" void cellGcm_fifo_kick_wait(unsigned ms);
+ 
+ static DWORD WINAPI frame_clock(LPVOID)
+ {
+@@ -282,7 +284,13 @@ static DWORD WINAPI frame_clock(LPVOID)
+             if (us <= 0) us = clock_us_env;
+             if (sema_fast_poll && cellGcm_drain_sema_blocked() && us > 1000) us = 1000;
+ #ifdef _WIN32
+-            Sleep((DWORD)((us + 999) / 1000));
++            /* The idle wait wakes early on a kick: a guest thread polling the
++             * ref register found no fence queued (cellGcm_ref_on_poll), so the
++             * guest waits on this thread -- walk the FIFO now instead of after
++             * the rest of a ~1-2 ms Sleep. inFAMOUS 2's main thread waits here
++             * for its frame-N-1 fence every frame. GCM_FIFO_KICK=0 = the old
++             * plain Sleep. */
++            cellGcm_fifo_kick_wait((unsigned)((us + 999) / 1000));
+ #else
+             usleep((useconds_t)us);
+ #endif

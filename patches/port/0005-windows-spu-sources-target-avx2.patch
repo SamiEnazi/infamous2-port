@@ -1,0 +1,19 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d473fbd..f892fce 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -226,7 +226,13 @@ if(SPU_SOURCES)
+     if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+         # clang-cl (Windows): it ignores the GCC spelling of -ffp-contract=off,
+         # so it goes through /clang: (tests/compiler/check_semantics.py).
+-        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;/clang:-ffp-contract=off")
++        # PORT_SPU_ARCH: the lifted SPU code is 128-bit SIMD throughout, and
++        # without an ISA flag clang-cl targets baseline x86-64 (SSE2), where
++        # spu_helpers.h's shufb is a 16-byte scalar loop instead of pshufb
++        # (__SSE4_1__). AVX2 = x86-64-v3, which every supported host has.
++        set(PORT_SPU_ARCH "/arch:AVX2" CACHE STRING
++            "clang-cl ISA flag for the lifted SPU sources (empty = baseline x86-64)")
++        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;/clang:-ffp-contract=off;${PORT_SPU_ARCH}")
+     elseif(NOT MSVC)
+         set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
+     endif()

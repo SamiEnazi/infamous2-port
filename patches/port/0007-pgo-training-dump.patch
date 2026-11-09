@@ -1,0 +1,45 @@
+From: SamiEnazi <85966743+SamiEnazi@users.noreply.github.com>
+Subject: [PATCH] PGO training: write the profile counters at fixed times (PS3_PGO_DUMP_AT)
+
+Only in a build made with PORT_PGO=gen (-DPORT_PGO_GEN): the scripted runs end in
+a kill, which skips the compiler-rt profile writer's atexit. Applies on top of 0006.
+diff --git a/main.cpp b/main.cpp
+index eed7d86..de6a509 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -235,6 +235,9 @@ static void present_guest_frame(void)
+ extern "C" void ps3_host_quit(const char* why);
+ /* cellGcmSys.c: the frame clock's idle wait, woken early by a FIFO kick. */
+ extern "C" void cellGcm_fifo_kick_wait(unsigned ms);
++#ifdef PORT_PGO_GEN
++extern "C" int __llvm_profile_write_file(void);   /* compiler-rt profile runtime */
++#endif
+ 
+ static DWORD WINAPI frame_clock(LPVOID)
+ {
+@@ -525,7 +528,24 @@ int main(int argc, char** argv)
+      * until the title registers its vblank and flip handlers during init. */
+     g_ps3_guest_caller = harness_guest_caller;
+     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
+-
++#ifdef PORT_PGO_GEN
++    /* PGO training build: the scripted runs end in a kill, which skips the
++     * profile runtime's atexit writer. PS3_PGO_DUMP_AT=<s>[,<s>...]: write the
++     * counters at those times (each write replaces the file). */
++    { static auto pgo_dump = [](LPVOID) -> DWORD {
++          const char* e = getenv("PS3_PGO_DUMP_AT");
++          ULONGLONG t0 = GetTickCount64();
++          for (const char* p = e; p && *p;) {
++              char* q; double s = strtod(p, &q); if (q == p) break;
++              ULONGLONG due = t0 + (ULONGLONG)(s * 1000);
++              while (GetTickCount64() < due) Sleep(200);
++              int rc = __llvm_profile_write_file();
++              fprintf(stderr, "[pgo] profile written at %.0f s (rc=%d)\n", s, rc);
++              p = *q == ',' ? q + 1 : q;
++          }
++          return 0; };
++      if (getenv("PS3_PGO_DUMP_AT")) CreateThread(NULL, 0, pgo_dump, NULL, 0, NULL); }
++#endif
+     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
+            entry, STACK_TOP);
+ 

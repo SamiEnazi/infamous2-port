@@ -1,0 +1,16 @@
+diff --git a/game_patches.cpp b/game_patches.cpp
+index 2568272..b61c069 100644
+--- a/game_patches.cpp
++++ b/game_patches.cpp
+@@ -28,7 +28,10 @@
+ #include <string>
+ #include <vector>
+ 
+-extern uint8_t* vm_base;
++/* C linkage: the toolkit defines vm_base in C. Itanium (macOS) does not mangle
++ * namespace-scope variables, so a plain C++ extern links there; the MSVC ABI
++ * does (?vm_base@@3PEAEEA), so on Windows it must say extern "C". */
++extern "C" uint8_t* vm_base;
+ 
+ namespace {
+ 

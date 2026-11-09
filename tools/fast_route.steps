@@ -1,0 +1,26 @@
+# Fast city test with a RECORDED route (play.ps1 -RecordRoute <name> -> work\routes\<name>.pad): boot the
+# first save, placeholder movies, wait for the HUD (no presses) = anchor, then the game replays the route
+# time-indexed from the anchor (PS3_PAD_REPLAY; the exe needs the toolkit's pad route hook, agent/testspeed).
+# Another route: -Extra "PS3_PAD_REPLAY=S:\...\work\routes\<name>.pad". Windows: set them for the route.
+#! seconds 260
+#! anchor_range 55:100
+#! savefrom work\saves\first-save\gamedata
+#! replay work\routes\city1.pad
+#! windows 2:16,20:46,48:55
+wait v_02_city_intro 120
+sleep 2
+waitimg city_hud 40,20,340,130 15 120
+sleep 2
+anchor
+at 8
+shot a8
+at 20
+shot a20
+at 32
+shot a32
+at 44
+shot a44
+at 54
+shot a54
+at 56
+close

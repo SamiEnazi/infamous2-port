@@ -1,0 +1,50 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4d247fe..d473fbd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -223,7 +223,11 @@ if(SPU_SOURCES)
+     set_source_files_properties(${SPU_SOURCES} PROPERTIES
+         INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
+         COMPILE_DEFINITIONS SPU_USE_DISPATCH_MT)
+-    if(NOT MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++    if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++        # clang-cl (Windows): it ignores the GCC spelling of -ffp-contract=off,
++        # so it goes through /clang: (tests/compiler/check_semantics.py).
++        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;/clang:-ffp-contract=off")
++    elseif(NOT MSVC)
+         set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
+     endif()
+ endif()
+@@ -360,7 +364,15 @@ endif()
+ #     default; a PPC fmadd is spelt as one where the lifter means one.
+ #   - /bigobj on MSVC. A single lifted file routinely passes the 65,536-section
+ #     limit of the default object format.
+-if(MSVC)
++if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++    # clang-cl (Windows): as MSVC (/w, /bigobj) plus no FP contraction for the
++    # lifted PPU and firmware code -- the GCC spelling is ignored by clang-cl,
++    # so it goes through /clang:. PORT_LIFT_OPT is the optimisation level of
++    # those huge TUs (default -O1).
++    set(PORT_LIFT_OPT "/clang:-O1" CACHE STRING "Optimisation flag for the lifted TUs (clang-cl)")
++    set_source_files_properties(${RECOMP_SOURCES} ${LLE_SOURCES} PROPERTIES
++        COMPILE_OPTIONS "/w;/bigobj;/clang:-ffp-contract=off;${PORT_LIFT_OPT}")
++elseif(MSVC)
+     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
+         COMPILE_OPTIONS "/w;/bigobj")
+ else()
+diff --git a/game_patches.cpp b/game_patches.cpp
+index fe60f3e..2568272 100644
+--- a/game_patches.cpp
++++ b/game_patches.cpp
+@@ -15,7 +15,11 @@
+  *   PS3_PATCHES=<name>[,<name>...]   patch names as in the file (case-insensitive)
+  *   PS3_PATCH_YML=<path>             default: RPCS3's patches/patch.yml
+  */
++#if defined(__APPLE__)
+ #include <CommonCrypto/CommonDigest.h>
++#else
++#include "sha1_portable.h"   /* CC_SHA1_* on Windows/Linux */
++#endif
+ #include <ctype.h>
+ #include <stdint.h>
+ #include <stdio.h>

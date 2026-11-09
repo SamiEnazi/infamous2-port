@@ -1,0 +1,7 @@
+[submodule "toolkit"]
+	path = toolkit
+	url = https://github.com/SamiEnazi/ps3recomp.git
+	branch = infamous2
+[submodule "community/erikomis-infamous2-recomp"]
+	path = community/erikomis-infamous2-recomp
+	url = https://github.com/erikomis/infamous2-recomp.git

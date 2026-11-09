@@ -1,0 +1,14 @@
+diff --git a/main.cpp b/main.cpp
+index d0d5bdb..e46a2bf 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -450,6 +450,9 @@ int main(int argc, char** argv)
+      * thing. POSIX timers are already fine-grained. */
+     timeBeginPeriod(1);
+     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
++    /* PS3_SAMPLE=<ms>: the runtime's sampling profiler (ppu_loader.cpp), which
++     * only the toolkit's boot harness ever started. No-op when unset. */
++    { extern void ps3_sampler_start(void); ps3_sampler_start(); }
+ #endif
+ 
+     printf("=== ps3recomp game runner ===\n");

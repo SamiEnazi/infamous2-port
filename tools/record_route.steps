@@ -1,0 +1,8 @@
+# play.ps1 -RecordRoute: the recording starts when the gameplay HUD is back after the Kuo cutscene
+# (the same anchor as tools\fast_city*.steps). The game itself records (PS3_PAD_RECORD) from the
+# moment this driver creates anchor.flag.
+say Route recording. Please wait, do not touch the controller.
+waitimg city_hud 40,20,340,130 15 400
+sleep 2
+anchor
+say Recording. Play now.

@@ -1,0 +1,30 @@
+# Fast city test (testspeed, 2026-11-08): boot from the first save ("3. Forward Momentum", start of New Marais;
+# the game auto-loads the newest save at boot, no menu), the 70 s city intro comic is the 4 s placeholder
+# (fastmovies), then a WAIT for the Kuo cutscene to end (X does not skip it, and a late X made Cole jump and the
+# HUD check miss: wkc1-A1), and the route starts at the moment the
+# gameplay HUD is back (screen state, work\fast_refs\city_hud.png). Then the same inputs every run:
+#   0-10 s   stand still: the dock and the street ahead (static view)
+#   10-18 s  camera pan right (right stick)
+#   19-44 s  walk forward (left stick), into the street
+# Run: tools\fast.ps1 -Tag X -Steps tools\fast_city.steps
+#! seconds 200
+#! anchor_range 55:100
+#! savefrom work\saves\first-save\gamedata
+#! fastmovies 1
+#! windows 2:10,11:18,22:44
+#! pad w10:0x800000:8,w19:0x10000:25
+wait v_02_city_intro 120
+sleep 2
+waitimg city_hud 40,20,340,130 15 120
+sleep 2
+anchor
+at 6
+shot a6
+at 15
+shot a15
+at 30
+shot a30
+at 43
+shot a43
+at 45
+close

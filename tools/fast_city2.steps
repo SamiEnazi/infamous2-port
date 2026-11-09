@@ -1,0 +1,36 @@
+# Fast city test v2 (testspeed, 2026-11-08): boot the first save (auto-loaded, no menu), the city intro movie is
+# the 4 s placeholder, then WAIT (no presses: X does not skip the Kuo cutscene and a late X makes Cole jump) for
+# the gameplay HUD = anchor. Measured where Sami's session sat at ~52 fps: minutes 27-28 of
+# play\20261108-125910 are the first gameplay minutes on this dock, right after the same cutscene.
+#   0-16 s   stand still: the dock + street view (the heavy one; RSX + PPU main bound)
+#   16-46 s  walk forward (left stick) from that view, into the street
+#   47-55 s  camera pan right (right stick) where the walk ends
+# Run: tools\fast.ps1 -Tag X -Steps tools\fast_city2.steps
+#! seconds 220
+#! anchor_range 55:100
+#! savefrom work\saves\first-save\gamedata
+#! windows 2:16,20:46,48:55
+#! pad w16:0x10000:30,w47:0x800000:8
+wait v_02_city_intro 120
+sleep 2
+waitimg city_hud 40,20,340,130 15 120
+sleep 2
+anchor
+at 8
+shot a8
+at 20
+shot a20
+at 26
+shot a26
+at 32
+shot a32
+at 38
+shot a38
+at 44
+shot a44
+at 50
+shot a50
+at 54
+shot a54
+at 56
+close

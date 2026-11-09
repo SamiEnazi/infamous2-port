@@ -1,0 +1,27 @@
+# Fast city test v3 (testspeed, 2026-11-08) -- NOT YET VALIDATED. The v2 walk into the street is chaotic: the
+# same inputs end in two different alleys (ts-c2-* vs ts-rec-1/ts-bg-2/ts-rep-*; picture mean diff 8-28 at
+# a32/a44), so its walk window measures different places. Cole stays on the anchor spot here; only the camera
+# turns (right stick, fixed times) and each view is held still while it is measured:
+#   0-12 s still: dock + street (Sami's ~52 fps scene)   12-13.5 pan right, 13.5-24 still   24-25.5 pan, 25.5-36 still
+#   36-37.5 pan, 37.5-48 still
+# Run: tools\fast.ps1 -Tag X -Steps tools\fast_city3.steps
+#! seconds 200
+#! anchor_range 55:100
+#! savefrom work\saves\first-save\gamedata
+#! windows 2:12,15:24,27:36,39:48
+#! pad w12:0x800000:1.5,w24:0x800000:1.5,w36:0x800000:1.5
+wait v_02_city_intro 120
+sleep 2
+waitimg city_hud 40,20,340,130 15 120
+sleep 2
+anchor
+at 8
+shot a8
+at 20
+shot a20
+at 32
+shot a32
+at 44
+shot a44
+at 49
+close

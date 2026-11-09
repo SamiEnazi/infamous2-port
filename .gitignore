@@ -1,0 +1,27 @@
+# Never commit game data, firmware, keys, lifted game code or builds.
+/eboot/
+/game/
+/oracle/recordings/
+/build/
+/work/
+*.elf
+*.BIN
+*.self
+*.sprx
+*.prx
+*.psarc*
+*.pkg
+*.rap
+*.log
+__pycache__/
+/native/recordings/
+/deps/
+/toolkit-gpulight/
+/native/probes/
+/play/
+/toolkit-shadercache/
+/wt/
+/play/
+/input.toml
+/saves-backup/
+/config.local.json

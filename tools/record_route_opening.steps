@@ -1,0 +1,8 @@
+# play.ps1 -RecordRoute <name> -From opening: a new game, movies cut. Sami presses START at the title; the
+# recording starts at the fast_combat anchor (the "look up" tutorial prompt, matched only after the city-falls
+# cutscene began), so tools\fast_route_<name>.steps replays it from the same moment.
+say Route recording from the opening. Press START at the title, then do not touch the controller until you hear: recording.
+wait h_jbi_cityfalls 600
+waitimg combat_lookup 300,20,700,90 6 300
+anchor
+say Recording. Play now.

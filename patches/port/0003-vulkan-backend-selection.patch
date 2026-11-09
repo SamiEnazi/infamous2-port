@@ -1,0 +1,25 @@
+diff --git a/main.cpp b/main.cpp
+index fb4878b..d0d5bdb 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -123,7 +123,19 @@ int      cellGcm_drain_sema_blocked(void);
+  * path anywhere else -- the same selection runtime/host/host_posix.c and the
+  * toolkit's boot harness make. All three expose the same three entry points,
+  * so the frame clock below is backend-agnostic. */
+-#if defined(_WIN32)
++#if defined(PS3RECOMP_RSX_VULKAN) && !defined(__APPLE__)
++/* Vulkan when the toolkit is built with it (-DPS3RECOMP_RSX_VULKAN=ON), ahead
++ * of D3D12: it is the backend that runs the shared draw engine, where the
++ * inFAMOUS 2 render fixes live (the D3D12 backend drives the older live_draw
++ * path and shows this title black). */
++extern "C" int  rsx_vulkan_backend_init(uint32_t w, uint32_t h, const char* title);
++extern "C" void rsx_vulkan_backend_present(void);
++extern "C" int  rsx_vulkan_backend_pump_messages(void);
++#  define rsx_backend_init    rsx_vulkan_backend_init
++#  define rsx_backend_present rsx_vulkan_backend_present
++#  define rsx_backend_pump    rsx_vulkan_backend_pump_messages
++#  define RSX_BACKEND_NAME    "Vulkan"
++#elif defined(_WIN32)
+ extern "C" int  rsx_d3d12_backend_init(uint32_t w, uint32_t h, const char* title);
+ extern "C" void rsx_d3d12_backend_present(void);
+ extern "C" int  rsx_d3d12_backend_pump_messages(void);
