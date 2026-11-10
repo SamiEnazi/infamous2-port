@@ -26,7 +26,7 @@ if (-not ("PortSetup.Cpu" -as [type])) {
 # The game's title IDs whose 1.04 code is the one this port translates (same PPU hash).
 $script:KnownTitles = @{
     "BCES01143" = "Europe disc (the tested one)"; "BCES01144" = "Europe disc"; "BCES01229" = "disc";
-    "BCUS98125" = "USA disc"; "NPUA80638" = "USA PSN"
+    "BCUS98125" = "USA disc"; "NPUA80638" = "USA PSN (digital)"; "NPEA00318" = "Europe PSN (digital)"
 }
 
 # A build tool's path, the way tools\port_paths.py finds it for Setup: environment variable
@@ -162,8 +162,15 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
             $upd = Join-Path $Rpcs3 "dev_hdd0\game\$title"
             $ver = $null
             if (Test-Path (Join-Path $upd "PARAM.SFO")) { $ver = (Read-Sfo (Join-Path $upd "PARAM.SFO"))["APP_VER"] }
-            $ok = ($ver -eq "01.04") -and (Test-Path (Join-Path $upd "USRDIR\EBOOT.BIN"))
-            Add $ok "Game update 1.04 in RPCS3" $(if ($ok) { $upd } elseif ($ver) { "found version $ver; install the 1.04 update in RPCS3 (File > Install Packages)" } else { "not installed: install the 1.04 update in RPCS3 (File > Install Packages)" })
+            # The digital (PSN) game is its own folder in RPCS3, and its last version, 01.03, carries the
+            # same code as the discs' 1.04 update (RPCS3 lists them under one PPU hash): no update to install.
+            $digital = $title -like "NP*"
+            $ok = ($ver -eq "01.04" -or ($digital -and $ver -eq "01.03")) -and (Test-Path (Join-Path $upd "USRDIR\EBOOT.BIN"))
+            if ($digital) {
+                Add $ok "Digital game in RPCS3" $(if ($ok) { $upd } elseif ($ver) { "found version $ver in $upd; this port needs 01.03" } else { "not installed: install the game's package and its license in RPCS3 (File > Install Packages/Raps/Edats)" })
+            } else {
+                Add $ok "Game update 1.04 in RPCS3" $(if ($ok) { $upd } elseif ($ver) { "found version $ver; install the 1.04 update in RPCS3 (File > Install Packages)" } else { "not installed: install the 1.04 update in RPCS3 (File > Install Packages)" })
+            }
         }
     }
     , $rows

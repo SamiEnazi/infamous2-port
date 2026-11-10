@@ -151,6 +151,10 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 - 💿 **Your copy of inFAMOUS 2**
   - The disc's files: the folder that holds `PS3_GAME`.
   - The **1.04 update**, installed in RPCS3.
+  - 🛒 **Digital (PSN) copy** (NPUA80638 / NPEA00318, version 01.03, the same code as 1.04; untested,
+    please report how it goes): install the game and its license in RPCS3. Then make a folder with a
+    `PS3_GAME` folder inside, copy the game's `PARAM.SFO`, `ICON0.PNG` and `USRDIR` from RPCS3's
+    `dev_hdd0\game\<ID>` into `PS3_GAME`, and choose that folder in Setup. No update is needed.
 - 🕹️ **[RPCS3](https://rpcs3.net)** with the **PS3 firmware** installed (*File > Install Firmware*, using
   `PS3UPDAT.PUP` from playstation.com).
   - It is needed **only during Setup**. Setup uses it to decrypt your game, then copies into the port's
