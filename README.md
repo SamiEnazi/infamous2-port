@@ -10,7 +10,7 @@ No emulator while you play.
 [![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)](#-what-you-need)
 [![Renderer: Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C?logo=vulkan&logoColor=white)](#-how-it-works)
 [![Native 1080p, up to 4K](https://img.shields.io/badge/native-1080p%20%E2%80%A2%20up%20to%204K-6250d6)](#%EF%B8%8F-native-1080p-and-up)
-[![2.1x the frame rate of RPCS3](https://img.shields.io/badge/vs%20RPCS3-2.1%C3%97%20the%20fps-2a78d6)](#-performance-native-vs-rpcs3)
+[![2.3x the frame rate of RPCS3](https://img.shields.io/badge/vs%20RPCS3-2.3%C3%97%20the%20fps-2a78d6)](#-performance-native-vs-rpcs3)
 [![Any controller](https://img.shields.io/badge/controllers-plug%20%26%20play-1baf7a?logo=steamdeck&logoColor=white)](#-full-controller-support)
 [![Status: early public test](https://img.shields.io/badge/status-early%20public%20test-eb6834)](#-status)
 [![License: MIT](https://img.shields.io/badge/license-MIT-1baf7a)](LICENSE)
@@ -23,23 +23,25 @@ No emulator while you play.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/perf-dark.svg">
-  <img alt="Frames per second at the same spot in the city: RPCS3 0.0.42 42.9 fps, this port 91 fps" src="docs/perf-light.svg" width="760">
+  <img alt="Frames per second at the same spot in the city: RPCS3 0.0.42 42.9 fps, this port 99 fps" src="docs/perf-light.svg" width="760">
 </picture>
 
-![The same spot from the same save: this port at 91 fps (left), RPCS3 at 43 fps (right)](docs/same-spot.jpg)
+![The same spot from the same save: this port at 99 fps (left), RPCS3 at 43 fps (right)](docs/same-spot.jpg)
 
 | Same PC, same save, same spot | RPCS3 0.0.42 | **This port** |
 |---|:-:|:-:|
-| 🏙️ City: the dock right after loading (720p) | 43 fps (39–46) | **91 fps** |
-| 🎥 Camera turned to three more views (720p) | not measured | **95 / 119 / 127 fps** |
-| 🖥️ The same four views at **native 1080p** with every picture extra on | | **102 / 110 / 136 / 143 fps** |
-| 🔧 Developer build with profile-guided optimisation, dock view (720p) | | 99 fps |
+| 🏙️ City: the dock right after loading (720p) | 43 fps (39–46) | **99 fps** |
+| 🎥 Camera turned to three more views (720p) | not measured | **104 / 132 / 139 fps** |
+| 🖥️ The same four views at **native 1080p** with every picture extra on | | **99 / 103 / 133 / 140 fps** |
+| 🔧 Developer build (profile-guided optimisation and hand-written SPU code, not in the Setup build), the same four views at 1080p with every extra | | 116 / 126 / 161 / 166 fps |
 
 <sub>
-Measured on 9 Nov 2026 on an i5-13600K, RTX 2070 Super and 32 GB RAM, Windows 11. The PC was a normal desktop
-with a browser open in the background. RPCS3 ran with its default settings: LLVM recompilers, Vulkan, 100%
-resolution (720p). Story videos and cutscenes run at 30 fps in both, as on the PS3. "Picture extras" means
-soft shadows, full-resolution ambient occlusion, smooth light gradients and full-resolution effects.
+This port: measured on 10 Nov 2026 with the build Setup makes today. RPCS3: measured on 9 Nov 2026. Both on an
+i5-13600K, RTX 2070 Super and 32 GB RAM, Windows 11. The PC was a normal desktop with a browser open in the
+background. RPCS3 ran with its default settings: LLVM recompilers, Vulkan, 100% resolution (720p). Here the CPU
+sets the pace, so native 1080p with every extra runs as fast as 720p. Story videos and cutscenes run at 30 fps in
+both, as on the PS3. "Picture extras" means soft shadows, full-resolution ambient occlusion, smooth light
+gradients and full-resolution effects.
 </sub>
 
 ## ✨ What you get
@@ -112,11 +114,15 @@ or **Infamous** (ember red), in F2 → Display.
 Looking out over the city from a rooftop used to drop the game to **4–10 fps**: the texture cache was too small
 and every frame rebuilt hundreds of textures. With a 4× larger cache and buffers that grow instead of stalling,
 the same overflow, forced on purpose, went from **13 to 40 fps**. With normal settings the busy street in our
-test ran at **75 fps with no frame over 37 ms**. The rooftop itself is being re-checked in play.
+test ran at **75 fps with no frame over 37 ms**. That rooftop view now runs at **80–91 fps** at native 1080p with
+every extra on.
+
+Long sessions stay smooth too: in a 26-minute test in the city (developer build), no frame took longer than
+150 ms after loading, and memory use stayed flat.
 
 ### 🎮 In the city on this port
 
-![Four camera views in the city on this port: 91, 95, 119 and 127 fps](docs/city-views.jpg)
+![Four camera views in the city at native 1080p with every picture extra on: 99, 103, 133 and 140 fps](docs/city-views.jpg)
 
 ## 🧭 What this is
 
