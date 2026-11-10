@@ -110,7 +110,7 @@ namespace Inf2Setup
     sealed class Opts
     {
         public string Page, Disc, Rpcs3, Folder;
-        public bool TestBuild, NoShortcut, ExitWhenDone, NoCleanup, OnlyCache;
+        public bool TestBuild, NoShortcut, ExitWhenDone, NoCleanup, OnlyCache, TestFailBuild;
 
         public static Opts Parse(string[] a)
         {
@@ -130,6 +130,7 @@ namespace Inf2Setup
                     case "--exit-when-done": o.ExitWhenDone = true; break;
                     case "--no-cleanup": o.NoCleanup = true; break;
                     case "--only-cache": o.OnlyCache = true; break;
+                    case "--test-fail-build": o.TestFailBuild = true; break;
                 }
             }
             return o;
@@ -375,6 +376,121 @@ namespace Inf2Setup
         }
 
         public static string BuiltExe(string repo) { return Path.Combine(repo, "work\\port\\build\\Infamous2Recomp.exe"); }
+
+        // An install Setup made before, where DefaultTarget would put it (no folder is created here).
+        public static string ExistingInstall(string exeDir)
+        {
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string sys = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+            if (string.IsNullOrEmpty(sys)) sys = "C:\\";
+            foreach (string c in new string[] { Path.Combine(exeDir, "inFAMOUS2-port"), Path.Combine(local, "inFAMOUS2-port"), Path.Combine(sys, "inFAMOUS2-port") })
+                if (HasPort(c)) return c;
+            return null;
+        }
+
+        // port-version.txt (written by the download): { port commit, toolkit pin, port-base pin }, or null.
+        public static string[] ReadPortVersion(string root)
+        {
+            try
+            {
+                string f = Path.Combine(root, "port-version.txt");
+                if (!File.Exists(f)) return null;
+                string[] v = new string[3];
+                foreach (string ln in File.ReadAllLines(f))
+                {
+                    string[] t = ln.Trim().Split(' ');
+                    if (t.Length == 2 && t[0] == "SamiEnazi/infamous2-port") v[0] = t[1];
+                    else if (t.Length == 3 && t[0] == "toolkit") v[1] = t[2];
+                    else if (t.Length == 3 && t[0].StartsWith("community/", StringComparison.Ordinal)) v[2] = t[2];
+                }
+                return v[0] != null && v[1] != null && v[2] != null ? v : null;
+            }
+            catch (Exception) { return null; }
+        }
+
+        // What an update never writes into: the player's folders and files, the build's own folders, and
+        // the toolkit and port base (those are swapped whole). game\disc is a junction to the player's disc.
+        static readonly string[] KeepTop = { "game", "work", "play", "saves-backup", "tools-cache", "deps", "build", "eboot", "toolkit", "community" };
+        static readonly string[] KeepFiles = { "input.toml", "config.local.json", "Setup.exe", "port-version.txt", ".zip-source" };
+
+        public static bool Protected(string rel)
+        {
+            string first = rel.Split('\\')[0];
+            foreach (string t in KeepTop) if (string.Equals(first, t, StringComparison.OrdinalIgnoreCase)) return true;
+            foreach (string f in KeepFiles) if (string.Equals(rel, f, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        static bool IsLink(FileSystemInfo i) { return (i.Attributes & FileAttributes.ReparsePoint) != 0; }
+
+        // True when no folder between root (not included) and dir is a link (a junction or a symlink).
+        public static bool NoLinkBetween(string root, string dir, Dictionary<string, bool> seen)
+        {
+            string r = Path.GetFullPath(root).TrimEnd('\\'), d = Path.GetFullPath(dir).TrimEnd('\\');
+            List<string> walked = new List<string>();
+            bool ok = true;
+            while (d.Length > r.Length && d.StartsWith(r + "\\", StringComparison.OrdinalIgnoreCase))
+            {
+                bool known;
+                if (seen.TryGetValue(d, out known)) { ok = known; break; }
+                walked.Add(d);
+                DirectoryInfo di = new DirectoryInfo(d);
+                if (di.Exists && IsLink(di)) { ok = false; break; }
+                d = Path.GetDirectoryName(d);
+            }
+            foreach (string w in walked) seen[w] = ok;
+            return ok;
+        }
+
+        // The first link at or inside dir (never followed), or null.
+        public static string FindLink(string dir)
+        {
+            DirectoryInfo top = new DirectoryInfo(dir);
+            if (!top.Exists) return null;
+            if (IsLink(top)) return top.FullName;
+            Stack<DirectoryInfo> st = new Stack<DirectoryInfo>();
+            st.Push(top);
+            while (st.Count > 0)
+            {
+                foreach (FileSystemInfo e in st.Pop().GetFileSystemInfos())
+                {
+                    if (IsLink(e)) return e.FullName;
+                    DirectoryInfo sub = e as DirectoryInfo;
+                    if (sub != null) st.Push(sub);
+                }
+            }
+            return null;
+        }
+
+        // Delete a folder Setup made or replaces, and refuse if a link is anywhere inside it.
+        public static void DeleteTree(string dir)
+        {
+            if (!Directory.Exists(dir)) return;
+            string link = FindLink(dir);
+            if (link != null) throw new IOException("Setup will not delete " + dir + ": it contains a link (" + link + ")");
+            foreach (string f in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
+            {
+                FileAttributes a = File.GetAttributes(f);
+                if ((a & FileAttributes.ReadOnly) != 0) File.SetAttributes(f, a & ~FileAttributes.ReadOnly);
+            }
+            Directory.Delete(dir, true);
+        }
+
+        // Copy a folder's files (links are skipped, never followed); returns how many.
+        public static int CopyTree(string src, string dst)
+        {
+            int n = 0;
+            DirectoryInfo top = new DirectoryInfo(src);
+            if (!top.Exists || IsLink(top)) return 0;
+            Directory.CreateDirectory(dst);
+            foreach (FileSystemInfo e in top.GetFileSystemInfos())
+            {
+                if (IsLink(e)) continue;
+                if (e is DirectoryInfo) n += CopyTree(e.FullName, Path.Combine(dst, e.Name));
+                else { File.Copy(e.FullName, Path.Combine(dst, e.Name), true); n++; }
+            }
+            return n;
+        }
 
         // Where a downloaded-alone Setup.exe puts the game: next to itself, else in the user's local
         // app data, else on the system drive; a plain path (build tools dislike other alphabets) with
@@ -799,10 +915,11 @@ namespace Inf2Setup
         volatile bool exited, cancel;
         int exitCode = -1;
         readonly string target;
+        readonly bool update;           // the port is there already: the newest code over it, in place
         long doneBytes;
         const long TotalGuess = 38L << 20;      // the three ZIP files together (GitHub sends no sizes)
 
-        public PortDownload(string target) { this.target = target; }
+        public PortDownload(string target, bool update) { this.target = target; this.update = update; }
 
         public ConcurrentQueue<string> Lines { get { return lines; } }
         public bool Exited { get { return exited; } }
@@ -827,16 +944,25 @@ namespace Inf2Setup
                 string tk = Sha(Api("repos/" + Repo + "/contents/toolkit?ref=" + commit));
                 string cm = Sha(Api("repos/" + Repo + "/contents/community/erikomis-infamous2-recomp?ref=" + commit));
                 Say("  port " + commit + ", toolkit " + tk + ", port base " + cm);
-                string temp = Path.Combine(Path.GetTempPath(), "inFAMOUS2-setup-download");
-                Directory.CreateDirectory(temp);
-                Part(2, "the port", Repo, commit, target, temp);
-                Part(3, "the toolkit", "SamiEnazi/ps3recomp", tk, Path.Combine(target, "toolkit"), temp);
-                Part(4, "the port base", "erikomis/infamous2-recomp", cm, Path.Combine(target, "community\\erikomis-infamous2-recomp"), temp);
-                File.WriteAllText(Path.Combine(target, "port-version.txt"),
-                    "Downloaded by Setup.exe " + DateTime.Now.ToString("yyyy-MM-dd HH:mm") + "\r\n" + Repo + " " + commit +
-                    "\r\ntoolkit SamiEnazi/ps3recomp " + tk + "\r\ncommunity/erikomis-infamous2-recomp erikomis/infamous2-recomp " + cm + "\r\n");
-                try { Directory.Delete(temp, true); } catch (Exception) { }
-                Say("progress: 100% downloaded");
+                string[] have = update ? Util.ReadPortVersion(target) : null;
+                if (have != null && have[0] == commit && have[1] == tk && have[2] == cm)
+                {
+                    Say("  already the newest version: nothing to download");
+                    Say("progress: 100% up to date");
+                }
+                else
+                {
+                    string temp = Path.Combine(Path.GetTempPath(), "inFAMOUS2-setup-download");
+                    Directory.CreateDirectory(temp);
+                    Part(2, "the port", Repo, commit, target, temp);
+                    Part(3, "the toolkit", "SamiEnazi/ps3recomp", tk, Path.Combine(target, "toolkit"), temp);
+                    Part(4, "the port base", "erikomis/infamous2-recomp", cm, Path.Combine(target, "community\\erikomis-infamous2-recomp"), temp);
+                    File.WriteAllText(Path.Combine(target, "port-version.txt"),
+                        "Downloaded by Setup.exe " + DateTime.Now.ToString("yyyy-MM-dd HH:mm") + "\r\n" + Repo + " " + commit +
+                        "\r\ntoolkit SamiEnazi/ps3recomp " + tk + "\r\ncommunity/erikomis-infamous2-recomp erikomis/infamous2-recomp " + cm + "\r\n");
+                    try { Util.DeleteTree(temp); } catch (Exception) { }
+                    Say("progress: 100% downloaded");
+                }
                 exitCode = 0;
             }
             catch (Exception ex)
@@ -857,7 +983,7 @@ namespace Inf2Setup
             Download("https://codeload.github.com/" + repo + "/zip/" + sha, zip, what);
             Say("progress: " + Pct() + "% unpacking " + what);
             string tmp = dest.TrimEnd('\\') + ".unzip";
-            if (Directory.Exists(tmp)) Directory.Delete(tmp, true);
+            Util.DeleteTree(tmp);
             string tmpFull = Path.GetFullPath(tmp).TrimEnd('\\') + "\\";
             using (ZipArchive za = ZipFile.OpenRead(zip))
             {
@@ -877,15 +1003,64 @@ namespace Inf2Setup
                 }
             }
             File.WriteAllText(Path.Combine(tmp, ".zip-source"), repo + " " + sha);
-            if (Directory.Exists(dest))
+            if (Directory.Exists(dest) && !Util.EmptyDir(dest))
             {
-                if (!Util.EmptyDir(dest)) throw new IOException(dest + " is not empty");
-                Directory.Delete(dest);
+                if (!update) throw new IOException(dest + " is not empty");
+                if (Util.SamePath(dest, target)) MergeInto(tmp, dest);     // the port's own files, over the old ones
+                else Swap(tmp, dest);                                       // the toolkit / port base: pure source
+                File.Delete(zip);
+                Say("  " + what + ": " + repo + " " + sha.Substring(0, 7));
+                return;
             }
+            if (Directory.Exists(dest)) Directory.Delete(dest);             // empty
             Directory.CreateDirectory(Path.GetDirectoryName(dest.TrimEnd('\\')));
             Directory.Move(tmp, dest);
             File.Delete(zip);
             Say("  " + what + ": " + repo + " " + sha.Substring(0, 7));
+        }
+
+        // The new port files over the old install, in place: each overwritten or added, nothing deleted,
+        // never into the player's own folders (game\, work\, ...) and never through a link. The ".zip-source"
+        // mark goes last, so a stopped update is done again next time.
+        void MergeInto(string tmp, string dest)
+        {
+            string top = Path.GetFullPath(tmp).TrimEnd('\\');
+            Dictionary<string, bool> seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            int n = 0, skipped = 0;
+            foreach (string f in Directory.GetFiles(top, "*", SearchOption.AllDirectories))
+            {
+                if (cancel) throw new OperationCanceledException();
+                string rel = f.Substring(top.Length + 1);
+                if (Util.Protected(rel)) { skipped++; continue; }
+                string dst = Path.Combine(dest, rel);
+                string dir = Path.GetDirectoryName(dst);
+                if (!Util.NoLinkBetween(dest, dir, seen)) { skipped++; Say("  kept as is (a link on the way): " + rel); continue; }
+                Directory.CreateDirectory(dir);
+                if (File.Exists(dst))
+                {
+                    FileAttributes a = File.GetAttributes(dst);
+                    if ((a & FileAttributes.ReparsePoint) != 0) { skipped++; continue; }
+                    if ((a & FileAttributes.ReadOnly) != 0) File.SetAttributes(dst, a & ~FileAttributes.ReadOnly);
+                }
+                File.Copy(f, dst, true);
+                n++;
+            }
+            File.Copy(Path.Combine(top, ".zip-source"), Path.Combine(dest, ".zip-source"), true);
+            Util.DeleteTree(top);
+            Say("  " + n + " files updated in place, nothing deleted" + (skipped > 1 ? " (" + (skipped - 1) + " left alone)" : ""));
+        }
+
+        // Pure source, replaced whole: set aside first (nothing is lost if a move fails), then deleted;
+        // never when a link (a junction or a symlink) is anywhere inside it.
+        void Swap(string tmp, string dest)
+        {
+            string link = Util.FindLink(dest);
+            if (link != null) throw new IOException("Setup will not replace " + dest + ": it contains a link (" + link + ")");
+            string old = dest.TrimEnd('\\') + ".old";
+            Util.DeleteTree(old);
+            Directory.Move(dest, old);
+            Directory.Move(tmp, dest);
+            try { Util.DeleteTree(old); } catch (Exception ex) { Say("  could not delete " + old + ": " + ex.Message); }
         }
 
         int Pct() { return (int)Math.Min(99, 100 * doneBytes / TotalGuess); }
@@ -970,6 +1145,104 @@ namespace Inf2Setup
                     Thread.Sleep(3000);
                 }
             }
+        }
+    }
+
+    // Before Setup builds over an existing install: the player's saves, input.toml, config.local.json and
+    // the game as it is now (exe + SDL2.dll), copied to %LOCALAPPDATA%\inFAMOUS2-port\save-backups\<time>
+    // (not %TEMP%, which Windows may clean). The newest 3 backups are kept. Afterwards, built or not, the
+    // saves are copied back, and the old game too if the new one was not built.
+    sealed class SaveBackup
+    {
+        public readonly string Dir;
+        public readonly int Files;
+        readonly string repo;
+        readonly DateTime takenUtc;
+        static readonly string[] GameFiles = { "Infamous2Recomp.exe", "SDL2.dll" };
+
+        static string SaveDir(string repo) { return Path.Combine(repo, "game\\gamedata\\dev_hdd0\\home\\00000001\\savedata"); }
+        static string BuildDir(string repo) { return Path.Combine(repo, "work\\port\\build"); }
+
+        public static string Root()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "inFAMOUS2-port\\save-backups");
+        }
+
+        public SaveBackup(string repo)
+        {
+            this.repo = repo;
+            takenUtc = DateTime.UtcNow;
+            string root = Root(), name = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            Dir = Path.Combine(root, name);
+            for (int i = 2; Directory.Exists(Dir); i++) Dir = Path.Combine(root, name + "-" + i);
+            Directory.CreateDirectory(Dir);
+            Files = Util.CopyTree(SaveDir(repo), Path.Combine(Dir, "savedata"));
+            foreach (string f in new string[] { "input.toml", "config.local.json" })
+            {
+                string p = Path.Combine(repo, f);
+                if (File.Exists(p)) { File.Copy(p, Path.Combine(Dir, f), true); Files++; }
+            }
+            foreach (string f in GameFiles)
+            {
+                string p = Path.Combine(BuildDir(repo), f);
+                if (!File.Exists(p)) continue;
+                Directory.CreateDirectory(Path.Combine(Dir, "game"));
+                File.Copy(p, Path.Combine(Dir, "game\\" + f), true);
+            }
+            // the newest 3 backups stay
+            List<string> all = new List<string>(Directory.GetDirectories(root));
+            all.Sort(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < all.Count - 3; i++) { try { Util.DeleteTree(all[i]); } catch (Exception) { } }
+        }
+
+        // The new game was not built: the old one goes back (when it changed or went missing).
+        public string RestoreGame()
+        {
+            int n = 0;
+            foreach (string f in GameFiles)
+            {
+                string b = Path.Combine(Dir, "game\\" + f), live = Path.Combine(BuildDir(repo), f);
+                if (!File.Exists(b)) continue;
+                FileInfo bi = new FileInfo(b), li = new FileInfo(live);
+                if (li.Exists && li.Length == bi.Length && li.LastWriteTimeUtc == bi.LastWriteTimeUtc) continue;
+                Directory.CreateDirectory(BuildDir(repo));
+                File.Copy(b, live, true);
+                n++;
+            }
+            return n > 0 ? "the previous game is back (" + n + " file(s) from " + Path.Combine(Dir, "game") + ")" : "the previous game was not touched";
+        }
+
+        // The new game is built: the backup's copy of the old one is not needed.
+        public void DropGame()
+        {
+            try { Util.DeleteTree(Path.Combine(Dir, "game")); } catch (Exception) { }
+        }
+
+        // The saves back over game\...\savedata: missing ones added, older ones overwritten with the backup.
+        // A save written after the backup (the game played meanwhile) is newer and stays.
+        public string Reapply()
+        {
+            string src = Path.Combine(Dir, "savedata"), dst = SaveDir(repo);
+            int added = 0, back = 0, newer = 0;
+            if (Directory.Exists(src))
+            {
+                foreach (string f in Directory.GetFiles(src, "*", SearchOption.AllDirectories))
+                {
+                    string rel = f.Substring(src.Length + 1), to = Path.Combine(dst, rel);
+                    FileInfo ti = new FileInfo(to);
+                    if (ti.Exists && ti.LastWriteTimeUtc > takenUtc) { newer++; continue; }
+                    Directory.CreateDirectory(Path.GetDirectoryName(to));
+                    if (ti.Exists && (ti.Attributes & FileAttributes.ReadOnly) != 0) File.SetAttributes(to, ti.Attributes & ~FileAttributes.ReadOnly);
+                    File.Copy(f, to, true);
+                    if (ti.Exists) back++; else added++;
+                }
+            }
+            foreach (string f in new string[] { "input.toml", "config.local.json" })
+            {
+                string b = Path.Combine(Dir, f), live = Path.Combine(repo, f);
+                if (File.Exists(b) && !File.Exists(live)) { File.Copy(b, live); added++; }
+            }
+            return "saves reapplied from " + Dir + ": " + added + " added, " + back + " overwritten" + (newer > 0 ? ", " + newer + " newer kept" : "");
         }
     }
 
@@ -1230,6 +1503,9 @@ namespace Inf2Setup
         readonly Opts opt;
         readonly string exeDir;
         string repo, target, rpcs3, disc;
+        SaveBackup backup;               // set while Setup builds over an existing install
+        bool updating, gitClone;
+        string setupLog;
         string foundRpcs3;               // looked up in the background at start
         volatile bool searching;
         public int ExitCode;
@@ -1260,7 +1536,9 @@ namespace Inf2Setup
         public MainForm(Opts o, string dir)
         {
             opt = o; exeDir = dir;
-            if (Util.HasPort(dir)) repo = dir;     // else Setup.exe was downloaded on its own: Install gets the port first
+            // Setup.exe in the port's folder, or downloaded on its own next to an earlier install; else
+            // Install gets the port first
+            repo = Util.HasPort(dir) ? dir : Util.ExistingInstall(dir);
             ExitCode = o.TestBuild ? 2 : 0;
 
             Text = Title;
@@ -1289,11 +1567,11 @@ namespace Inf2Setup
             bar.Location = new Point((cw - bar.Width) / 2, S(252));
             bar.Visible = false;
             status = Center("", Theme.Bold, Theme.Text, S(282), S(28));
-            line = Center(Intro, Theme.Body, Theme.Dim, S(330), S(48));
+            line = Center(Intro, Theme.Body, Theme.Dim, S(322), S(70));
             license = Theme.Link("By installing you accept Microsoft's build tools license", Theme.Small);
             license.LinkArea = new LinkArea(license.Text.IndexOf("Microsoft"), license.Text.Length - license.Text.IndexOf("Microsoft"));
             license.LinkClicked += delegate { Util.OpenUrl(MsvcLicense); };
-            license.Location = new Point((cw - license.PreferredWidth) / 2, S(386));
+            license.Location = new Point((cw - license.PreferredWidth) / 2, S(400));
 
             details = Theme.Link("Details", Theme.Small);
             details.Location = new Point(S(18), S(BaseH) - S(32));
@@ -1302,7 +1580,7 @@ namespace Inf2Setup
             copyLog.Location = new Point(details.Left + TextRenderer.MeasureText("Hide details", Theme.Small).Width + S(16), details.Top);
             copyLog.LinkClicked += delegate { CopyLog(); };
             copyLog.Visible = false;
-            again = Theme.Link("Install again (after an update)", Theme.Small);
+            again = Theme.Link("Update to the latest version", Theme.Small);
             again.Location = new Point(cw - S(18) - again.PreferredWidth, details.Top);
             again.LinkClicked += delegate { Install(); };
             again.Visible = false;
@@ -1374,7 +1652,7 @@ namespace Inf2Setup
             if (s == State.Done) { status.Text = ""; status.Visible = false; }
             line.Visible = s != State.Working;
             if (s == State.Start) { line.Text = Intro; line.ForeColor = Theme.Dim; }
-            if (s == State.Done) { line.Text = "Ready to play."; line.ForeColor = Theme.Dim; }
+            if (s == State.Done) { line.Text = gitClone ? "Ready to play. (A git clone: git pull --recurse-submodules gets the newest code.)" : "Ready to play."; line.ForeColor = Theme.Dim; }
             license.Visible = s == State.Start || s == State.Failed;
             copyLog.Visible = s == State.Failed;
             again.Visible = s == State.Done && !opt.TestBuild;
@@ -1386,6 +1664,11 @@ namespace Inf2Setup
 
         void Fail(string reason)
         {
+            if (backup != null)
+            {
+                FinishUpdate(false);
+                reason += " Your saves and the game you had are kept.";
+            }
             failReason = reason;
             Native.KeepAwake(false);
             SetState(State.Failed);
@@ -1423,22 +1706,77 @@ namespace Inf2Setup
             if (repo == null)
             {
                 target = string.IsNullOrEmpty(opt.Folder) ? Util.DefaultTarget(exeDir) : Path.GetFullPath(opt.Folder);
-                if (Util.PortComplete(target)) { repo = target; }
-                else { StartDownload(); return; }
+                if (!Util.HasPort(target)) { BeginLog(null); StartDownload(false); return; }   // a new install
+                repo = target;
             }
-            FindThenCheck();
+            StartUpdate();
         }
 
-        void StartDownload()
+        // The port is here already: the player's saves backed up, the newest code over the old (in place),
+        // then the normal build; FinishUpdate puts the saves (and, if the build fails, the old game) back.
+        void StartUpdate()
+        {
+            target = repo;
+            BeginLog(null);
+            Status("Backing up your saves\u2026");
+            string root = repo;
+            ThreadPool.QueueUserWorkItem(delegate          // a 130 MB copy: off the window's thread
+            {
+                SaveBackup b = null;
+                string err = null;
+                try { b = new SaveBackup(root); } catch (Exception ex) { err = ex.Message; }
+                Post(delegate { BackedUp(b, err); });
+            });
+        }
+
+        void BackedUp(SaveBackup b, string err)
+        {
+            if (b == null) { Fail("Setup could not back up your saves (" + err + "), so it changed nothing."); return; }
+            backup = b;
+            AddLog("saves backed up to " + backup.Dir + " (" + backup.Files + " files, and the game as it is)");
+            gitClone = Directory.Exists(Path.Combine(repo, ".git")) || File.Exists(Path.Combine(repo, ".git"));
+            if (gitClone)
+            {
+                // a git clone gets its code from git; Setup only rebuilds it
+                AddLog("a git clone: the newest code comes with git pull --recurse-submodules");
+                FindThenCheck();
+                return;
+            }
+            StartDownload(true);
+        }
+
+        void StartDownload(bool update)
         {
             ResetProgress();
-            BeginLog(null);
-            AddLog("> download the port into " + target);
-            Status("Downloading the game's build files\u2026");
-            PortDownload d = new PortDownload(target);
+            updating = update;
+            AddLog(update ? "> the newest port over " + target : "> download the port into " + target);
+            Status(update ? "Getting the newest version\u2026" : "Downloading the game's build files\u2026");
+            PortDownload d = new PortDownload(target, update);
             jobKind = JobKind.Download;
             job = d;
             d.Start();
+        }
+
+        // Built or not, after an update: the old game back if the new one was not built, the saves reapplied.
+        void FinishUpdate(bool built)
+        {
+            if (backup == null) return;
+            SaveBackup b = backup;
+            backup = null;
+            List<string> notes = new List<string>();
+            try
+            {
+                if (built) b.DropGame();
+                else notes.Add(b.RestoreGame());
+            }
+            catch (Exception ex) { notes.Add("could not put the previous game back from " + b.Dir + ": " + ex.Message); }
+            try { notes.Add(b.Reapply()); }
+            catch (Exception ex) { notes.Add("could not reapply the saves from " + b.Dir + ": " + ex.Message); }
+            foreach (string n in notes)
+            {
+                AddLog(n);
+                if (setupLog != null) { try { File.AppendAllText(setupLog, n + "\r\n"); } catch (Exception) { } }
+            }
         }
 
         void DownloadEnded(int code)
@@ -1535,12 +1873,14 @@ namespace Inf2Setup
             else Util.RefreshPath();
             // pressing Install accepts Microsoft's license (the line under the button says so)
             string cmd = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; & " + Util.Q(script) + " -Disc " + Util.Q(disc) +
-                         " -Rpcs3 " + Util.Q(rpcs3) + " -AcceptMsvcLicense" + (opt.NoShortcut ? " -NoShortcut" : "") +
+                         " -Rpcs3 " + Util.Q(rpcs3) + (opt.TestFailBuild ? "" : " -AcceptMsvcLicense") + (opt.NoShortcut ? " -NoShortcut" : "") +
                          (opt.NoCleanup ? "" : " -Cleanup") + "; exit [int]$LASTEXITCODE";
             ResetProgress();
             compileLog = Path.Combine(repo, "work\\logs\\compile.log");
             Status("Getting ready\u2026");
-            BeginLog(Path.Combine(repo, "work\\setup.log"));
+            setupLog = Path.Combine(repo, "work\\setup.log");
+            BeginLog(setupLog);
+            if (opt.TestFailBuild) AddLog("(test: the build fails on purpose at step 2, without the license flag)");
             AddLog("RPCS3: " + rpcs3);
             AddLog("game: " + disc);
             jobKind = JobKind.Build;
@@ -1652,7 +1992,7 @@ namespace Inf2Setup
         // One short line: "Downloading tools... 45%", "Building... 3 of 7", "Cleaning up...".
         string StatusText()
         {
-            if (jobKind == JobKind.Download) return "Downloading the game's build files\u2026 " + (int)(JobFraction() * 100) + "%";
+            if (jobKind == JobKind.Download) return (updating ? "Getting the newest version\u2026 " : "Downloading the game's build files\u2026 ") + (int)(JobFraction() * 100) + "%";
             if (jStep < ToolsStep) return "Getting ready\u2026";
             if (jStep == ToolsStep) return "Downloading tools\u2026 " + (int)(jFrac * 100) + "%";
             if (jStep < CleanupStep) return string.Format("Building\u2026 {0} of 7", jStep - ToolsStep);
@@ -1690,6 +2030,7 @@ namespace Inf2Setup
             {
                 bar.Value = 1;
                 ExitCode = 0;
+                FinishUpdate(true);
                 SetState(State.Done);
                 if (opt.ExitWhenDone) CloseSoon();
                 return;
@@ -1809,6 +2150,7 @@ namespace Inf2Setup
                 }
             }
             if (job != null && !job.Exited) job.Kill();
+            FinishUpdate(false);       // stopped half-way: the old game and the saves back
             Native.KeepAwake(false);
             CloseLogFile();
             base.OnFormClosing(e);

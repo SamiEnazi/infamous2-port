@@ -36,13 +36,16 @@ $secs = if ($hdr.seconds) { [int]$hdr.seconds } else { 400 }
 $envs = @{
     PAD_FILE = "$rec\pad.txt"; PAD_SCRIPT_WAIT = "$rec\anchor.flag"
     PS3_FTRACE_KINDS = '5,7,10,12,16,17'; PS3_FTRACE = "5:$($secs + 60):$rec\ftrace.txt"
+    # (rsx5, 2026-11-10) shots and waitimg from the game's own image (window_shot.ps1 -ReqFile): they work
+    # with the display asleep; a build without it never makes shot.req.ready -> PrintWindow as before
+    PS3RECOMP_SHOT_REQ = "$rec\shot.req"
 }
 if ($hdr.pad) { $envs.PAD_SCRIPT = $hdr.pad }
 if ($hdr.replay) { $envs.PS3_PAD_REPLAY = $(if ([IO.Path]::IsPathRooted($hdr.replay)) { $hdr.replay } else { Join-Path $root $hdr.replay }) }   # a recorded route (play.ps1 -RecordRoute), anchor-relative
 $fullMovies = ($hdr.fastmovies -eq '0')   # fast movies are native_run's default for -Driver runs
 if ($hdr.ContainsKey('worldmark')) { $envs.PS3RECOMP_ENG_WORLD_MARK = "$rec\anchor.flag"; if ([int]$hdr.worldmark -gt 0) { $envs.PS3RECOMP_ENG_WORLD_MARK_AFTER = $hdr.worldmark } }
 foreach ($kv in ($Extra -split ';')) { if ($kv -match '^([^=]+)=(.*)$') { $envs[$Matches[1]] = $Matches[2] } }
-Remove-Item "$rec\anchor.flag", "$rec\pad.txt", "$rec\ftrace.txt", "$rec\shot_*.png" -ErrorAction SilentlyContinue
+Remove-Item "$rec\anchor.flag", "$rec\pad.txt", "$rec\ftrace.txt", "$rec\shot_*.png", "$rec\shot.req*" -ErrorAction SilentlyContinue
 $runArgs = @{ Tag = $Tag; Seconds = $secs; Env = $envs; Driver = $Steps; CpuWatch = $true; FullMovies = $fullMovies }
 if ($Exe) { $runArgs.Exe = $Exe }
 if ($SaveFrom) { $runArgs.SaveFrom = $SaveFrom }

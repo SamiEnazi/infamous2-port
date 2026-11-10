@@ -1,8 +1,21 @@
 # Capture the main window of a process to a PNG (works for D3D/Vulkan windows,
 # also when covered: PrintWindow with PW_RENDERFULLCONTENT).
 #   tools\window_shot.ps1 -ProcessId 1234 -Out shot.png
+#   -ReqFile <file>: ask the game for its own last image first (PS3RECOMP_SHOT_REQ=<file>, rsx5 2026-11-10):
+#   it works with the display asleep, when PrintWindow returns black. Used only when the game made
+#   <file>.ready (a build that serves requests); no answer in 4 s -> PrintWindow as before.
 param([Parameter(Mandatory = $true)][int]$ProcessId, [Parameter(Mandatory = $true)][string]$Out,
-      [ValidateSet("print", "screen")][string]$Method = "print")
+      [ValidateSet("print", "screen")][string]$Method = "print", [string]$ReqFile = "")
+if ($ReqFile -and (Test-Path "$ReqFile.ready")) {
+    $full = [System.IO.Path]::GetFullPath($Out)
+    Remove-Item $full -ErrorAction SilentlyContinue
+    [System.IO.File]::WriteAllText("$ReqFile.tmp", $full)
+    Move-Item -Force "$ReqFile.tmp" $ReqFile
+    $dl = (Get-Date).AddSeconds(4)
+    while ((Get-Date) -lt $dl -and -not (Test-Path $full)) { Start-Sleep -Milliseconds 20 }
+    if (Test-Path $full) { "$Out (game image)"; return }
+    Remove-Item $ReqFile -ErrorAction SilentlyContinue   # not served: the window capture below
+}
 Add-Type -AssemblyName System.Drawing
 if (-not ("Win32Shot" -as [type])) {
 Add-Type @"

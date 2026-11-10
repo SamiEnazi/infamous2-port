@@ -35,6 +35,25 @@ What Install does, in order. It asks nothing it can find out itself:
    The status line reads "Downloading tools... / Building... 3 of 7 / Cleaning up...".
 5. **Play.**
 
+**Updating:** run the newest `Setup.exe`, either in the game folder or next to it, and press Install
+(or "Update to the latest version" under Play). On a folder that already has the port, Install:
+
+1. **Backs up** the saves (`game\gamedata\dev_hdd0\home\00000001\savedata`), `input.toml`,
+   `config.local.json` and the game as it is (exe + `SDL2.dll`). They go to
+   `%LOCALAPPDATA%\inFAMOUS2-port\save-backups\<time>\`, not `%TEMP%`, and the newest 3 are kept.
+2. **Gets the newest code.** It asks GitHub (3 API calls) and downloads only if the port commit or a pin
+   differs from `port-version.txt`.
+   - The port's own files are overwritten in place and nothing is deleted. `game\`, `work\`, `play\`
+     and the other player and build folders are never written, and nothing is written through a
+     link (`game\disc` is a junction to the player's disc).
+   - `toolkit\` and `community\erikomis-infamous2-recomp\` are replaced whole: set aside first, and
+     never when a link is inside them.
+   - A git clone is left to `git pull`.
+3. **Builds** with the normal flow.
+4. **Restores, built or not.** If the new game was not built, the old exe and `SDL2.dll` go back, so
+   the player can always play. The saves are copied back: missing ones are added and older ones
+   overwritten, but a save newer than the backup stays.
+
 Pressing Install accepts Microsoft's license for the C++ files; the line under the button says so and
 links to it. **Details** (bottom left) shows the log, which is also written to `work\setup.log`. After a
 failure, **Copy log** copies it for a bug report.
@@ -60,6 +79,7 @@ Windows (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`, .NET Framework
 | `--only-cache` | the build sees only `tools-cache\`: `PORT_ONLY_CACHE=1` and a PATH of Windows folders only |
 | `--exit-when-done` | close after the build. The exit code is 0 for built, 1 for stopped and 2 for closed early. |
 | `--page done` / `--page ask` | show the Play screen / the "Where is RPCS3?" dialog (for screenshots) |
+| `--test-fail-build` | make the build fail on purpose at step 2 (no license flag), to check that the old game and the saves come back |
 
 ## Known limits
 

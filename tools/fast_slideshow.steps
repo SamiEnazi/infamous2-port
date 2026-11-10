@@ -1,0 +1,24 @@
+# Slideshow scene (rsx5 limits audit, 2026-11-09): Sami's save "5. Karma's a Bitch" (work\saves\slideshow-save),
+# the city seen from above where the old 1024-entry texture cache turned the game into a 4-10 fps slideshow.
+# Anchor = the game's first world frame (> 2500 draws, PS3RECOMP_ENG_WORLD_MARK, not in the first 40 s after the
+# first present); then the camera turns right in steps, each view held still while it is measured.
+# Run: tools\fast.ps1 -Tag X -Steps tools\fast_slideshow.steps [-Extra "PS3RECOMP_LIMITS=1"]
+#! seconds 330
+#! savefrom work\saves\slideshow-save\gamedata
+#! worldmark 40
+#! anchor_range 30:280
+#! windows 2:12,15:24,27:36,39:48,51:60
+#! pad w12:0x800000:1.5,w24:0x800000:1.5,w36:0x800000:1.5,w48:0x800000:1.5
+anchorfile 280
+at 8
+shot a8
+at 20
+shot a20
+at 32
+shot a32
+at 44
+shot a44
+at 56
+shot a56
+at 62
+close

@@ -68,6 +68,9 @@ $vars = @{
     # the Vulkan window with the game's own (guest) shader programs, as play.ps1 runs it
     PS3RECOMP_VK_WINDOW         = "1"
     PS3RECOMP_VK_GUEST_PROGRAMS = "1"
+    # tests never keep Sami's display awake (at night it may be asleep; shots come from the
+    # game's own image now): the game's keep-awake is for play only
+    PS3RECOMP_KEEP_AWAKE        = "0"
     # the in-game overlay (F1 HUD / F2 menu): a test never reads or writes Sami's
     # %APPDATA% settings.ini, and the HUD stays off so screenshots compare cleanly
     PS3_OVERLAY_INI             = "$out\settings.ini"
@@ -134,7 +137,7 @@ $exited = $false
 foreach ($ts in ($ShotsAt | Sort-Object)) {
     $wait = [int](($t0.AddSeconds($ts) - (Get-Date)).TotalMilliseconds)
     if ($wait -gt 0 -and $p.WaitForExit($wait)) { $exited = $true; break }
-    try { & "$PSScriptRoot\window_shot.ps1" -ProcessId $p.Id -Out "$out\shot_${ts}s.png" -Method $ShotMethod | Out-Null } catch { "shot at ${ts}s failed: $_" }
+    try { & "$PSScriptRoot\window_shot.ps1" -ProcessId $p.Id -Out "$out\shot_${ts}s.png" -Method $ShotMethod -ReqFile $(if ($vars["PS3RECOMP_SHOT_REQ"]) { $vars["PS3RECOMP_SHOT_REQ"] } else { "" }) | Out-Null } catch { "shot at ${ts}s failed: $_" }
     # live guest-memory probes (read-only) at the same moments
     if ($Probe) {
         foreach ($ln in (Get-Content $Probe | Where-Object { $_ -and -not $_.StartsWith("#") })) {

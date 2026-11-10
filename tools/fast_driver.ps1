@@ -115,7 +115,7 @@ function ScreenDiff([string]$ref, [int[]]$r) {
         $g.Dispose(); $full.Dispose(); $rb.Dispose()
     }
     $tmp = Join-Path $Rec "driver_look.png"
-    try { & (Join-Path $PSScriptRoot "window_shot.ps1") -ProcessId $GamePid -Out $tmp | Out-Null } catch { return 999 }
+    try { & (Join-Path $PSScriptRoot "window_shot.ps1") -ProcessId $GamePid -Out $tmp -ReqFile (Join-Path $Rec "shot.req") | Out-Null } catch { return 999 }
     if (-not (Test-Path $tmp)) { return 999 }
     $bm = New-Object System.Drawing.Bitmap $tmp
     $v = Thumb $bm $r; $bm.Dispose()
@@ -181,7 +181,7 @@ foreach ($raw in $stepsTxt) {
             while ($w -gt 0 -and (Alive)) { Start-Sleep -Milliseconds ([Math]::Min($w, 250)); $w = $script:anchorMs + [int]([double]$rest * 1000) - (Now) }
         }
         "shot" {
-            try { & (Join-Path $PSScriptRoot "window_shot.ps1") -ProcessId $GamePid -Out (Join-Path $Rec "shot_$rest.png") | Out-Null; Note "shot" $rest }
+            try { & (Join-Path $PSScriptRoot "window_shot.ps1") -ProcessId $GamePid -Out (Join-Path $Rec "shot_$rest.png") -ReqFile (Join-Path $Rec "shot.req") | Out-Null; Note "shot" $rest }
             catch { Note "shot" "failed $rest : $_" }
         }
         "waitimg" {

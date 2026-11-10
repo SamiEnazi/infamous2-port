@@ -1,0 +1,22 @@
+# City soak (rsx5 limits audit, 2026-11-09): fast_city3's start (first-save, the dock), then 22 minutes in the
+# city with the camera turning right for 1.5 s every 30 s -- long-session growth (caches, tables, memory) and
+# whether the frame rate holds. Windows: one minute every five (each holds two turns).
+# Run: tools\fast.ps1 -Tag X -Steps tools\fast_soak.steps -Extra "PS3RECOMP_LIMITS=1"
+#! seconds 1560
+#! anchor_range 55:100
+#! savefrom work\saves\first-save\gamedata
+#! windows 60:120,360:420,660:720,960:1020,1260:1320
+#! pad w30:0x800000:1.5,w60:0x800000:1.5,w90:0x800000:1.5,w120:0x800000:1.5,w150:0x800000:1.5,w180:0x800000:1.5,w210:0x800000:1.5,w240:0x800000:1.5,w270:0x800000:1.5,w300:0x800000:1.5,w330:0x800000:1.5,w360:0x800000:1.5,w390:0x800000:1.5,w420:0x800000:1.5,w450:0x800000:1.5,w480:0x800000:1.5,w510:0x800000:1.5,w540:0x800000:1.5,w570:0x800000:1.5,w600:0x800000:1.5,w630:0x800000:1.5,w660:0x800000:1.5,w690:0x800000:1.5,w720:0x800000:1.5,w750:0x800000:1.5,w780:0x800000:1.5,w810:0x800000:1.5,w840:0x800000:1.5,w870:0x800000:1.5,w900:0x800000:1.5,w930:0x800000:1.5,w960:0x800000:1.5,w990:0x800000:1.5,w1020:0x800000:1.5,w1050:0x800000:1.5,w1080:0x800000:1.5,w1110:0x800000:1.5,w1140:0x800000:1.5,w1170:0x800000:1.5,w1200:0x800000:1.5,w1230:0x800000:1.5,w1260:0x800000:1.5,w1290:0x800000:1.5,w1320:0x800000:1.5
+wait v_02_city_intro 120
+sleep 2
+waitimg city_hud 40,20,340,130 15 120
+sleep 2
+anchor
+at 100
+shot a100
+at 700
+shot a700
+at 1300
+shot a1300
+at 1340
+close
