@@ -85,6 +85,12 @@ Windows (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`, .NET Framework
 
 - The exe is not signed, so Windows SmartScreen says "Windows protected your PC" on the first start.
   Click **More info**, then **Run anyway**.
+- The port's folder must be on a local NTFS (or ReFS) drive, because `game\disc` is a junction to the
+  player's game folder. FAT32/exFAT drives (USB sticks, many external disks) and network drives can't hold
+  one; Windows then fails with only "Incorrect function" (GitHub issue #2). So a downloaded-alone
+  Setup.exe on such a drive installs into `%LOCALAPPDATA%\inFAMOUS2-port` instead and says so in the log.
+  The checks (`Get-SetupChecks`) stop with a plain reason when the folder was chosen by hand (`--folder`,
+  or Setup.cmd in such a folder). A game folder on a network drive is refused the same way.
 - The first build downloads about 1.3 GB of tools, and an update downloads them again.
 - GitHub's API answers 60 questions an hour per network without a sign-in. Setup asks 3 per download.
 - Only one Setup runs per folder at a time.

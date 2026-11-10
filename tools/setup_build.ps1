@@ -93,7 +93,15 @@ if (Test-Path $discLink) {
     $i = Get-Item $discLink -Force
     if ($i.LinkType -eq "Junction" -and -not (@($i.Target) -contains $Disc)) { cmd /c rmdir "$discLink" | Out-Null }
 }
-if (-not (Test-Path $discLink)) { New-Item -ItemType Junction -Path $discLink -Target $Disc | Out-Null }
+if (-not (Test-Path $discLink)) {
+    # GitHub issue #2: on FAT32/exFAT or a network drive Windows says only "Incorrect function"
+    try { New-Item -ItemType Junction -Path $discLink -Target $Disc -ErrorAction Stop | Out-Null }
+    catch {
+        throw ("could not link your game folder into the port ($($_.Exception.Message)). The port's folder must be on a " +
+               "local NTFS drive and your game folder on a drive in this PC: put Setup.exe in a folder on your internal drive, " +
+               "for example C:\Games\inFAMOUS2, and run it again")
+    }
+}
 "  $discLink -> $Disc (keep your disc folder where it is)"
 Copy-Tree (Join-Path $Rpcs3 "dev_hdd0\game\$title") (Join-Path $game "dev_hdd0\game\$title") "the 1.04 update (0.2 GB)"
 Copy-Tree (Join-Path $Rpcs3 "dev_flash") (Join-Path $game "dev_flash") "the PS3 firmware files the game reads (0.2 GB)"

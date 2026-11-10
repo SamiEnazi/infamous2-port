@@ -86,6 +86,23 @@ function Save-Url([string]$Url, [string]$Out, [string]$What, [string]$Sha256 = "
     }
 }
 
+# $null when the drive of $Path can hold a junction (local NTFS or ReFS), else what the drive is:
+# "an exFAT drive", "a FAT32 drive", "a network drive", ... (GitHub issue #2).
+function Get-DriveProblem([string]$Path) {
+    try {
+        $full = [System.IO.Path]::GetFullPath($Path)
+        $rootPath = [System.IO.Path]::GetPathRoot($full)
+        if (-not $rootPath -or $rootPath.StartsWith("\\")) { return "a network drive" }
+        $di = New-Object System.IO.DriveInfo $rootPath
+        if ($di.DriveType -eq [System.IO.DriveType]::Network) { return "a network drive" }
+        if (-not $di.IsReady) { return "a drive that is not ready" }
+        if ($di.DriveFormat -in @("NTFS", "ReFS")) { return $null }
+        $fmt = $di.DriveFormat
+        $an = if ($fmt -match '^[AEIOU]') { "an" } else { "a" }
+        return "$an $fmt drive"
+    } catch { return "a drive Setup could not read" }
+}
+
 # One row per check: Ok (true/false/$null = a note, never blocking), Name, Detail
 function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     $root = Split-Path -Parent $PSScriptRoot
@@ -101,6 +118,11 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     $drive = (Get-Item $root).PSDrive
     $free = [math]::Round($drive.Free / 1GB)
     Add $(if ($free -ge 30) { $true } else { $null }) "Free disk space on $($drive.Name):" "$free GB (the build needs about 15 GB while it runs, 4 GB after)"
+    # The port's folder must hold a junction (game\disc -> your game folder): a local NTFS or ReFS
+    # drive. FAT32/exFAT (USB sticks, many external disks) and network drives fail with "Incorrect
+    # function" when step 3 makes the link (GitHub issue #2) -- say so before 1.3 GB of downloads.
+    $fsProblem = Get-DriveProblem $root
+    Add $(if (-not $fsProblem) { $true } else { $false }) "Port folder's drive" $(if (-not $fsProblem) { "can hold the link to your game folder" } else { "the port's folder is on $fsProblem, which cannot hold the link to your game folder. Put Setup.exe in a folder on your PC's internal drive (NTFS), for example C:\Games\inFAMOUS2, and run it again" })
     $vk = Test-Path (Join-Path $env:WINDIR "System32\vulkan-1.dll")
     Add $vk "Vulkan graphics driver" $(if ($vk) { "found" } else { "update your graphics driver (NVIDIA, AMD or Intel)" })
 
@@ -120,6 +142,10 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     $title = $null
     if (-not $Disc) { Add $false "Game disc folder" "choose the folder that holds PS3_GAME" }
     elseif (-not (Test-Path (Join-Path $Disc "PS3_GAME\PARAM.SFO"))) { Add $false "Game disc folder" "no PS3_GAME\PARAM.SFO in $Disc" }
+    elseif ((Get-DriveProblem $Disc) -eq "a network drive") {
+        # a junction cannot point at a network share
+        Add $false "Game folder's drive" "your game folder ($Disc) is on a network drive, which the port's link cannot point to. Copy the game folder (the one with PS3_GAME) to a drive in this PC and choose it there"
+    }
     else {
         $sfo = Read-Sfo (Join-Path $Disc "PS3_GAME\PARAM.SFO"); $title = $sfo["TITLE_ID"]
         $known = $script:KnownTitles[$title]

@@ -167,7 +167,9 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 
 ## 📦 Install
 
-1. ⬇️ Download **`Setup.exe`** from the [latest release](../../releases/latest) and run it.
+1. ⬇️ Download **`Setup.exe`** from the [latest release](../../releases/latest) and run it. Put it in a folder on
+   your PC's internal drive, for example `C:\Games\inFAMOUS2`. A USB stick or an exFAT/FAT32 external disk can't
+   hold the link Setup makes to your game folder; Setup then installs into `%LOCALAPPDATA%\inFAMOUS2-port` instead.
 2. ▶️ Press **Install**. That's all. Setup:
    - 📥 downloads the port's files (about 40 MB) into a folder next to itself
    - 🔎 finds RPCS3 and your game by itself (it asks only if it can't)

@@ -384,7 +384,7 @@ namespace Inf2Setup
             string sys = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
             if (string.IsNullOrEmpty(sys)) sys = "C:\\";
             foreach (string c in new string[] { Path.Combine(exeDir, "inFAMOUS2-port"), Path.Combine(local, "inFAMOUS2-port"), Path.Combine(sys, "inFAMOUS2-port") })
-                if (HasPort(c)) return c;
+                if (HasPort(c) && CanLink(c)) return c;   // one on a drive that cannot link never finished
             return null;
         }
 
@@ -492,21 +492,56 @@ namespace Inf2Setup
             return n;
         }
 
+        // The drive of `path` can hold the junction Setup makes (game\disc -> the player's game folder):
+        // a local NTFS or ReFS drive. FAT32/exFAT (USB sticks, many external disks) and network drives
+        // cannot, and Windows then fails with "Incorrect function" at the start of the build (GitHub
+        // issue #2: Setup.exe on such a drive stopped at 23%).
+        public static bool CanLink(string path)
+        {
+            return DriveProblem(path) == null;
+        }
+        // null when the drive is fine, else what it is ("exFAT", "FAT32", "a network drive", ...).
+        public static string DriveProblem(string path)
+        {
+            try
+            {
+                string root = Path.GetPathRoot(Path.GetFullPath(path));
+                if (string.IsNullOrEmpty(root) || root.StartsWith("\\\\", StringComparison.Ordinal)) return "a network drive";
+                DriveInfo di = new DriveInfo(root);
+                if (di.DriveType == DriveType.Network) return "a network drive";
+                if (!di.IsReady) return "a drive that is not ready";
+                string f = di.DriveFormat;
+                if (string.Equals(f, "NTFS", StringComparison.OrdinalIgnoreCase) || string.Equals(f, "ReFS", StringComparison.OrdinalIgnoreCase)) return null;
+                return "a " + f + " drive";
+            }
+            catch (Exception) { return "a drive Setup could not read"; }
+        }
+        // The log line when a downloaded-alone Setup.exe could not use the folder next to itself
+        // because of its drive, or null.
+        public static string LinkNote(string exeDir, string target)
+        {
+            string p = DriveProblem(exeDir);
+            if (p == null || string.Equals(Path.GetFullPath(target), Path.GetFullPath(Path.Combine(exeDir, "inFAMOUS2-port")), StringComparison.OrdinalIgnoreCase)) return null;
+            return "Setup.exe is on " + p + ", which cannot hold the link to your game folder (that needs a local NTFS drive): installing into " + target + " instead.";
+        }
+
         // Where a downloaded-alone Setup.exe puts the game: next to itself, else in the user's local
         // app data, else on the system drive; a plain path (build tools dislike other alphabets) with
-        // about 15 GB free. An earlier download is used again.
+        // about 15 GB free, on a drive that can hold the game\disc link (CanLink). An earlier download
+        // is used again (not one on a drive that cannot link: that install could never finish).
         public static string DefaultTarget(string exeDir)
         {
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string sys = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
             if (string.IsNullOrEmpty(sys)) sys = "C:\\";
             string[] cands = { Path.Combine(exeDir, "inFAMOUS2-port"), Path.Combine(local, "inFAMOUS2-port"), Path.Combine(sys, "inFAMOUS2-port") };
-            foreach (string c in cands) if (HasPort(c)) return c;
+            foreach (string c in cands) if (HasPort(c) && CanLink(c)) return c;
             foreach (string c in cands)
             {
                 try
                 {
                     if (!IsAscii(c)) continue;
+                    if (!CanLink(c)) continue;
                     if (Directory.Exists(c) && !EmptyDir(c)) continue;
                     DriveInfo di = new DriveInfo(Path.GetPathRoot(c));
                     if (!di.IsReady || di.AvailableFreeSpace < (15L << 30)) continue;
@@ -1706,7 +1741,8 @@ namespace Inf2Setup
             if (repo == null)
             {
                 target = string.IsNullOrEmpty(opt.Folder) ? Util.DefaultTarget(exeDir) : Path.GetFullPath(opt.Folder);
-                if (!Util.HasPort(target)) { BeginLog(null); StartDownload(false); return; }   // a new install
+                string driveNote = string.IsNullOrEmpty(opt.Folder) ? Util.LinkNote(exeDir, target) : null;   // GitHub issue #2
+                if (!Util.HasPort(target)) { BeginLog(null); if (driveNote != null) AddLog(driveNote); StartDownload(false); return; }   // a new install
                 repo = target;
             }
             StartUpdate();
@@ -1851,6 +1887,7 @@ namespace Inf2Setup
                     return;
                 }
                 if (n == "PS3 firmware in RPCS3") { Fail("RPCS3 has no PS3 firmware yet. In RPCS3: File > Install Firmware, then press Try again."); return; }
+                if (n == "Port folder's drive" || n == "Game folder's drive") { Fail(char.ToUpper(r.Detail[0]) + r.Detail.Substring(1) + "."); return; }   // GitHub issue #2
                 if (n.StartsWith("Game update", StringComparison.Ordinal)) { Fail("The game's 1.04 update is not in RPCS3 yet. In RPCS3: File > Install Packages, then press Try again."); return; }
                 Fail(n + ": " + r.Detail);
                 return;
