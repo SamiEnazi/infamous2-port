@@ -1,0 +1,20 @@
+# inFAMOUS 2 v1.04 (PPU-41a7d047c573c78c0307506c9d1b52d15a66e4f5): run-time SPU instruction
+# alternatives (SPU_PATCH_FILE, toolkit tools/spu_lifter.py load_spu_patches; the switches live in
+# runtime/spu/spu_patch.c). rebuild_win.py passes this file to every SPU lift (PORT_SPU_PATCHES=0 =
+# a lift without it). The SPU twin of cheats/patches.txt; RPCS3's SPU patches can be added as lines.
+#
+#   switch <name> <setting> <default> <value>=<alternative> ...
+#       a run-time switch: the environment variable / settings.ini line / menu setting that picks
+#       the alternative, its value when unset, and the alternative each value runs (0 = original)
+#   <image> <LS address> <original word> <alternative>[,<alternative>...] <switch>
+#       image = the lifted job module, jobmod_<sha1[:12]>_e<entry offset> (extract_eboot_jobmods.py)
+#
+# "Disable Mesh Trimming" by Yahfz (RPCS3 patch database, 1.04 for BCUS98125 / BCES01143 /
+# BCES01144 / BCES01229: be32 0x008875c0 = 0x4020007f): "Allows the game to render correctly at
+# higher resolutions than what the PS3 supports." EBOOT 0x8875C0 is in the Edge Geometry job
+# module (image 223), LS 0xA7C0: the triangle cull's `brnz $r4, 0xA80C` (cull mode != 0 -> cull).
+# As a nop every call takes the job's own no-culling path. PS3RECOMP_MESH_TRIM=1 = the game's
+# culling (what the job replay recordings ran); 0 = the patch (the default, at every resolution:
+# Sami, 2026-11-10).
+switch mesh_trim PS3RECOMP_MESH_TRIM 0 0=1 1=0
+jobmod_d0d15ec83992_ea2a0 0xA7C0 21000984 4020007F mesh_trim

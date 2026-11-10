@@ -184,3 +184,64 @@ Dev code (gsearch/air_tick/posscan/regions knobs, glide v3) stays in work\cheats
   0x42FC7A14, 0x430D8C38, 0x4314CEB8) + 4 more -350 (0x41F6A2C0, 0x41FCF9D4, 0x41FD5114, 0x41FE54B4),
   each scaled to 10% for one glide: none changed it (1.35-1.38 s, -343..-353/s^2). GLIDE PARKED.
   (Not tested: the rest of cheats13's list, e.g. -3.5 at 0x41D4F7E0.. and -14.8 at 0x43392AF4..)
+
+## Glide (2026-11-10, static only; cheats agent on branch glide) -- built, NOT yet run
+
+How it was found: bungholio's US 1.00 "Hold L2 + X To Fly" code (ArtemisPS3 list "inFamous 2
+BCUS98125 v01.00 ...") writes a z speed into the physics proxy's velocity; its AoB matched our
+EBOOT once (0x004A63FC, the proxy sync 0x004A63A0, where the air movement's velocity arrives). From
+the game's script reflection tables (names FALL_STATE, JUMP_STATE, SET_FLOAT_PARAMS, gravity,
+INITIATE_GLIDE, FLOAT_REMAINING at 0x009723E0..) and the enum name lists at 0x009ECBA0 / 0x009ECBB8
+back to the native code. The Stage B heap search could not find it: the value is a constant in
+the ELF, not on the heap.
+
+- Every character in the air has a jump/fall controller A ([A+0x1C] = the character; for the
+  player the object at [0x00A6E9E4]). A+0x118 jump state (0 Launch, 1 PreFall, 2 Fall, 3 Assist,
+  4 Attach, 5 Glide), A+0x120 fall state (0 Normal, 1 Danger, 2 Float, 3 Attack, 4 MeteorDrop,
+  5 Yank), A+0x124 frame of the last fall state change, A+0x60 gravity vector (x, y, z, w; z up),
+  the acceleration the air integrator 0x0019BE18 adds to the velocity.
+- Fall state Float = the Static Thrusters. SetFallState 0x0019FB90; the fall state machine
+  0x001A0378 enters Float when the thrusters button (mask at [0x00A2C8C8]) is pressed in the air and
+  0x00154728 allows it (power 0x49 owned in the progress struct, character +0x2648 == 0), or when
+  the character goes airborne with it held (0x001A6844). It stays in Float while the button is held
+  (or A+0x138 forces it), power 0x49 is usable (0x00153860: energy > 0, or the power's energy rate
+  is 0) and no drop/meteor drop is asked; each frame it charges the power's energy rate
+  (0x00155EE0) and adds the frame time to A+0x12C (float time this jump, used only to give the
+  upgraded thrusters' lift once per jump).
+- UpdateGravity 0x0019BB20 (each air frame from 0x001A696C, and on every fall state change):
+  A+0x60 = the character's gravity (character +0x160, ~(0, 0, -1500, 0)); in Float only,
+  z = max(z, -350). -350 is the float at 0x00747488 (z of a vector in the game's movement tuning
+  block 0x00747460, read-only data; its only reader is UpdateGravity). This is the measured
+  -350/s^2 of the glide (Stage B), and on entering Float while rising the game scales the upward
+  speed by sqrt(new gravity / old gravity) so the top of the jump stays as high (the "R1 cuts a
+  rising jump" seen in Stage B).
+- Also in Float (read, not checked in a run): the air-steering factor A+0x94 is 0.5 instead of
+  1.0; with the powers 0x4A..0x4C (likely the thruster upgrades; bits A+0x114..0x116, set from the
+  progress struct each frame) the thrusters add a lift that decays (SET_FLOAT_PARAMS values
+  A+0xF0/0x100/0x110/0x130), and with 0x4C a fall faster than -1000 is eased back towards -1000.
+- No glide timer: the script value FLOAT_REMAINING returns a constant FLT_MAX; the glide lasts while
+  the button is held. The only possible limit is energy: in runs cheats8-14 (2.8 s glides, probe
+  logging every energy change) energy stayed 180/180, so the thrusters' rate is 0 at that point of
+  the game. Infinite energy covers it anyway. No "unlimited glide" cheat: nothing to remove.
+
+| Cheat | How |
+|---|---|
+| Glide fall speed (Normal / 2x / 4x / 8x slower fall) | hook UpdateGravity 0x0019BB20: after the game's body, when A+0x120 == 2 (Float) and [A+0x1C] is Cole, A+0x68 (gravity z, normally -350) *= 1/2, 1/4, 1/8. Off = empty slot. |
+
+Side effects checked (static): the hooked function sets A+0x60 for every character, but the cheat
+only touches Cole's controller and only in Float; every other fall state and character keeps the
+game's value. UpdateGravity runs again on every air frame and on every fall state change (states
+0,1,3,4,5 through 0x0019FEEC, Float through 0x001A0120), so the scaled value never outlives the
+glide, and switching the cheat off restores -350 on the next air frame. The tuning constant itself
+is not written (it is shared read-only data). Readers of A+0x60 checked: the air integrator and the
+fall state machine (Danger check, Normal state only; the rise scaling on Float entry, which keeps
+the jump's top height); ~14 more vector loads of +0x60 in the movement code were not traced. All
+of them read the glide gravity the game itself sets there, now scaled.
+Untested: a scripted glide (A+0x138) gets the same scaling.
+
+Test probe: with PS3_CHEATS_PROBE=1 the UpdateGravity hook is set too (cheat off or on) and Cole's
+update logs one "[cheats] glide probe: <s> s, lost <h> height (<h/s>), gravity <g>, setting <n>"
+line per glide, plus "[cheats] glide: gravity -350 -> <scaled>" while the cheat scales it.
+
+Build: toolkit agent/glide (= agent/next, no toolkit change), project branch glide, lifted with
+PORT_CHEATS_DIR=wt-proj\glide\cheats into work\port-glide, exe work\port\build-glide (not run).

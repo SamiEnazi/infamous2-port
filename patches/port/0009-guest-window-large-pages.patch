@@ -1,0 +1,43 @@
+From: SamiEnazi <85966743+SamiEnazi@users.noreply.github.com>
+Subject: [PATCH] guest window: reserve it through ppu_vm_reserve (PS3_LARGE_PAGES)
+
+The 4 GB guest window is reserved by the toolkit's ppu_vm_reserve, which puts
+the hot ranges (ELF, main stack, sys_memory heap) in 2 MB pages when
+PS3_LARGE_PAGES is set and the account holds "Lock pages in memory", and
+otherwise makes exactly the old VirtualAlloc(MEM_RESERVE). A toolkit without
+the function links ppu_vm_reserve_plain here (/alternatename), the old call.
+diff --git a/main.cpp b/main.cpp
+index de6a509..5c2afc8 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -80,6 +80,9 @@ void     ppu_fs_register(void);               /* cellFs over the real game direc
+ void     lv2_init_syscalls(void);             /* the lv2 syscall table */
+ void     cellGame_init_from_paramsfo(const char* sfo_path);  /* libs/system/cellGame.c */
+ int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
++/* toolkit ppu_loader.cpp (ppu-mem): the guest window's reservation, the hot ranges in large pages
++ * with PS3_LARGE_PAGES; a toolkit without it links ppu_vm_reserve_plain below (the old one). */
++uint8_t* ppu_vm_reserve(uint64_t size);
+ 
+ /* This project's own: load whatever real system PRX modules the title needs
+  * into guest RAM and register their exports. stubs.cpp has the empty version
+@@ -412,11 +415,19 @@ static LONG WINAPI vm_commit_veh(EXCEPTION_POINTERS* ep)
+ }
+ #endif
+ 
++#ifdef _WIN32
++extern "C" uint8_t* ppu_vm_reserve_plain(uint64_t size)
++{
++    return (uint8_t*)VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE, PAGE_READWRITE);
++}
++#pragma comment(linker, "/alternatename:ppu_vm_reserve=ppu_vm_reserve_plain")
++#endif
++
+ static bool alloc_guest_vm(void)
+ {
+ #ifdef _WIN32
+     AddVectoredExceptionHandler(1, vm_commit_veh);
+-    vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
++    vm_base = ppu_vm_reserve(VM_SIZE);   /* = VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE) unless PS3_LARGE_PAGES */
+     ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
+ #else
+     /* No vectored exception handlers off Windows, so the arena is committed up

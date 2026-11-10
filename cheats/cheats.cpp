@@ -21,6 +21,7 @@
  *   0x00363E54            ApplyHealthDelta(r3 character, f1 delta, r5 damage or 0)
  *   0x00364044            TakeDamage(r3 character, r4 damage: +0x7C amount, +0x64 source)
  *   0x00A64E50            XP: available, earned (u32 pair; the save keeps it in its first record)
+ *   0x0019BB20            UpdateGravity(r3 jump/fall controller A): A+0x60 gravity; the glide's -350
  *
  * Test knobs (scripted runs; Sami never needs them):
  *   PS3_CHEATS="id=value,..."        at the first Cole update
@@ -79,9 +80,19 @@ constexpr uint32_t kFnAddKarma = 0x0012FC6C;      /* AddKarma(r3 G, f1 delta, r5
  * derived from the shards at every load). */
 constexpr uint32_t kFnBatteryBonus = 0x0009B780;  /* r3 shard progress: [r3+0x14] data: +0x38 energy/level, +0x40 levels */
 constexpr uint32_t kGBatteryBits = kG + 0x944;
-/* Movement (snapshots, runs cheats5-7; for a later glide cheat): position +0x1560, velocity +0x1570
- * (x, y, z up; ~cm), copies at +0x1C14/+0x1C20; gravity ~-1500/s^2, Static Thrusters ~-350/s^2.
- * Writing the velocity here does nothing (run cheats7): the physics state lives elsewhere. */
+/* Movement (snapshots, runs cheats5-7): position +0x1560, velocity +0x1570 (x, y, z up; ~cm), copies
+ * at +0x1C14/+0x1C20; gravity ~-1500/s^2, Static Thrusters ~-350/s^2. Writing the velocity here does
+ * nothing (run cheats7): those are copies; the air movement runs in a jump/fall controller A.
+ * Gliding (static, 2026-11-10; NOTES.md "Glide"): every character in the air has a controller A
+ * ([A+0x1C] = the character) with fall state A+0x120 (0 Normal, 1 Danger, 2 Float = Static Thrusters,
+ * 3 Attack, 4 MeteorDrop, 5 Yank) and gravity vector A+0x60 (x, y, z, w; z = +0x68), the acceleration
+ * its air integrator 0x0019BE18 applies. UpdateGravity 0x0019BB20 (each air frame and at every fall
+ * state change) sets A+0x60 = the character's gravity (+0x160) and, in Float only, z = max(z, -350):
+ * -350 is a constant of the game's movement tuning (0x00747488, read nowhere else). The glide has no
+ * timer (the script value FLOAT_REMAINING is a constant FLT_MAX); it lasts while R1 is held. */
+constexpr uint32_t kFnUpdateGravity = 0x0019BB20;  /* UpdateGravity(r3 A) */
+constexpr uint32_t kAOwner = 0x1C, kAGravityZ = 0x68, kAFallState = 0x120;
+constexpr uint32_t kFallFloat = 2;
 
 /* ---- guest helpers (guest thread: inside a hook) ------------------------------------ */
 bool gptr(uint32_t a) { return a >= 0x10000u && a < 0xC0000000u && !(a & 3u); }
@@ -109,6 +120,10 @@ bool s_karma_bypass;                              /* our own AddKarma call: no l
 std::atomic<int> s_kblocked{0}, s_kscaled{0};
 /* battery */
 std::atomic<int> g_maxbat{0}, g_recompute{0};
+/* glide: choice index (0 = the game's own glide) */
+std::atomic<int> g_glide{0};
+std::atomic<long long> s_glided{0};
+constexpr float kGlideScale[] = { 1.0f, 0.5f, 0.25f, 0.125f };
 /* glide research (tests): snapshots of Cole's character object */
 int s_snap_left, s_snap_every = 2;
 long long s_snap_n;
@@ -118,6 +133,7 @@ void hooks_update();
 /* ---- the hooks ----------------------------------------------------------------------- */
 void timeline_poll(struct ppu_context* ctx, uint32_t c);
 void probe_tick(uint32_t c);
+void glide_probe(uint32_t c);
 
 /* Add `n` to the XP pair (available, earned), on the guest thread. */
 void xp_add(long long n)
@@ -188,7 +204,7 @@ void hook_cole_update(struct ppu_context* ctx, ppu_hook_body body)
     }
     if (s_snap_left > 0) snap_write(c);
     if (s_timeline) timeline_poll(ctx, c);
-    if (s_probe) probe_tick(c);
+    if (s_probe) { probe_tick(c); glide_probe(c); }
 }
 
 /* AddKarma: the side lock, the multiplier and XP for karma (not for Add karma's own call). */
@@ -221,6 +237,50 @@ void hook_battery_bonus(struct ppu_context* ctx, ppu_hook_body body)
     const uint32_t bits = vm_read32(kGBatteryBits);   /* the recompute adds 15 per set bit itself */
     full += 15.0 * (((bits & 0x20) ? 0 : 1) + ((bits & 0x40) ? 0 : 1));
     if (full > ctx->fpr[1]) ctx->fpr[1] = full;
+}
+
+/* UpdateGravity: with Glide fall speed, the gravity the game has just set for Cole's glide (fall
+ * state Float only) is scaled: he sinks 2x/4x/8x slower while R1 is held. Other fall states and
+ * every other character keep the game's value; UpdateGravity sets it again on every air frame and
+ * at every fall state change, so nothing is left over when the glide ends or the cheat goes off. */
+uint32_t s_cole_a;   /* PS3_CHEATS_PROBE: Cole's jump/fall controller, seen in UpdateGravity */
+void hook_update_gravity(struct ppu_context* ctx, ppu_hook_body body)
+{
+    const uint32_t a = (uint32_t)ctx->gpr[3];
+    ppu_hook_call(ctx, body);
+    if (!gptr(a)) return;
+    const uint32_t c = player();
+    if (!c || vm_read32(a + kAOwner) != c) return;
+    s_cole_a = a;
+    const int k = g_glide.load(std::memory_order_relaxed);
+    if (k <= 0 || k >= (int)(sizeof kGlideScale / sizeof kGlideScale[0])) return;
+    if (vm_read32(a + kAFallState) != kFallFloat) return;
+    const float g = rdf(a + kAGravityZ);
+    if (g < 0.0f) {
+        wrf(a + kAGravityZ, g * kGlideScale[k]);
+        if (s_probe && s_glided.fetch_add(1, std::memory_order_relaxed) % 120 == 0)
+            fprintf(stderr, "[cheats] glide: gravity %g -> %g\n", g, rdf(a + kAGravityZ));
+    }
+}
+
+/* PS3_CHEATS_PROBE (tests), from Cole's update every frame: one line per glide -- how long it
+ * lasted, how much height he lost (position +0x1568, ~cm) and the gravity it ran with. */
+constexpr uint32_t kPosZ = 0x1568;
+void glide_probe(uint32_t c)
+{
+    static bool was;
+    static double t0;
+    static float z0, g0;
+    const uint32_t a = s_cole_a;
+    const bool in_float = gptr(a) && vm_read32(a + kAOwner) == c && vm_read32(a + kAFallState) == kFallFloat;
+    if (in_float && !was) { t0 = now_s(); z0 = rdf(c + kPosZ); g0 = rdf(a + kAGravityZ); }
+    if (!in_float && was) {
+        const double dt = now_s() - t0;
+        const float dz = z0 - rdf(c + kPosZ);
+        fprintf(stderr, "[cheats] glide probe: %.2f s, lost %.0f height (%.0f/s), gravity %g, setting %d\n",
+                dt, (double)dz, dt > 0.0 ? dz / dt : 0.0, (double)g0, g_glide.load());
+    }
+    was = in_float;
 }
 
 /* SetHealth: with Invincibility Cole's health never goes down (healing still works). */
@@ -291,6 +351,7 @@ void hooks_update()
     ppu_hook_set(kFnTakeDamage, (g_onehit || s_probe) ? hook_take_damage : nullptr);
     ppu_hook_set(kFnAddKarma, (g_kside || g_kmult > 1 || g_kxp > 0) ? hook_add_karma : nullptr);
     ppu_hook_set(kFnBatteryBonus, g_maxbat ? hook_battery_bonus : nullptr);
+    ppu_hook_set(kFnUpdateGravity, (g_glide > 0 || s_probe) ? hook_update_gravity : nullptr);
 }
 
 /* ---- the menu's cheats --------------------------------------------------------------- */
@@ -313,6 +374,13 @@ int apply_kmult(ps3_cheat* c) { g_kmult = (int)c->value < 1 ? 1 : (int)c->value;
 int apply_kxp(ps3_cheat* c)   { g_kxp = (int)c->value < 0 ? 0 : (int)c->value; hooks_update(); return 1; }
 int apply_kblue(ps3_cheat* c) { g_karma_add += (long long)c->value; hooks_update(); return 1; }
 int apply_kred(ps3_cheat* c)  { g_karma_add -= (long long)c->value; hooks_update(); return 1; }
+int apply_glide(ps3_cheat* c)
+{
+    const int k = (int)c->value;
+    g_glide = k > 0 && k < (int)(sizeof kGlideScale / sizeof kGlideScale[0]) ? k : 0;
+    hooks_update();
+    return ppu_hook_exists(kFnUpdateGravity) ? 1 : 0;
+}
 int apply_maxbat(ps3_cheat* c)
 {
     g_maxbat = c->value != 0.0;
@@ -324,6 +392,7 @@ int apply_maxbat(ps3_cheat* c)
 const char* const kKarmaSide[] = { "Off", "Hero (blue) only", "Infamous (red) only" };
 const char* const kJump[] = { "Normal", "2x higher", "3x higher", "5x higher", "10x higher" };
 const char* const kSpeed[] = { "Normal", "Frozen", "Quarter speed", "Half speed", "Double speed" };
+const char* const kGlide[] = { "Normal", "Longer", "2x as long", "3x as long" };   /* gravity /2, /4, /8: measured 3.1 s -> 6.4 s / 9.2 s */
 
 ps3_cheat s_god = { "god", "Invincibility",
     "Cole's health never drops (healing still works). If you get stuck where the game expects you to "
@@ -332,6 +401,10 @@ ps3_cheat s_energy = { "energy", "Infinite energy",
     "Electricity refills every frame: use any power as often as you like.", "Cole", PS3_CHEAT_TOGGLE, apply_energy };
 ps3_cheat s_jump = { "jump", "Super jump", "How high Cole jumps.", "Cole", PS3_CHEAT_CHOICE, apply_jump,
     0, 0, 0, NULL, kJump, 5 };
+ps3_cheat s_glide = { "glide", "Longer glide",
+    "Cole sinks more slowly while gliding with the Static Thrusters (hold R1 in the air), so a glide lasts "
+    "longer and goes farther. Only the glide changes: jumps, falls and everyone else are as normal.", "Cole",
+    PS3_CHEAT_CHOICE, apply_glide, 0, 0, 0, NULL, kGlide, 4 };
 ps3_cheat s_onehit = { "onehit", "One-hit kills",
     "Anyone Cole hurts dies from that hit. Hits from others are unchanged.", "Enemies", PS3_CHEAT_TOGGLE, apply_onehit };
 ps3_cheat s_speed = { "speed", "Enemy speed", "How fast enemies and other people move.", "Enemies",
@@ -364,6 +437,7 @@ void refresh()
     s_energy.unavailable = ppu_hook_exists(kFnColeUpdate) ? NULL : lift;
     s_onehit.unavailable = ppu_hook_exists(kFnTakeDamage) ? NULL : lift;
     s_jump.unavailable   = ppu_patch_lifted(SLOT_JUMP) ? NULL : lift;
+    s_glide.unavailable  = ppu_hook_exists(kFnUpdateGravity) ? NULL : lift;
     s_speed.unavailable  = ppu_patch_lifted(SLOT_NPC_SPEED) ? NULL : lift;
     s_noattack.unavailable = ppu_patch_lifted(SLOT_NO_ATTACK) ? NULL : lift;
     s_xpc.unavailable    = !ppu_hook_exists(kFnColeUpdate) ? lift : gptr(s_xp) ? NULL : "XP not located";
@@ -535,16 +609,17 @@ void probe_tick(uint32_t c)
     last = t;
     if (s_probe_xp >= 0 && s_ticks.load() > 120) { scan_pair((uint32_t)s_probe_xp); s_probe_xp = -1; }
     fprintf(stderr, "[cheats] probe: Cole %08X health %g/%g energy %g/%g xp %u/%u karma %g ticks %lld blocked %d "
-            "boosted %d kblocked %d kscaled %d\n",
+            "boosted %d kblocked %d kscaled %d glided %lld\n",
             c, rdf(c + kHp), rdf(c + kHpMax), rdf(c + kEnergy), rdf(c + kEnergyMax),
             gptr(s_xp) ? vm_read32(s_xp) : 0, gptr(s_xp) ? vm_read32(s_xp + 4) : 0, rdf(kKarma),
-            s_ticks.load(), s_blocked.load(), s_boosted.load(), s_kblocked.load(), s_kscaled.load());
+            s_ticks.load(), s_blocked.load(), s_boosted.load(), s_kblocked.load(), s_kscaled.load(),
+            s_glided.load());
 }
 
 struct Init {
     Init()
     {
-        ps3_cheat* all[] = { &s_god, &s_energy, &s_maxbat, &s_jump, &s_onehit, &s_speed, &s_noattack, &s_xpc,
+        ps3_cheat* all[] = { &s_god, &s_energy, &s_maxbat, &s_jump, &s_glide, &s_onehit, &s_speed, &s_noattack, &s_xpc,
                              &s_kside, &s_kmult, &s_kxp, &s_kblue, &s_kred };
         for (ps3_cheat* c : all) ps3_cheat_register(c);
         ps3_cheats_set_note("XP and karma changed here are real: the game writes them into your save the next "

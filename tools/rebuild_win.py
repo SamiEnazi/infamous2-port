@@ -34,6 +34,9 @@ DEPS = os.path.join(ROOT, "deps")
 # PORT_SPU_NATIVES_FILE: another natives.txt. Defaults: work/rewrites/spu and its natives.txt.
 SPU_REWRITES = os.path.abspath(os.environ.get("PORT_SPU_REWRITES") or os.path.join(WORK, "rewrites", "spu"))
 SPU_NATIVES = os.path.abspath(os.environ.get("PORT_SPU_NATIVES_FILE") or os.path.join(SPU_REWRITES, "natives.txt"))
+# Run-time SPU instruction alternatives (trim, 2026-11-10): RPCS3-style SPU patches as switches the
+# game flips while it runs (tools/spu_patches.txt; toolkit spu_lifter.py SPU_PATCH_FILE).
+SPU_PATCHES = os.path.join(ROOT, "tools", "spu_patches.txt")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import port_paths   # RPCS3 / Visual Studio / LLVM / Ninja on this PC (config.local.json, Setup.cmd)
 
@@ -109,6 +112,12 @@ def run(step, cmd, cwd=PORT, env_defaults=None):
             # PORT_SPU_NATIVES=0 = no hooks (and no rewrites compiled).
             if os.environ.get("PORT_SPU_NATIVES", "1") != "0" and os.path.isfile(SPU_NATIVES):
                 env.setdefault("SPU_NATIVE_FILE", SPU_NATIVES)
+            # SPU instruction alternatives (tools/spu_patches.txt): each listed instruction is lifted
+            # with its alternatives behind a run-time switch, e.g. Yahfz's "Disable Mesh Trimming"
+            # (PS3RECOMP_MESH_TRIM, default 0 = the patch on). PORT_SPU_PATCHES=0 = a lift without
+            # them (the game's code only); a toolkit without the feature ignores the variable.
+            if os.environ.get("PORT_SPU_PATCHES", "1") != "0" and os.path.isfile(SPU_PATCHES):
+                env.setdefault("SPU_PATCH_FILE", SPU_PATCHES)
         p = subprocess.run(cmd, cwd=cwd, stdout=lf, stderr=subprocess.STDOUT, env=env)
         lf.write(f"[exit {p.returncode} after {time.time() - t0:.1f}s]\n")
     if p.returncode != 0:
@@ -152,6 +161,12 @@ OUR_PORT_SRC = os.path.join(ROOT, "port_src")          # new files we add to the
 CHEATS = os.path.join(WORK, "cheats")                  # the cheats' title side: the working copy
 if not os.path.isfile(os.path.join(CHEATS, "cheats.cpp")):   # ... or the published one (cheats/)
     CHEATS = os.path.join(ROOT, "cheats")
+# PORT_CHEATS_DIR: another cheats folder (cheats.cpp + hooks.txt + patches.txt), e.g. a project
+# worktree's cheats/ (an agent branch), so a build of it leaves work/cheats alone.
+if os.environ.get("PORT_CHEATS_DIR"):
+    CHEATS = os.path.abspath(os.environ["PORT_CHEATS_DIR"])
+    if not os.path.isfile(os.path.join(CHEATS, "cheats.cpp")):
+        sys.exit("PORT_CHEATS_DIR: no cheats.cpp in " + CHEATS)
 PORT_PATCHES = os.path.join(ROOT, "patches", "port")   # our edits to community port files
 
 
@@ -180,7 +195,8 @@ def step_port():
         rel = os.path.relpath(d, PORT).replace("\\", "/")
         if rel not in patched and os.path.isfile(d) and open(s, "rb").read() == open(d, "rb").read():
             continue   # unchanged files keep their mtime: no needless recompile
-        shutil.copy2(s, d)
+        shutil.copy(s, d)   # a changed file gets a fresh mtime: copy2 kept the source's, and a source older
+                            # than the object ninja built from another version was never recompiled
         n += 1
     print(f"  {n} port file(s) copied")
     # tools/apply_patch.py, not git: the build needs no git (byte-identical to `git apply` on these patches)
@@ -284,6 +300,18 @@ def step_compile():
         lift_opt += ";" + u; spu_arch += ";" + u; c_rel += " " + u + " " + w; cxx_rel += " " + u + " " + w
     elif pgo:
         raise StepError("PORT_PGO must be gen or use:<profdata>, not %r" % pgo)
+    # PORT_LIFT_LTO=thin (ppu-xfn, 2026-11-10): ThinLTO over the lifted PPU + firmware TUs, so a
+    # hot call into another chunk can be inlined (with PGO: by its profile). lld-link runs the
+    # back ends, PORT_JOBS at once, and caches them in the build tree (a runtime-only change
+    # relinks from the cache). Unset or 0 = the normal build.
+    lto = os.environ.get("PORT_LIFT_LTO", "0")
+    if lto not in ("0", ""):
+        if lto != "thin":
+            raise StepError("PORT_LIFT_LTO must be thin or 0, not %r" % lto)
+        lift_opt += ";/clang:-flto=thin"
+        cache = os.path.join(build, "thinlto-cache").replace("\\", "/")
+        cache = '"%s"' % cache if " " in cache else cache
+        link_rel += " /opt:lldltojobs=%s /lldltocache:%s /lldltocachepolicy:cache_size_bytes=8g" % (jobs, cache)
     for cmd in ([cmake, "-S", PORT, "-B", build, "-G", "Ninja"] + (["-DCMAKE_RC_COMPILER=" + rc] if rc else []) + [
                  "-DCMAKE_MAKE_PROGRAM=" + port_paths.get("ninja"),
                  "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl",
@@ -393,7 +421,12 @@ def step_ppu():
         "PPU_NV_LOCALS": "1", "PPU_MM": "1", "PPU_DRAIN_ELIDE": "1", "PPU_SO_ZERO": "1",
         # ppu2 (2026-11-08): AltiVec on SSE/AVX2 + one NaN test per FP op (city walk +14%);
         # ppu3 (2026-11-09): plain SSE when no lane is denormal/NaN + lean store check (opening +4.5..8%).
-        "PPU_VMX_SSE": "1", "PPU_FP_ONE_NAN": "1", "PPU_VMX_FAST": "1", "PPU_ST_LEAN": "1"}
+        "PPU_VMX_SSE": "1", "PPU_FP_ONE_NAN": "1", "PPU_VMX_FAST": "1", "PPU_ST_LEAN": "1",
+        # ppu-xfn (2026-11-10): direct tail jumps as real tail calls (musttail: no trampoline round
+        # trip, and calls to them lose their drain) + small frameless leaves lifted inline at their
+        # call sites (PPU_XINLINE_MAX=<n> statements, default 48); the trampoline pointer declared
+        # constinit, so clang-cl drops its TLS init guard from every drain test.
+        "PPU_XTAIL": "1", "PPU_XINLINE": "1", "PPU_TLS_CONSTINIT": "1"}
     # The main thread's SPU-job poll loops (wake agent, 2026-11-08; toolkit ppu_lifter.py
     # PPU_WAKE_HOOKS + runtime/syscalls/ppu_wake.c, run-time switch PS3_PPU_WAKE; a lifter
     # without the feature ignores the variable). Checks func_0054C730 / func_0054CE30 read
@@ -411,6 +444,20 @@ def step_ppu():
         for var, f in (("PPU_HOOK_FILE", "hooks.txt"), ("PPU_PATCH_FILE", "patches.txt")):
             if os.path.isfile(os.path.join(CHEATS, f)):
                 fast[var] = os.path.join(CHEATS, f)
+    # ppu-vmx (2026-11-10; toolkit tools/ppu_vmx_flow.py, a lifter without it ignores them): VMX
+    # float ops test only the operands that may hold a denormal, integer AltiVec ops on SSE,
+    # single FP ops of single values in single precision, fctiw/fctid as one conversion. Each
+    # =0 in the environment = the old form.
+    if fast:
+        fast.update({"PPU_VMX_CLEAN": "1", "PPU_VMX_INT": "1", "PPU_FP_SINGLE": "1", "PPU_FP_CVT": "1"})
+    # ppu-mem (2026-11-10; toolkit tools/ppu_fastpath.py, a lifter without it ignores them): a
+    # store tests one byte of a page map instead of the range + its line's reservation bit twice
+    # (PPU_ST_PMAP), the guest accesses are single MOVBE accesses without the alignment test
+    # (PPU_MOVBE), loads of TOC entries are their ELF values under a per-entry run-time guard
+    # (PPU_TOC_FOLD). Each =0 in the environment = the old form; at run time PS3_ST_PMAP=0 /
+    # PS3_TOC_FOLD=0 turn the page map / the folding off in the same exe.
+    if fast:
+        fast.update({"PPU_ST_PMAP": "1", "PPU_MOVBE": "1", "PPU_TOC_FOLD": "1"})
     run("ppu", [PY, T("ppu_lifter.py"), ELF,
                 "--functions", "out/EBOOT.functions.json", "--hle-stubs", "out/EBOOT.imports.json",
                 "--code-end", "0x742e18", "--max-chunk-lines", "150000",

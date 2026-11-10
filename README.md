@@ -87,6 +87,7 @@ F2 → Cheats:
 - **super jump** (2× to 10×)
 - **karma lock** (blue/red only), a karma multiplier, **XP for karma**, *Add karma* / *Add XP* buttons
 - **one-hit kills**, enemy speed, enemies hold fire
+- **longer glide**: Cole sinks more slowly while gliding (R1, the Static Thrusters), so a glide lasts up to 3× as long and goes further
 
 Cheats can be remembered between sessions, with a short reminder at start.
 
@@ -143,7 +144,7 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 |---|---|
 | ✅ Tested copy | Europe disc **BCES01143** + the **1.04** update. US and other discs share the same 1.04 code but are untested. |
 | 🖥️ Tested PC | i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p |
-| ⚠️ Known issues | • The Beast fight can drop into the 40s (the CPU side of fights is being worked on).<br>• Fine stripes on faces in one early cutscene (Kuo at the dock); setting Lighting → Shadow softness to *Softest* hides them.<br>• Glide strength isn't a cheat yet (the game's physics state hasn't been found). |
+| ⚠️ Known issues | • The Beast fight can drop into the 40s (the CPU side of fights is being worked on).<br>• Fine stripes on faces in one early cutscene (Kuo at the dock); setting Lighting → Shadow softness to *Softest* hides them. |
 
 ## 🧰 What you need
 
@@ -212,7 +213,7 @@ Updating later is the same: Setup downloads the build tools again and deletes th
   | Key | Action |
   |---|---|
   | **F1** | fps counter |
-  | **F2** (or hold L3+R3) | PC settings: Display, Graphics (resolution, anti-aliasing, upscaling, sharpening), Audio, Controls, HUD, Lighting, Effects, Cheats |
+  | **F2** (or hold L3+R3) | PC settings: Display, Graphics (resolution, anti-aliasing, upscaling, sharpening), Audio (volume, language), Controls, HUD, Lighting, Effects, Cheats |
   | **F3** | your picture vs the original PS3 look |
   | **F9** | mark a stutter in the session log |
   | **Alt+Enter** | fullscreen |
@@ -222,6 +223,10 @@ Updating later is the same: Setup downloads the build tools again and deletes th
   - right button to aim, left button to shoot
   - Space = ✕, Shift = ○, F = □, Q = △
   - To remap, edit `input.toml`.
+- **Language:** the game follows your Windows display language (English if the game doesn't have it).
+  F2 → Audio → Language picks another one, with the voice and the text set separately, from what your disc
+  has: the US disc also has a Latin-American Spanish dub, the Europe disc BCES01143 has English voices with
+  menus and subtitles in 16 languages. It applies at the next start.
 - **Your saves:** `game\gamedata\dev_hdd0\home\00000001\savedata`, backed up to `saves-backup\` before every session.
 - **Session logs:** each session writes `play\<date-time>\`. Please attach it to bug reports.
 
@@ -287,7 +292,10 @@ This port stands on other people's work:
   freeze fix (MIT).
 - **bungholio** and the [ArtemisPS3](https://github.com/bucanero/ArtemisPS3) cheat-code collection: three of the
   cheats (jump height, AI speed, enemies hold fire) are their codes for this exact game version, turned into
-  menu switches (see `cheats/NOTES.md`).
+  menu switches, and their "Hold L2 + X To Fly" code led us to the game's glide physics (see `cheats/NOTES.md`).
+- **Yahfz**: the RPCS3 community patch "Disable Mesh Trimming" (one instruction word in the game's Edge
+  geometry SPU program). The port applies it by default (F2 → Graphics → Mesh trimming: *Off*); without it, thin
+  triangles drop out at high resolutions and leave holes in faces. *On* brings back the PS3's trimming.
 - **[RPCS3](https://github.com/RPCS3/rpcs3)** and its team. RPCS3 decrypts the game and firmware. It was
   also our reference while building the port: we compared our output against it, and its research and
   wiki taught us much of what we know about the PS3. **No RPCS3 code is included** here (RPCS3 is GPL).

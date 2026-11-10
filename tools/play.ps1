@@ -5,12 +5,17 @@
 # In the game:
 #   F1                 FPS counter / frame-time graph on or off
 #   F2, or hold L3+R3  PC settings menu (frame cap, vsync, fullscreen, anti-aliasing,
-#                      sharpening, texture filtering, upscaling, volume, controls, HUD);
-#                      Esc / Circle closes it, L1/R1 switch pages
+#                      sharpening, texture filtering, upscaling, volume, language, controls,
+#                      HUD); Esc / Circle closes it, L1/R1 switch pages
 #   Alt+Enter or F11   fullscreen on/off
 # The menu saves to %APPDATA%\inFAMOUS2-port\settings.ini and the next start uses it.
 # -Fps / -Volume / -Fullscreen given here win over the file for this session
 # (-Fps: frame cap, 72 = smooth on a 144 Hz screen, 0 = uncapped).
+#
+# Language: the game is told the Windows display language (English when the game has
+# none of it), as a PS3 set to that language would. F2 > Audio > Language picks another
+# one, and the voice and the text apart (only what your disc has); saved as PS3_LANG,
+# PS3_VOICE_LANG and PS3_TEXT_LANG in settings.ini, used from the next start.
 #
 # Controls (the toolkit's docs\INPUT.md has everything):
 #   Controller: any pad SDL knows (the community controller database is built in) -- the
@@ -115,7 +120,9 @@ $vars = @{
     PS3_DEV_FLASH               = (Get-DevFlash)
     PS3_GAMEDATA_ROOT           = "$game\gamedata"
     PS3_TITLE                   = "inFAMOUS 2"
-    PS3_LANG                    = "en"
+    # No PS3_LANG here (GitHub issues #2, #3): a variable set here wins over settings.ini, so
+    # it pinned every player to English. Unset, the game follows the Windows display language,
+    # or the menu's PS3_LANG / PS3_VOICE_LANG / PS3_TEXT_LANG lines (read before the game starts).
     GCM_SEMA_ACQUIRE            = "1"
     GCM_SEMA_ACQUIRE_MS         = "200"
     GCM_PARK_GRACE_MS           = "1000"
@@ -201,6 +208,9 @@ if ($RecordRoute) {
     $vars["PAD_SCRIPT_WAIT"] = Join-Path $rdrv "anchor.flag"
     $vars["PS3_OVERLAY_HUD"] = "0"            # the HUD check looks at the top-left corner
     $vars["PS3RECOMP_VK_FULLSCREEN"] = "0"    # the HUD check compares the 1280x720 window (settings.ini may say fullscreen)
+    # the tests replay it in English (native_run.ps1: PS3_LANG=en): the same voice lines and
+    # movie lengths, whatever settings.ini or Windows say ("same" = the game's own dub and text)
+    $vars["PS3_LANG"] = "en"; $vars["PS3_VOICE_LANG"] = "same"; $vars["PS3_TEXT_LANG"] = "same"
     if ($From -eq 'opening') { "RECORDING A TEST ROUTE '$RecordRoute' FROM THE OPENING: press START at the title, then do not touch the controller until a voice says 'Recording'. Quit with Alt+F4 when done." }
     else { "RECORDING A TEST ROUTE '$RecordRoute': wait, do not touch the controller until a voice says 'Recording'. Quit with Alt+F4 when done." }
 }

@@ -5,6 +5,9 @@
 # Exit code 0 = every replay matched. The game does not boot (no window, no lock needed); the exe
 # stops in ppu_run after loading the ELF, so the lifted images and the ELF are set up as in a run.
 # Recordings come from a game run with -Extra "PS3_JOBREC=<dir>;PS3_JOBREC_MAX=<n>;..." (combat.ps1).
+# SPU instruction alternatives (tools/spu_patches.txt, e.g. PS3RECOMP_MESH_TRIM): a replay runs the ones
+# its recording ran (the recording's spu_patches.txt; none = it predates them = the game's code, which
+# is what ck-rec2/ck-rec3/spu3-p2 hold); -Extra "PS3RECOMP_MESH_TRIM=0" replays another one (Edge 223 differs).
 param(
     [Parameter(Mandatory = $true)][string]$Dir,
     [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) "work\port\build\Infamous2Recomp.exe"),

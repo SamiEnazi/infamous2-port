@@ -6,3 +6,5 @@
 00364044   # TakeDamage(r3 character, r4 damage object: +0x7C amount (float, > 0), +0x64 source)
 0012FC6C   # AddKarma(r3 progress struct G = 0x00A64E20, f1 delta (+ hero / - infamous), r5 reason or -1)
 0009B780   # battery energy bonus(r3 shard progress) -> f1 = level * energy per level; only caller: 0x154E10
+0019BB20   # UpdateGravity(r3 jump/fall controller A, [A+0x1C] = its character): A+0x60 = the gravity vector;
+           # in fall state Float (A+0x120 == 2, the Static Thrusters) z = max(character gravity z, -350)
