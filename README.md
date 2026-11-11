@@ -61,13 +61,27 @@ code but haven't been tested yet.
   [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB) work out of the box.
 - Turn it on before or during the game: it's picked up while you play.
 - Buttons work by position, as on a PlayStation pad (bottom = ✕, right = ○).
-- Prefer **keyboard and mouse**? They work too, and everything can be remapped in `input.toml`.
+- **Remap any button in the game:** F2 → Controls → *Buttons and keys* lists every PS3 control, each with two
+  keys, a mouse button and a controller button. Click a cell (✕ on a controller) and press the new one;
+  right-click (□) clears it. An input that is already used asks first: *Swap* or *Cancel*. A change applies at
+  once and is saved in `input.toml`. *Reset to defaults* puts everything back.
+
+### 🖱️ Direct mouse aiming
+
+The mouse turns the camera **directly**, by how far you move it, as in a PC game. Before, the mouse moved a
+pretend stick, and the game's stick speed limit made quick turns and aiming feel slow.
+- F2 → Controls → *Mouse camera*: **Direct** (the default) or *Like a stick*
+- *Mouse sensitivity*, and a separate *Aiming sensitivity* for while you aim
+- in menus, the map and cutscenes the mouse still works like a stick; a controller plays as before
 
 ### 💡 Enhanced lighting
 
 Soft sun shadows instead of stair-stepped ones, contact shadows (ambient occlusion) at full resolution instead
 of half, and smooth light gradients without banding. Every option is in F2 → Lighting, and **F3** flips
 between your picture and the original PS3 look.
+
+The fine stripes on faces and clothes in the Kuo cutscene at the dock are fixed: the game's shadow offset now
+reaches the graphics card, as on the PS3.
 
 ![The original PS3 look (left) vs the new lighting (right)](docs/feat-lighting.jpg)
 
@@ -92,6 +106,26 @@ F2 → Cheats:
 Cheats can be remembered between sessions, with a short reminder at start.
 
 ![The Cheats page](docs/feat-cheats.jpg)
+
+### 🧩 Mods
+
+The community's inFAMOUS 2 mods work as they are: the ones made for tiffsomniac's **inFAMOUS Mod Manager**
+(whole files, texture patches, xpps patches, and mods with options).
+- **F2 → Mods → Add a mod from a zip**: the zips in your Downloads folder, checked first (only mod files are
+  taken out, never a program), installed into the **`mods`** folder next to the game; or unzip a mod there yourself
+  (`mods\<mod>\mod.json`)
+- **no Unlocker** and nothing to install: your game files are never changed, the port hands the game the mod's
+  files in their place
+- **F2 → Mods**: every mod with its preview picture and what it changes, turn each on or off, pick its options;
+  the page shows at once what the next start will use, and **Restart to apply** restarts the game to its title
+  screen (Continue there to go on from your last save)
+- two mods that change the same file: **Use this one instead** picks the one that wins (the page says first what
+  the other loses), else the first by folder name
+- a texture patch made for another version of the game is never written beside its texture: the mod is left out
+  and the page says which option to untick (for example *"15 textures were made for another version of
+  cole_gold_amp.xpps: untick Solid Gold Amp"*)
+
+How it works and the mod format: [`docs/MODS.md`](https://github.com/SamiEnazi/ps3recomp/blob/infamous2/docs/MODS.md).
 
 ### 💾 Save manager
 
@@ -144,7 +178,7 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 |---|---|
 | ✅ Tested copy | Europe disc **BCES01143** + the **1.04** update. US and other discs share the same 1.04 code but are untested. |
 | 🖥️ Tested PC | i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p |
-| ⚠️ Known issues | • The Beast fight can drop into the 40s (the CPU side of fights is being worked on).<br>• Fine stripes on faces in one early cutscene (Kuo at the dock); setting Lighting → Shadow softness to *Softest* hides them. |
+| ⚠️ Known issues | • The Beast fight can drop into the 40s (the CPU side of fights is being worked on). |
 
 ## 🧰 What you need
 
@@ -217,20 +251,23 @@ Updating later is the same: Setup downloads the build tools again and deletes th
   | Key | Action |
   |---|---|
   | **F1** | fps counter |
-  | **F2** (or hold L3+R3) | PC settings: Display, Graphics (resolution, anti-aliasing, upscaling, sharpening), Audio (volume, language), Controls, HUD, Lighting, Effects, Cheats |
+  | **F2** (or hold L3+R3) | PC settings: Display, Graphics (resolution, anti-aliasing, upscaling, sharpening), Audio (volume, language), Controls (mouse, buttons and keys), HUD, Lighting, Effects, Mods, Cheats |
   | **F3** | your picture vs the original PS3 look |
   | **F9** | mark a stutter in the session log |
   | **Alt+Enter** | fullscreen |
 
 - **Keyboard and mouse:**
-  - WASD to move, mouse for the camera
+  - WASD to move, mouse for the camera (direct by default; F2 → Controls → *Mouse camera*)
   - right button to aim, left button to shoot
   - Space = ✕, Shift = ○, F = □, Q = △
-  - To remap, edit `input.toml`.
+  - To remap keys, mouse buttons or controller buttons: F2 → Controls → *Buttons and keys*.
 - **Language:** the game follows your Windows display language (English if the game doesn't have it).
   F2 → Audio → Language picks another one, with the voice and the text set separately, from what your disc
   has: the US disc also has a Latin-American Spanish dub, the Europe disc BCES01143 has English voices with
   menus and subtitles in 16 languages. It applies at the next start.
+- **Widescreen:** F2 → Display → Aspect ratio: *Auto* follows your screen's shape, or pick 21:9, 32:9 or
+  16:10. You see more on the sides (nothing is stretched); the HUD stays in the middle 16:9 and movies get
+  black bars. It applies at the next start. 16:9 is the default.
 - **Your saves:** `game\gamedata\dev_hdd0\home\00000001\savedata`, backed up to `saves-backup\` before every session.
 - **Session logs:** each session writes `play\<date-time>\`. Please attach it to bug reports.
 
@@ -246,7 +283,7 @@ Updating later is the same: Setup downloads the build tools again and deletes th
   - The toolkit fork lives in [`toolkit/`](https://github.com/SamiEnazi/ps3recomp/tree/infamous2).
   - The game-specific port base lives in [`community/erikomis-infamous2-recomp`](https://github.com/erikomis/infamous2-recomp).
   - Our changes to the port base are in `patches/port/`.
-  - The cheats' game side is in `cheats/`.
+  - The game side of the cheats and of the mouse camera is in `cheats/`.
 
 ## 🤖 Made with Claude Code
 
@@ -290,16 +327,19 @@ This port stands on other people's work:
   recompiler and runtime this port is built on (MIT). Our fork with the Windows/Vulkan work is
   [SamiEnazi/ps3recomp](https://github.com/SamiEnazi/ps3recomp/tree/infamous2).
 - **[erikomis/infamous2-recomp](https://github.com/erikomis/infamous2-recomp)** by Erik Martins: the
-  inFAMOUS 2 port this one starts from (MIT).
+  inFAMOUS 2 port this one starts from, and the camera patch behind widescreen (MIT).
 - **[ThiagoFraga761/infamous2-pc](https://github.com/ThiagoFraga761/infamous2-pc)**: the Vulkan SSAO and
-  lighting passes and Windows groundwork we adopted, and the texture-cache and buffer-growth ideas behind the
-  freeze fix (MIT).
+  lighting passes and Windows groundwork we adopted, the texture-cache and buffer-growth ideas behind the
+  freeze fix, and the idea of giving the game's Edge geometry code the real picture size (MIT).
 - **bungholio** and the [ArtemisPS3](https://github.com/bucanero/ArtemisPS3) cheat-code collection: three of the
   cheats (jump height, AI speed, enemies hold fire) are their codes for this exact game version, turned into
   menu switches, and their "Hold L2 + X To Fly" code led us to the game's glide physics (see `cheats/NOTES.md`).
+- **tiffsomniac**: the **inFAMOUS Mod Manager** and its mod format (whole files, texture and xpps patches,
+  options). The port reads these mods as they are (F2 → Mods); its own code, written from the format.
 - **Yahfz**: the RPCS3 community patch "Disable Mesh Trimming" (one instruction word in the game's Edge
-  geometry SPU program). The port applies it by default (F2 → Graphics → Mesh trimming: *Off*); without it, thin
-  triangles drop out at high resolutions and leave holes in faces. *On* brings back the PS3's trimming.
+  geometry SPU program), which first showed why faces get holes above 720p. F2 → Graphics → Triangle culling:
+  *At the render resolution* (the default) keeps the game's culling but at the real picture size, so no holes
+  and a little faster; *Off: whole meshes* is Yahfz's patch; *The PS3's 720p culling* is the original.
 - **[RPCS3](https://github.com/RPCS3/rpcs3)** and its team. RPCS3 decrypts the game and firmware. It was
   also our reference while building the port: we compared our output against it, and its research and
   wiki taught us much of what we know about the PS3. **No RPCS3 code is included** here (RPCS3 is GPL).

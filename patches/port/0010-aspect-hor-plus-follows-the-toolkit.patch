@@ -1,0 +1,135 @@
+From: SamiEnazi <85966743+SamiEnazi@users.noreply.github.com>
+Subject: [PATCH] aspect: the cameras' hor+ patch follows the toolkit's PS3RECOMP_ASPECT, narrower too, and says so
+
+infamous2_apply_aspect (erikomis' hor+ camera patch: the width entry 0x009AF3EC
+of the camera module's table repointed at round(720 x aspect) in the unused gap
+0x0092FFF0) now takes the shape from the toolkit (ps3_aspect_wanted:
+PS3RECOMP_ASPECT=16:9|auto|21:9|32:9|16:10|<w>:<h>, PS3_ASPECT when unset),
+accepts aspects narrower than 16:9 (16:10), checks the 1280 / 720 ints too,
+reports what the cameras now see (ps3_aspect_game_set: the Vulkan backend
+renders wide only then) and sets this game's PS3_ASPECT_HUD_AFTER (the final
+composite, fp 136d0d1989147bd8) unless the environment has one. A toolkit
+without the two functions links local ones (/alternatename): the game stays
+16:9. Unset or 16:9 = nothing written, as before. Notes: toolkit
+docs/WIDESCREEN.md.
+diff --git a/game_patches.cpp b/game_patches.cpp
+index b61c069..de16cf4 100644
+--- a/game_patches.cpp
++++ b/game_patches.cpp
+@@ -165,37 +165,63 @@ extern "C" void infamous2_apply_patches(const char* elf_path)
+ }
+ 
+ /*
+- * PS3_ASPECT=21:9|32:9|<w>:<h>|<ratio>: the game's cameras built for a wider
+- * picture, hor+ (the vertical field of view kept, the horizontal one wider).
+- * The toolkit's Metal backend renders every target that much wider
+- * (anamorphic) and presents the wide image; this is the game's half.
++ * The picture's shape, hor+ (the vertical field of view kept, the horizontal
++ * one wider -- or, below 16:9, narrower): the game's cameras built for it.
++ * The toolkit decides the shape (PS3RECOMP_ASPECT=16:9|auto|21:9|32:9|16:10|
++ * <w>:<h>, vk_postfx.c ps3_aspect_wanted; PS3_ASPECT, the Metal port's name,
++ * when that is unset), renders every screen target that much wider
++ * (anamorphic, rsx_vulkan_backend.c [wide]) and keeps the HUD 16:9; this is
++ * the game's half. Everything here is written down in the toolkit's
++ * docs/WIDESCREEN.md.
+  *
+- * Found 2026-10-23: the camera constructor (func_0047F5xx, the store at
+- * 0x0047F85C) sets cam+0x2A4 = (float)width / (float)height from two ints it
+- * reaches through its module's pointer table (r30 = 0x009B72F0, entries
++ * Found 2026-10-23 (erikomis), checked again on this EBOOT 2026-11-10: the
++ * camera constructor (func_0047F5F8, the store at 0x0047F85C) sets
++ * cam+0x2A4 = (float)width / (float)height from two ints it reaches through
++ * its module's pointer table (r30 = 0x009B72F0: lwz -0x7F04 / -0x7F00, entries
+  * 0x009AF3EC -> 0x009D7218 = 1280 and 0x009AF3F0 -> 0x009D7214 = 720), and
+  * SetFov (func_0047D820) keeps tany = tan(fov/2) at cam+0x2AC and
+  * tanx = tany * cam+0x2A4 at cam+0x2A8; the projection, the frustum the
+  * culling uses and the copies the renderer takes (func_00355290) all come
+  * from those. No other code reads the two pointer entries (a scan of every
+- * load through that module's table), and the 1280 itself is read by many
+- * others (render targets), so the patch repoints the width ENTRY at an int
+- * of its own: round(720 * aspect), in the unused gap between the EBOOT's
+- * two segments (0x00928168..0x0092FFFF: no segment, below the stacks and
+- * the 0x40000000 allocation window). Data only, like the community patches;
+- * checked against this EBOOT's bytes first, so another build is left alone.
++ * D-form access through every TOC-loaded base, and of lis/addi pairs), and
++ * the 1280 itself is read by many others (render targets, the 2D layout),
++ * so the patch repoints the width ENTRY at an int of its own:
++ * round(720 * aspect), in the unused gap between the EBOOT's two segments
++ * (0x00928168..0x0092FFFF: no segment, below the stacks and the 0x40000000
++ * allocation window). Data only, like the community patches; checked
++ * against this EBOOT's bytes first, so another build is left alone.
++ *
++ * The HUD: PS3_ASPECT_HUD_AFTER (the draw engine) = this game's final
++ * composite into the display buffer, fragment program 136d0d1989147bd8
++ * (erikomis; the same program in this port's [hudlog] runs hud1..hudg2):
++ * the display-sized draws after it, and those of a frame without it (menus,
++ * motion comics, Bink movies, loading screens), keep 16:9. Set here, for
++ * this game, unless the environment already has it.
+  */
++extern "C" int  ps3_aspect_wanted(unsigned* num, unsigned* den);
++extern "C" void ps3_aspect_game_set(unsigned w, unsigned h);
++#if defined(_WIN32)
++/* A toolkit without them (older than agent/wide) links these instead: the
++ * old PS3_ASPECT reading (wider only), nothing reported back -- that
++ * toolkit has no wide Vulkan targets, so the game is better left at 16:9. */
++extern "C" int infamous2_aspect_wanted_old(unsigned* num, unsigned* den)
++{
++    (void)num; (void)den;
++    if (getenv("PS3RECOMP_ASPECT") || getenv("PS3_ASPECT"))
++        fprintf(stderr, "[patch] aspect: this toolkit cannot render a wide picture; the game keeps 16:9\n");
++    return 0;
++}
++extern "C" void infamous2_aspect_game_set_old(unsigned w, unsigned h) { (void)w; (void)h; }
++#pragma comment(linker, "/alternatename:ps3_aspect_wanted=infamous2_aspect_wanted_old")
++#pragma comment(linker, "/alternatename:ps3_aspect_game_set=infamous2_aspect_game_set_old")
++#endif
+ extern "C" void infamous2_apply_aspect(const char* elf_path)
+ {
+-    const char* e = getenv("PS3_ASPECT");
+-    if (!e || !*e || !vm_base) return;
+-    double a = 0.0;
+-    unsigned w = 0, h = 0;
+-    if (sscanf(e, "%u:%u", &w, &h) == 2 && w && h) a = (double)w / (double)h;
+-    else if (sscanf(e, "%ux%u", &w, &h) == 2 && w && h) a = (double)w / (double)h;
+-    else { char* end = nullptr; a = strtod(e, &end); if (!end || *end) a = 0.0; }
++    unsigned n = 16u, d = 9u;
++    if (!vm_base || !ps3_aspect_wanted(&n, &d) || !n || !d) return;
++    const double a = (double)n / (double)d;
+     const double k = a / (16.0 / 9.0);
+-    if (!(k > 1.001 && k <= 4.0)) return;   /* 16:9 (or nonsense: the backend says so) */
++    if (!(k >= 0.6 && k <= 4.0) || (k > 0.999 && k < 1.001)) return;
+ 
+     auto rd = [](uint32_t ea) { const uint8_t* p = vm_base + ea;
+                                 return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; };
+@@ -205,15 +231,24 @@ extern "C" void infamous2_apply_aspect(const char* elf_path)
+     const uint32_t kWidth = 0x009D7218u, kHeight = 0x009D7214u, kSpare = 0x0092FFF0u;
+     char hash[41] = {0};
+     if (!ppu_hash(elf_path, hash) || strcmp(hash, "41a7d047c573c78c0307506c9d1b52d15a66e4f5") ||
+-        rd(kWidthEntry) != kWidth || rd(kHeightEntry) != kHeight || rd(kSpare) != 0) {
+-        fprintf(stderr, "[patch] PS3_ASPECT=%s: not the EBOOT this was made for (PPU-%s); the game keeps 16:9 "
+-                        "(the picture will be stretched)\n", e, hash);
++        rd(kWidthEntry) != kWidth || rd(kHeightEntry) != kHeight || rd(kSpare) != 0 ||
++        rd(kWidth) != 1280u || rd(kHeight) != 720u) {
++        fprintf(stderr, "[patch] aspect %u:%u: not the EBOOT this was made for (PPU-%s); the game keeps 16:9 "
++                        "(the backend stays 16:9 too)\n", n, d, hash);
+         return;
+     }
+-    const uint32_t height = rd(kHeight) ? rd(kHeight) : 720u;
+-    const uint32_t width = (uint32_t)(height * a + 0.5);
++    const uint32_t height = rd(kHeight);
++    const uint32_t width = (uint32_t)(((uint64_t)height * n * 2u / d + 1u) / 2u);   /* round(720 * n / d) */
+     wr(kSpare, width);
+     wr(kWidthEntry, kSpare);
+-    fprintf(stderr, "[patch] PS3_ASPECT=%s: cameras at %u:%u (aspect %.4f, hor+)\n", e, width, height,
+-            (double)width / (double)height);
++    if (!getenv("PS3_ASPECT_HUD_AFTER")) {
++#if defined(_WIN32)
++        _putenv_s("PS3_ASPECT_HUD_AFTER", "136d0d1989147bd8");
++#else
++        setenv("PS3_ASPECT_HUD_AFTER", "136d0d1989147bd8", 0);
++#endif
++    }
++    ps3_aspect_game_set(width, height);
++    fprintf(stderr, "[patch] aspect %u:%u: cameras at %u:%u (aspect %.4f, hor+: the vertical view is the game's)\n",
++            n, d, width, height, (double)width / (double)height);
+ }

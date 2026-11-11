@@ -245,3 +245,69 @@ line per glide, plus "[cheats] glide: gravity -350 -> <scaled>" while the cheat 
 
 Build: toolkit agent/glide (= agent/next, no toolkit change), project branch glide, lifted with
 PORT_CHEATS_DIR=wt-proj\glide\cheats into work\port-glide, exe work\port\build-glide (not run).
+
+## Mouse camera, direct mode (2026-11-11, inf2-cheats mouse agent; GitHub issue #5)
+
+A player: "the mouse feels slow when aiming; it seems the game is emulating the movement of a controller's
+analog stick". It was: cellPad turned mouse speed into right-stick deflection (capped at full deflection) and
+the game then applied its own stick response. Direct mode (PS3_MOUSE_MODE=direct, the default; stick = the
+old path) turns the camera by how far the mouse moved. Everything below was read in the EBOOT (IDA 9.3 batch
+database + capstone, scripts in work\mouse) and checked in two diagnosis runs with x86 debug registers on the
+running exe (work\mouse\drtrace.py, drsnap.py; runs native\recordings\mouse-d1, mouse-d2).
+
+How the game turns its camera:
+- Pads: array 0x00A73130, 0x690 bytes each (TOC r2-0x7D30 -> 0x009ACC8C, -0x7FCC). The poll 0x001991D8
+  (cellPadGetData) normalises each stick (0x00198808: dead zone/gate, outputs) into pad+0x10 right x,
+  +0x14 right y, +0x18 its magnitude (+0x04/+0x08/+0x0C the left stick). The 30-sample ring at pad+0x240
+  (0x001965A8) is the right stick's magnitude history (the ring-loop fix 0x00196508 reads it).
+- D1 (data breakpoints on pad 0 +0x10/+0x14/+0x18, free camera and aiming, still and turning): the only
+  reader of the right stick x/y is 0x0019604C (the pad's "camera stick": x|x|, y|y|), reached through pad
+  vtable +0x38 = 0x0019609C (the game's invert options G+0x640 x / G+0x641 y, G = 0x00A64E20) or +0x3C =
+  0x001960C0 (G+0x642/0x643). Callers of +0x38 with r4 = 1 (right stick): 0x0007E538 (free camera),
+  0x00098CAC (aim camera, a loop over both sticks), 0x00097B70/0x00097BE4 (a third camera, not seen running).
+- Free camera: 0x00082964 = the camera driver's frame (r3 = driver D, a heap object) -> 0x0007DC2C, then
+  0x0007E0A4 (the input step; an IDA function 0x7E0A4-0x800E4 inside the lift's 0x7D46C), then the view
+  (0x00081CE0 ...). D2 (execute breakpoints on these entries, the driver copied each frame):
+  D+0x1C0 yaw, D+0x1C4 pitch (rad; yaw kept in -pi..pi; stick right = yaw falls, stick up = pitch falls),
+  D+0x1D0/0x1D4 their rates; D+0x180/0x184/0x188 = yaw/pitch/distance of the view the game settles on
+  (follows 0x1C0; the distance shrinks from 390 to 120 when looking up), D+0x1A8 = 1 while the stick
+  turns (0x0007AD94 sets it), D+0x1E0 camera state (4 = player control), D+0x1E8 last player input
+  (ticks of 1/1440 s, timer [0x00A2C500]+4). The manual branch (0x7E504..0x7E980; needs the stick off
+  centre, threshold 0.0, and the camera volume to allow it): axis snap (stick within 15 deg of an axis
+  = that axis only), 0x000898A8 = the game's camera speed option (G+0x648 index into a table: 1.5),
+  0x0008D7C8 = target rates (x * speed * -2.5, y * -speed; aim assist; a soft pitch limit), then the rate
+  moves towards the target by at most 15 rad/s per second (dt * 15.0), angle += rate * dt, pitch clamped
+  to [-1.4137, 1.4137] (0x007442B0 = 0x00744210+0xA0, read-only tuning data), stored at 0x7E97C.
+  Measured in D2: yaw rate -3.75 rad/s at full right stick, pitch -1.5 rad/s up; the soft limit stopped
+  the stick at pitch -1.3575.
+- The free camera's view follows the target (runs mouse-t1/t3/t4, a [mouse] probe line per frame): the solver
+  0x00081CE0 (after the input step) moves the camera towards the target at its own speed, ~0.04-0.05 rad a
+  frame here; then func_00082964 keeps the target within +-0.2 rad of the new view (0x00082FB8..0x00082FFC:
+  wrap, clamp to G2+0x1E0 / G2+0x1F0 = -0.2 / 0.2); when the player stops, the idle branch sets the target back
+  to the view (whatever the view has not reached is gone). A stick's steady rate stays under that speed. A whole
+  mouse flick written into the target in one frame came out 50% (100 counts) to 3% (1600 counts); writing the
+  view block D+0x180 too did nothing (the solver keeps its own state and rewrites it). The axis snap of the
+  manual branch (atan2 of the stick: within 15 deg of an axis = that axis only) sets D+0x1E4 / D+0x1E5 for
+  the axes the player turned; with D+0x1E5 unset the idle branch levels the pitch back to 0.12 (~0.3 rad/s).
+- Aim camera (L1): 0x00098A00 (via 0x006524C8), once a frame while aiming, r3 = aim camera A: A+0x254
+  yaw, A+0x258 pitch (stick up = pitch rises), A+0x274/0x278 their rates (at most 1.65 rad/s at full
+  stick), pitch limits A+0x150 / A+0x154 = -1.5 / 1.4 (passed to 0x0008D7C8: a spring back past them).
+  Per-stick roles at [[A+0x1D0] + 4 * stick] pick the case (0x00098CEC table: 0/1 = manual aim at
+  0x00099360 -> 0x0008D7C8 from 0x000993E8, 4 = turn towards a target at 0x00098E34). The aim, Cole's
+  aim direction and the view are made from A+0x254/0x258 later in the same call (0x0009912C ->
+  0x004EA9AC). The render camera (driver +0x108 and A+0x108, 0x49509800 in D2): +0x29C vertical fov
+  0.9 rad free, 0.5 aiming (tan of half: +0x2AC 0.4831 / 0.2553).
+
+The hooks (cheats.cpp, hooks.txt):
+| Address | Hook |
+|---|---|
+| 0x0007E0A4 | take the mouse motion (cellPad_host_mouse_direct_take; nothing in stick mode, controller-only input or a menu) into an owed turn (yaw -dx, pitch +dy, x 0.0008 x sens); run the step; if its manual branch ran (0x0008D7C8 seen from 0x7E714, D+0x1A8 == 1) put as much of the owed turn into the target D+0x1C0/0x1C4 as keeps it within 0.19 rad of the view D+0x180/0x184 (pitch held in the limits at 0x007442B0); keep the manual branch (epsilon stick) while some is owed and 45 frames after, so the view catches up; drop it when there is no player control (no manual branch) |
+| 0x00098A00 | take the motion; if it moved and the aim's manual case ran in its previous frame: A+0x254 -= dx * k, A+0x258 -= dy * k (k = 0.0008 * 0.2553/0.4831 * aim sens: the crosshair crosses the screen as fast as the free view at the same setting; held in A+0x150..0x154), before the step (the aim is made inside it: same frame) |
+| 0x0008D7C8 | marks "this camera's manual path ran" (ctx->lr = 0x7E718 free, 0x993EC aim) |
+| 0x0019609C | free camera, while the mouse turn is being given and the stick is centred: a 1e-6 long stick pointing where the mouse last moved instead of 0 (call site 0x7E538 only), so the game takes its manual branch as for a stick (state 4, last-input time, D+0x1A8, and its axis snap marks D+0x1E4 yaw / D+0x1E5 pitch as player-turned) -- a turn rate of ~4e-6 rad/s |
+
+Exact when the mouse is not used: without motion every hook only calls the game's code and writes nothing,
+so a controller and the keys (I/J/K/L move the PS3 stick) see the game as before. The game's camera speed
+option does not scale the mouse (the port's sensitivities do); the game's invert options do apply.
+PS3_MOUSE_CAM_HOOK=0: no hooks; PS3_MOUSE_PROBE=1 a [mouse] line per moving camera frame (2: summary only);
+PS3_CHEATS_AT=t:mousemode=0|1 switches the mode (tests).

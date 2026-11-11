@@ -114,12 +114,34 @@ if (-not (Test-Path $inputToml)) {
     if (Test-Path $ex) { Copy-Item $ex $inputToml; "Made input.toml (your controls) from the example." }
 }
 
+# game mods: the "mods" folder (F2 > Mods), made on the first start with a note on what goes in it
+$modsDir = Join-Path $root "mods"
+if (-not (Test-Path $modsDir)) { New-Item -ItemType Directory $modsDir | Out-Null }
+$modsNote = Join-Path $modsDir "README.txt"
+if (-not (Test-Path $modsNote)) {
+    Set-Content -LiteralPath $modsNote -Encoding utf8 -Value @(
+        "inFAMOUS 2 mods go here: one folder per mod, the folder with the mod's mod.json in it.",
+        "",
+        "Mods made for the inFAMOUS Mod Manager work as they are: unzip the mod into this folder",
+        "(e.g. mods\Red Jacket\mod.json) and start the game. No Unlocker is needed and your game",
+        "files are never changed: the port hands the game the mod's files in their place.",
+        "",
+        "In the game, F2 > Mods lists them: turn each one on or off and pick its options there, or",
+        "add one with ""Add a mod from a zip"". Changes apply the next time the game starts (""Restart",
+        "to apply"" does that at once). When two mods change the same file, the one you chose with",
+        """Use this one instead"" is used, else the first by folder name, and the other is left out.")
+}
+
 $vars = @{
     PS3_VFS_ROOT                = "$game\disc"
     PS3_HDD0_ROOT               = "$game\dev_hdd0"
     PS3_DEV_FLASH               = (Get-DevFlash)
     PS3_GAMEDATA_ROOT           = "$game\gamedata"
     PS3_TITLE                   = "inFAMOUS 2"
+    PS3_GAME_MODS_DIR           = $modsDir   # F2 > Mods (the Mod Manager's mod folders; toolkit docs\MODS.md)
+    # F2 > Mods > "Restart to apply": the game ends with exit code 0x52455354 and this script starts
+    # it again (below); without this variable the game starts itself again.
+    PS3_LAUNCHER_RESTART        = "1"
     # No PS3_LANG here (GitHub issues #2, #3): a variable set here wins over settings.ini, so
     # it pinned every player to English. Unset, the game follows the Windows display language,
     # or the menu's PS3_LANG / PS3_VOICE_LANG / PS3_TEXT_LANG lines (read before the game starts).
@@ -223,49 +245,66 @@ if ($Fullscreen) { $given += "fullscreen" }
 if ($SpuLighting) { $given += "SPU lighting" }
 "Starting inFAMOUS 2$(if ($given) { ' (' + ($given -join ', ') + ')' })... F1 = FPS counter, F2 = settings."
 if (-not $NoLog) { "Press F9 in the game window whenever something feels slow or stutters. Session folder: $out" }
-$p = [System.Diagnostics.Process]::Start($psi)
-if ($RecordRoute) {
-    "" | Set-Content (Join-Path $rdrv "live.tsv")
-    $routeDrv = Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile', '-File', (Join-Path $PSScriptRoot "fast_driver.ps1"),
-        '-Steps', (Join-Path $PSScriptRoot $(if ($From -eq 'opening') { 'record_route_opening.steps' } else { 'record_route.steps' })), '-Rec', $rdrv, '-GamePid', $p.Id,
-        '-LiveLog', $(if ($From -eq 'opening') { "$out\stderr.log" } else { (Join-Path $rdrv "live.tsv") })   # opening: the session's live stderr (cutscene events)
-}
 # Stream the logs to disk while it runs (they are too big to hold in memory).
 $so = [System.IO.StreamWriter]::new("$out\stdout.log")
 $se = [System.IO.StreamWriter]::new("$out\stderr.log")
-$t1 = $p.StandardOutput.BaseStream.CopyToAsync($so.BaseStream)
-$t2 = $p.StandardError.BaseStream.CopyToAsync($se.BaseStream)
-
 # Thread CPU every 10 s: which thread is the limit (main / RSX / SPU workers). Reading the
 # thread times costs microseconds; nothing is injected into the game.
 $t0 = Get-Date
+$tw = $null
 if (-not $NoLog) {
     $tw = [System.IO.StreamWriter]::new("$out\threads.tsv")
     $tw.WriteLine("t_s`thost_tid`tcpu_pct")
-    $prev = @{}; $prevT = Get-Date
-    while (-not $p.WaitForExit(10000)) {
-        try {
-            $p.Refresh(); $now = Get-Date
-            $wall = ($now - $prevT).TotalMilliseconds; $cur = @{}
-            foreach ($th in $p.Threads) {
-                try { $cur[$th.Id] = $th.TotalProcessorTime.TotalMilliseconds } catch {}
-            }
-            $rows = foreach ($id in $cur.Keys) {
-                $d = $cur[$id] - $(if ($prev.ContainsKey($id)) { $prev[$id] } else { 0 })
-                [pscustomobject]@{ id = $id; pct = 100.0 * $d / $wall }
-            }
-            $ts = [int]($now - $t0).TotalSeconds
-            foreach ($r in ($rows | Where-Object { $_.pct -ge 5 } | Sort-Object pct -Descending)) {
-                $tw.WriteLine(("{0}`t{1}`t{2:F0}" -f $ts, $r.id, $r.pct))
-            }
-            $tw.Flush(); $prev = $cur; $prevT = $now
-        } catch {}
-    }
-    $tw.Close()
-} else {
-    $p.WaitForExit()
 }
-try { $t1.Wait(5000) | Out-Null; $t2.Wait(5000) | Out-Null } catch {}
+# F2 > Mods > "Restart to apply" ends the game with this exit code ("REST"): it is started again
+# here, with the same settings, in the same session folder (stdout.log / stderr.log go on after a
+# "=== restart" line; each earlier run's playlog is kept as playlog.<n>.tsv). The game comes back
+# at its title screen: Continue there goes on from the last save.
+$restartCode = 0x52455354
+$run = 0
+do {
+    $run++
+    if ($run -gt 1) {
+        "Restarting inFAMOUS 2 for the new mods (restart $($run - 1)): it comes back at the title screen -- choose Continue to go on from your last save."
+        $mark = "=== {0:HH:mm:ss} restart {1} (F2 > Mods: Restart to apply) ===" -f (Get-Date), ($run - 1)
+        $so.WriteLine($mark); $so.Flush(); $se.WriteLine($mark); $se.Flush()
+        if (-not $NoLog -and (Test-Path "$out\playlog.tsv")) { Move-Item -Force "$out\playlog.tsv" "$out\playlog.$($run - 1).tsv" }
+    }
+    $p = [System.Diagnostics.Process]::Start($psi)
+    if ($RecordRoute) {
+        "" | Set-Content (Join-Path $rdrv "live.tsv")
+        $routeDrv = Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile', '-File', (Join-Path $PSScriptRoot "fast_driver.ps1"),
+            '-Steps', (Join-Path $PSScriptRoot $(if ($From -eq 'opening') { 'record_route_opening.steps' } else { 'record_route.steps' })), '-Rec', $rdrv, '-GamePid', $p.Id,
+            '-LiveLog', $(if ($From -eq 'opening') { "$out\stderr.log" } else { (Join-Path $rdrv "live.tsv") })   # opening: the session's live stderr (cutscene events)
+    }
+    $t1 = $p.StandardOutput.BaseStream.CopyToAsync($so.BaseStream)
+    $t2 = $p.StandardError.BaseStream.CopyToAsync($se.BaseStream)
+    if ($tw) {
+        $prev = @{}; $prevT = Get-Date
+        while (-not $p.WaitForExit(10000)) {
+            try {
+                $p.Refresh(); $now = Get-Date
+                $wall = ($now - $prevT).TotalMilliseconds; $cur = @{}
+                foreach ($th in $p.Threads) {
+                    try { $cur[$th.Id] = $th.TotalProcessorTime.TotalMilliseconds } catch {}
+                }
+                $rows = foreach ($id in $cur.Keys) {
+                    $d = $cur[$id] - $(if ($prev.ContainsKey($id)) { $prev[$id] } else { 0 })
+                    [pscustomobject]@{ id = $id; pct = 100.0 * $d / $wall }
+                }
+                $ts = [int]($now - $t0).TotalSeconds
+                foreach ($r in ($rows | Where-Object { $_.pct -ge 5 } | Sort-Object pct -Descending)) {
+                    $tw.WriteLine(("{0}`t{1}`t{2:F0}" -f $ts, $r.id, $r.pct))
+                }
+                $tw.Flush(); $prev = $cur; $prevT = $now
+            } catch {}
+        }
+    } else {
+        $p.WaitForExit()
+    }
+    try { $t1.Wait(5000) | Out-Null; $t2.Wait(5000) | Out-Null } catch {}
+} while ($p.ExitCode -eq $restartCode -and $run -lt 20 -and -not $RecordRoute)
+if ($tw) { $tw.Close() }
 $so.Close(); $se.Close()
 $lockFs.Close()   # agents may run the game again
 Remove-Item $myTicket -ErrorAction SilentlyContinue

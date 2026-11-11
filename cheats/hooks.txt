@@ -8,3 +8,9 @@
 0009B780   # battery energy bonus(r3 shard progress) -> f1 = level * energy per level; only caller: 0x154E10
 0019BB20   # UpdateGravity(r3 jump/fall controller A, [A+0x1C] = its character): A+0x60 = the gravity vector;
            # in fall state Float (A+0x120 == 2, the Static Thrusters) z = max(character gravity z, -350)
+00196508   # the max of a 30-sample (time, value) ring within a time window: walks back with no lap bound,
+           # so all 30 samples newer than the cut = an endless loop (the m19-fight hang); cheats.cpp hook_ring_max
+0007E0A4   # [mouse] the free camera's input step (r3 = camera driver D: +0x1C0 yaw, +0x1C4 pitch); from func_00082964
+00098A00   # [mouse] the aim camera, once a frame while aiming (r3 = aim camera A: +0x254 yaw, +0x258 pitch)
+0008D7C8   # [mouse] stick -> target turn rates (aim assist): only the cameras' manual paths call it
+0019609C   # [mouse] pad vtable +0x38, the camera stick (r4 1 = right; r5/r6 <- x|x|, y|y|, the game's invert)
