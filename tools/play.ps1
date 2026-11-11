@@ -34,6 +34,8 @@
 #                 frame over 50 ms, and a MARK each time F9 is pressed in the game window --
 #                 press it when something feels slow or stutters
 #   threads.tsv   CPU use of the busiest threads, every 10 s
+#   hitches.tsv   (a build with the hitch catcher) what every guest PPU/SPU thread was doing in
+#                 each frame over 80 ms, sampled every 1 ms (tools\hitch_stacks.py names it)
 #   summary.txt   written when the game exits (tools\playlog_report.py)
 #   stdout.log / stderr.log
 # -NoLog turns the frame and thread records off.
@@ -171,6 +173,10 @@ $vars = @{
     SDL_GAMECONTROLLER_USE_BUTTON_LABELS = "0"
     SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS = "1"
     PS3_INPUT_MAP               = $(if (Test-Path $inputToml) { $inputToml } else { "" })
+    # F9 (the play log's MARK) also logs the HUD draws of the next two frames into stderr.log:
+    # the minimap diagnostic (agent/minimap 2b79848, "some enemies did not show up on the
+    # minimap"); costs nothing until F9 is pressed.
+    PS3RECOMP_ENG_HUDLOG_KEY    = "1"
 }
 if ($Fullscreen) { $vars["PS3RECOMP_VK_FULLSCREEN"] = "1" }
 if ($PSBoundParameters.ContainsKey('Fps')) { $vars["PS3RECOMP_FPS_CAP"] = [string]$Fps }
@@ -269,6 +275,8 @@ do {
         $mark = "=== {0:HH:mm:ss} restart {1} (F2 > Mods: Restart to apply) ===" -f (Get-Date), ($run - 1)
         $so.WriteLine($mark); $so.Flush(); $se.WriteLine($mark); $se.Flush()
         if (-not $NoLog -and (Test-Path "$out\playlog.tsv")) { Move-Item -Force "$out\playlog.tsv" "$out\playlog.$($run - 1).tsv" }
+        # the hitch catcher's stacks of that run's frozen frames (same clock as its playlog)
+        if (-not $NoLog -and (Test-Path "$out\hitches.tsv")) { Move-Item -Force "$out\hitches.tsv" "$out\hitches.$($run - 1).tsv" }
     }
     $p = [System.Diagnostics.Process]::Start($psi)
     if ($RecordRoute) {

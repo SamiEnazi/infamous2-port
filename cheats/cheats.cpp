@@ -23,6 +23,8 @@
  *   0x00A64E50            XP: available, earned (u32 pair; the save keeps it in its first record)
  *   0x0019BB20            UpdateGravity(r3 jump/fall controller A): A+0x60 gravity; the glide's -350
  *   0x0007E0A4 / 0x00098A00  the free / aim camera's input step (the mouse camera, NOTES.md "Mouse camera")
+ *   0x004AE348            MatchPositionAndRotation(r3 object, r4 -> matrix): the game's own placing of an
+ *                         object, with a character's teleport reset (saved spots, NOTES.md "Saved spots")
  *
  * Test knobs (scripted runs; Sami never needs them):
  *   PS3_CHEATS="id=value,..."        at the first Cole update
@@ -53,11 +55,18 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <mutex>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <emmintrin.h>   /* _mm_cvttsd_si32: the PPU's fctiwz (the ring fix below) */
+#include <stdarg.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace {
 
@@ -130,8 +139,19 @@ constexpr float kGlideScale[] = { 1.0f, 0.5f, 0.25f, 0.125f };
 /* glide research (tests): snapshots of Cole's character object */
 int s_snap_left, s_snap_every = 2;
 long long s_snap_n;
+/* saved spots (the "Saved spots" section below): a Go waiting for Cole's next update; the fall-through
+ * guard after one; the saved camera's turn (the free camera hook); the free camera's last angles */
+std::atomic<int> g_tp_pending{0};
+std::atomic<bool> s_settle_on{false};
+std::atomic<int> s_tpc_on{0};
+float s_tpc_yaw, s_tpc_pitch;
+double s_tpc_t0;
+bool s_tpc_cancel;
+std::atomic<uint32_t> s_cam_yaw_bits{0}, s_cam_pitch_bits{0};
+std::atomic<double> s_cam_t{-1.0};
 
 void hooks_update();
+void spot_tick(struct ppu_context* ctx, uint32_t c);
 
 /* ---- the hooks ----------------------------------------------------------------------- */
 void timeline_poll(struct ppu_context* ctx, uint32_t c);
@@ -205,6 +225,8 @@ void hook_cole_update(struct ppu_context* ctx, ppu_hook_body body)
         fprintf(stderr, "[cheats] battery: max energy %g -> %g\n", before, rdf(c + kEnergyMax));
         hooks_update();
     }
+    if (g_tp_pending.load(std::memory_order_relaxed) || s_settle_on.load(std::memory_order_relaxed))
+        spot_tick(ctx, c);                          /* Go to saved spot (after the game's own update) */
     if (s_snap_left > 0) snap_write(c);
     if (s_timeline) timeline_poll(ctx, c);
     if (s_probe) { probe_tick(c); glide_probe(c); }
@@ -487,6 +509,45 @@ void mouse_probe(const char* cam, uint32_t o, uint32_t fy, uint32_t fp, float y0
             (double)y0, (double)y1, (double)y2, (double)p0, (double)p1, (double)p2, (double)vy, (double)vp);
 }
 
+/* [spot] Go to saved spot with a saved camera (spot_go sets s_tpc_*): the camera is turned to the saved
+ * target yaw/pitch with the mouse turn's own mechanism below, whatever the player plays with. Each free
+ * camera frame the turn owed is the saved angle minus the camera's target now (absolute, so nothing is
+ * lost on a frame where the game's manual branch does not run), carried into the target within the
+ * view's reach as a mouse turn is; the manual branch is kept (the epsilon stick, pointing both ways so the
+ * game counts both axes as turned and does not level the pitch) until the view itself has arrived --
+ * the idle branch would set the target back to the view. Over when the view is there, after
+ * kTpCamSecs, or as soon as the player turns the camera (mouse, stick) or aims. */
+constexpr double kTpCamSecs = 3.0;
+void tpc_end(const char* why)
+{
+    s_tpc_on.store(0, std::memory_order_relaxed);
+    s_owe_yaw = s_owe_pitch = 0.0f;
+    s_free_hold = 0;
+    fprintf(stderr, "[cheats] spot: camera turn over (%s) after %.2f s\n", why, now_s() - s_tpc_t0);
+}
+bool tpc_frame(uint32_t d, float y0, float p0, float vy, float vp, bool moved)   /* true: this frame turns */
+{
+    if (!s_tpc_on.load(std::memory_order_acquire)) return false;
+    if (moved || s_tpc_cancel) { tpc_end("the player turned the camera"); return false; }
+    if (now_s() - s_tpc_t0 > kTpCamSecs) { tpc_end("time"); return false; }
+    const float gp = clampf(s_tpc_pitch, rdf(kFreePitchLimits), rdf(kFreePitchLimits + 4));
+    float oy = wrap_pi(s_tpc_yaw - y0), op = gp - p0;
+    if (oy > -1e-4f && oy < 1e-4f) oy = 0.0f;
+    if (op > -1e-4f && op < 1e-4f) op = 0.0f;
+    const float ey = wrap_pi(s_tpc_yaw - vy), ep = gp - vp;
+    if (oy == 0.0f && op == 0.0f && ey > -0.005f && ey < 0.005f && ep > -0.005f && ep < 0.005f) {
+        tpc_end("the view is there");
+        return false;
+    }
+    (void)d;
+    s_owe_yaw = oy;
+    s_owe_pitch = op;
+    s_free_hold = kFreeHold;
+    s_eps_dx = oy > 0.0f ? -1.0f : 1.0f;   /* as a mouse turn of (dx, dy) owes (-dx, +dy) */
+    s_eps_dy = op >= 0.0f ? 1.0f : -1.0f;
+    return true;
+}
+
 /* func_0007E0A4, the free camera's input step (r3 = camera driver D). */
 void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
 {
@@ -500,6 +561,7 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
         cellPad_host_mouse_direct_provider(1);
         fprintf(stderr, "[mouse] direct mouse camera: the free camera hook runs\n");
     }
+    const bool tp = gptr(d) && tpc_frame(d, y0, p0, vy0, vp0, moved);   /* [spot] (false when no Go is turning it) */
     /* The turn owed: the game's view follows the target (D+0x1C0) only so fast, and after the step
      * func_00082964 keeps the target within +-0.2 rad of the view (0x00082FB8: G2+0x1E0/0x1F0), and once
      * the player stops (the idle branch) the target is set back to the view. A turn put into the target
@@ -515,7 +577,7 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
         s_free_hold = kFreeHold;
         s_eps_dx = s_mt_dx; s_eps_dy = s_mt_dy;
     }
-    const bool keep = on && (s_owe_yaw != 0.0f || s_owe_pitch != 0.0f || s_free_hold > 0);
+    const bool keep = (on || tp) && (s_owe_yaw != 0.0f || s_owe_pitch != 0.0f || s_free_hold > 0);
     if (s_free_hold > 0) s_free_hold--;
     s_mt_cam = keep ? CAM_FREE : CAM_NONE;
     s_mt_rate = s_mt_eps = false;
@@ -552,6 +614,11 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
     }
     s_mt_frames.fetch_add(1, std::memory_order_relaxed);
     if (s_mt_eps) s_mt_epsn.fetch_add(1, std::memory_order_relaxed);
+    /* [spot] the camera's angles for Save this spot (host memory only; read on the menu's thread) */
+    { const float cy = rdf(d + kDYaw), cp = rdf(d + kDPitch); uint32_t b;
+      memcpy(&b, &cy, 4); s_cam_yaw_bits.store(b, std::memory_order_relaxed);
+      memcpy(&b, &cp, 4); s_cam_pitch_bits.store(b, std::memory_order_relaxed);
+      s_cam_t.store(now_s(), std::memory_order_release); }
     if (s_mouse_probe) mouse_probe("free", d, kDYaw, kDPitch, y0, p0, y1, p1, vy0, vp0);
 }
 
@@ -568,6 +635,7 @@ void hook_aim_cam(struct ppu_context* ctx, ppu_hook_body body)
     const bool moved = on && (s_mt_dx != 0.0f || s_mt_dy != 0.0f);
     s_owe_yaw = s_owe_pitch = 0.0f;  /* the free camera's carried turn ends with it */
     s_free_hold = 0;
+    if (s_tpc_on.load(std::memory_order_relaxed)) tpc_end("aiming");   /* [spot] the player aims: his camera */
     if (!gptr(a)) { ppu_hook_call(ctx, body); return; }
     const float y0 = rdf(a + kAYaw), p0 = rdf(a + kAPitch);
     if (moved && s_aim_manual) {
@@ -601,6 +669,9 @@ void hook_cam_stick(struct ppu_context* ctx, ppu_hook_body body)
     const uint32_t px = (uint32_t)ctx->gpr[5], py = (uint32_t)ctx->gpr[6];
     ppu_hook_call(ctx, body);
     if (s_mt_cam == CAM_FREE && lr == kLrFreeStick && which == 1 && gptr(px) && gptr(py) &&
+        (rdf(px) != 0.0f || rdf(py) != 0.0f) && s_tpc_on.load(std::memory_order_relaxed))
+        s_tpc_cancel = true;                    /* [spot] the player's own stick: the saved camera's turn ends */
+    if (s_mt_cam == CAM_FREE && lr == kLrFreeStick && which == 1 && gptr(px) && gptr(py) &&
         rdf(px) == 0.0f && rdf(py) == 0.0f) {   /* the stick is centred */
         /* pointing where the mouse moved: the game's stick axis snap (within 15 deg of an axis = that
          * axis only) then marks the axes the player turned (D+0x1E4 yaw / 0x1E5 pitch) as for a stick;
@@ -612,11 +683,469 @@ void hook_cam_stick(struct ppu_context* ctx, ppu_hook_body body)
     }
 }
 
+/* ---- saved spots: "Save this spot" / "Go to saved spot" (2026-11-11; NOTES.md "Saved spots") --------------
+ * How the game itself puts a character somewhere (static, EBOOT v1.04; NOTES.md has the trail):
+ *   func_004AE348(r3 object, r4 -> 16-byte aligned 4x4 matrix: rows 0-2 rotation, row 3 position) is the native
+ *   of the script command MATCH_POSITION_AND_ROTATION (reflection entry 0x00956A18 -> handler 0x00528944):
+ *     1. SetWorldPosition 0x004ABDFC: object +0x90 += target - its world position (0x004AAF28), in its
+ *        parent's frame; then vtable +0x5C (the world matrix +0xB0 and the attached children made again).
+ *     2. SetWorldRotation 0x004AE158: object +0x80 = the matrix's rotation (normalised: scale ignored); +0x5C.
+ *     3. when the object is live (0x001BDB68: no +0x58 flag up its parent chain), vtable +0x60 -- for Cole
+ *        0x0015520C = 0x00365060, the character's teleport reset (animation history 0x0032C3D8, facing
+ *        state +0x2D0/+0x334, the components +0x520 and +0x3B0 (ground probe, which held a position copy),
+ *        linear and angular velocity 0 through vtable +0x78/+0x7C into the physics proxy +0xF4) and
+ *        0x0035BA80 (the skill manager +0x378 restarts the skill it runs).
+ *   The game runs the same three steps on Cole itself (func_004AE434 = position in v2, rotation matrix in r7)
+ *   to put him back where he stood when a UGC test play ends (0x003DCF88 keeps [0x00A6E9E4]'s world matrix
+ *   +0xB0 when it starts and puts it back after) -- the closest thing to our feature in the game.
+ *   Why it sticks: each frame Cole's movement (0x00367810, from the proxy sync 0x004A63A0 through his vtable
+ *   +0x88) starts from his world position (0x004AAF28), and the sync then writes +0x90/+0x80 from the result.
+ *   Every other copy (+0xB0 matrix, +0x1F0/+0x250 interpolation history, +0x1560 motion block, +0x3D0/
+ *   +0x410) is made from +0x90/+0x80 -- why writing those (Stage B) changed nothing.
+ * What this code adds around it:
+ *   - The call is made from Cole's own per-frame update (hook 0x001578F8, after the game's body: Cole is
+ *     not half-updated) on the game's thread; the matrix goes on the guest stack below r1 (free at a call
+ *     boundary), the call gets its own frame below that. Cole is put 5 cm above the spot (never inside
+ *     the ground he stood on), upright, facing the saved yaw (or as he faces now).
+ *   - Refused (nothing written) while Cole is held by a parent (+0x64 with +0x1C: climbing, riding),
+ *     switched off (+0x58: cutscenes) or down (health 0).
+ *   - Fall-through guard: a far spot's ground may still be streaming in. For 4 s after the jump, if Cole
+ *     has dropped 2.5 m below the spot without moving away (within 2 m), he is placed again (the same call).
+ *   - The camera: turned to the saved yaw/pitch through the free camera hook (tpc_frame above).
+ * Unused = nothing: Cole's update hook is set only while a Go waits or the guard runs; the free camera
+ * hook only reads two floats into host memory for Save this spot.
+ * Storage: %APPDATA%\inFAMOUS2-port\spots.ini (PS3_CHEATS_SPOTS=<file> instead, "" = this session only;
+ * with PS3_OVERLAY_INI set, e.g. test runs, next to that file), seeded with two places in New Marais (the
+ * cathedral spire's top, the cathedral roof below it); read again when it changes on disk. */
+constexpr uint32_t kToc = 0x009DB730;              /* the EBOOT's TOC: every function descriptor's r2 */
+constexpr uint32_t kOOrigin = 0x14, kOParent = 0x1C, kOOff = 0x58, kOAttached = 0x64, kOPos = 0x90, kOWorld = 0xB0;
+constexpr uint32_t kOriginPos = 0x80;
+constexpr float kSpotLift = 5.0f;
+constexpr double kSpotReqSecs = 2.0;               /* a Go Cole's update has not served by then is dropped */
+constexpr double kSettleSecs = 4.0;
+constexpr float kSettleDrop = 250.0f, kSettleNear = 200.0f;
+
+struct Spot {
+    char name[32];                 /* [31] stays 0 */
+    float x, y, z;                 /* Cole's world position (game units, ~cm; z up) */
+    float facing;                  /* Cole's yaw (rad) */
+    float cyaw, cpitch;            /* the free camera's target yaw / pitch (D+0x1C0 / +0x1C4, rad) */
+    bool has_facing, has_cam;
+};
+constexpr int kSpotsMax = 32;
+const Spot kSeeds[] = {
+    { "Cathedral spire", -43695.0f, -22816.0f, 7786.0f, 0.0f, 0.0f, 0.0f, false, false },     /* the spire's top */
+    { "Cathedral roof", -42024.77f, -24236.1f, 6180.76f, 0.0f, 0.0f, 0.0f, false, false },    /* below the spire */
+};
+/* The list and its file: the menu's thread (page, refresh) and F7's event thread, under s_spots_lock.
+ * Names live in fixed buffers that s_spot_names point at for good (the page's combo reads them). */
+std::mutex s_spots_lock;
+Spot s_spots[kSpotsMax];
+const char* s_spot_names[kSpotsMax];
+int s_nspots, s_spot_sel;
+char s_spots_path[600];
+unsigned long long s_spots_mtime;
+double s_spots_check_t = -10.0;
+char s_spot_help[800], s_go_help[700];
+/* A Go waiting for Cole's update, and the last outcome: any thread, never held over I/O. */
+std::mutex s_req_lock;
+Spot s_req;
+uint32_t s_req_cole;
+double s_req_t;
+char s_spot_status[240] = "";
+/* The guard (guest thread). */
+uint32_t s_settle_cole;
+double s_settle_t0;
+float s_settle_p[3], s_settle_yaw;
+int s_settle_n;
+
+void spot_status(bool notice, const char* fmt, ...)
+{
+    char msg[240];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    { std::lock_guard<std::mutex> g(s_req_lock); snprintf(s_spot_status, sizeof s_spot_status, "%s", msg); }
+    fprintf(stderr, "[cheats] spot: %s\n", msg);
+    if (notice) ps3_cheats_notice(msg, 5.0);
+}
+
+void spots_path_init()
+{
+    char* p = s_spots_path;
+    const size_t n = sizeof s_spots_path;
+    p[0] = 0;
+    if (const char* e = getenv("PS3_CHEATS_SPOTS")) { snprintf(p, n, "%s", e); return; }   /* "" = session only */
+    if (const char* ini = getenv("PS3_OVERLAY_INI")) {          /* the menu's file elsewhere (tests): next to it */
+        if (!*ini) return;
+        snprintf(p, n, "%s", ini);
+        char* a = strrchr(p, '\\');
+        char* b = strrchr(p, '/');
+        char* s = a > b ? a : b;
+        if (s) snprintf(s + 1, n - (size_t)(s + 1 - p), "spots.ini");
+        else snprintf(p, n, "spots.ini");
+        return;
+    }
+#ifdef _WIN32
+    if (const char* base = getenv("APPDATA")) if (*base) snprintf(p, n, "%s\\inFAMOUS2-port\\spots.ini", base);
+#else
+    if (const char* x = getenv("XDG_CONFIG_HOME")) { if (*x) { snprintf(p, n, "%s/infamous2-port/spots.ini", x); return; } }
+    if (const char* h = getenv("HOME")) if (*h) snprintf(p, n, "%s/.config/infamous2-port/spots.ini", h);
+#endif
+}
+
+unsigned long long file_mtime(const char* p)
+{
+    if (!p[0]) return 0;
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExA(p, GetFileExInfoStandard, &a)) return 0;
+    return ((unsigned long long)a.ftLastWriteTime.dwHighDateTime << 32) | a.ftLastWriteTime.dwLowDateTime;
+#else
+    struct stat st;
+    return stat(p, &st) ? 0 : (unsigned long long)st.st_mtime;
+#endif
+}
+
+char* trim(char* s)
+{
+    while (*s == ' ' || *s == '\t') s++;
+    size_t n = strlen(s);
+    while (n && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r' || s[n - 1] == '\n')) s[--n] = 0;
+    return s;
+}
+
+/* "name = x y z [facing [camera_yaw camera_pitch]]" */
+bool spot_parse(char* line, Spot* s)
+{
+    char* eq = strchr(line, '=');
+    if (!eq) return false;
+    *eq = 0;
+    const char* nm = trim(line);
+    if (!*nm) return false;
+    memset(s, 0, sizeof *s);
+    snprintf(s->name, sizeof s->name - 1, "%s", nm);
+    float v[6];
+    int k = 0;
+    const char* q = eq + 1;
+    while (k < 6) {
+        char* e;
+        const float f = strtof(q, &e);
+        if (e == q || !std::isfinite(f)) break;
+        v[k++] = f;
+        q = e;
+    }
+    if (k < 3) return false;
+    for (int i = 0; i < 3; i++) if (v[i] < -1e6f || v[i] > 1e6f) return false;   /* the city is within +-1e5 */
+    s->x = v[0]; s->y = v[1]; s->z = v[2];
+    /* angles from a hand-edited file: into -pi..pi (wrap_pi's loop on the game's thread must stay short) */
+    const float two_pi = 6.28318531f;
+    if (k >= 4) { s->facing = remainderf(v[3], two_pi); s->has_facing = true; }
+    if (k >= 6) { s->cyaw = remainderf(v[4], two_pi); s->cpitch = clampf(v[5], -1.6f, 1.6f); s->has_cam = true; }
+    return true;
+}
+
+void spots_names_locked() { for (int i = 0; i < kSpotsMax; i++) s_spot_names[i] = s_spots[i].name; }
+
+/* The file, or the seeds when there is none (the file is written at the first change). */
+void spots_load_locked()
+{
+    FILE* f = s_spots_path[0] ? fopen(s_spots_path, "r") : nullptr;
+    spots_names_locked();
+    if (!f) {
+        s_nspots = 0;
+        for (const Spot& s : kSeeds) s_spots[s_nspots++] = s;
+        s_spot_sel = 0;
+        s_spots_mtime = 0;
+        return;
+    }
+    char line[512], sel[32] = "";
+    int n = 0;
+    while (fgets(line, sizeof line, f)) {
+        char* p = trim(line);
+        if (!*p || *p == ';' || *p == '#') continue;
+        if (!strncmp(p, "selected:", 9)) { snprintf(sel, sizeof sel, "%s", trim(p + 9)); continue; }
+        Spot s;
+        if (n < kSpotsMax && spot_parse(p, &s)) s_spots[n++] = s;
+    }
+    fclose(f);
+    s_nspots = n;
+    s_spot_sel = 0;
+    for (int i = 0; i < n; i++) if (!strcmp(s_spots[i].name, sel)) s_spot_sel = i;
+    s_spots_mtime = file_mtime(s_spots_path);
+}
+
+bool spots_write_locked()
+{
+    if (!s_spots_path[0]) return true;                        /* this session only */
+    char dir[600], tmp[620];
+    snprintf(dir, sizeof dir, "%s", s_spots_path);
+    char* a = strrchr(dir, '\\');
+    char* b = strrchr(dir, '/');
+    if (char* s = a > b ? a : b) {
+        *s = 0;
+#ifdef _WIN32
+        CreateDirectoryA(dir, NULL);                          /* there already: fails, fine */
+#endif
+    }
+    snprintf(tmp, sizeof tmp, "%s.tmp", s_spots_path);
+    FILE* f = fopen(tmp, "w");
+    if (!f) return false;
+    fprintf(f, "; inFAMOUS 2 port: saved spots for F2 > Cheats > Saved spots (F7 goes to the selected one).\n"
+               "; One spot a line:  name = x y z [facing [camera_yaw camera_pitch]]\n"
+               ";   x y z: Cole's position (game units, about 1 cm; z is up). facing: the way Cole looks;\n"
+               ";   camera_yaw camera_pitch: the camera's angles (radians). A spot without them leaves Cole's\n"
+               ";   facing and the camera as they are. Rename, edit or delete lines freely: the game reads\n"
+               ";   the file again when it changes (while the Cheats page is open).\n");
+    if (s_nspots) fprintf(f, "selected: %s\n", s_spots[s_spot_sel].name);
+    for (int i = 0; i < s_nspots; i++) {
+        const Spot& s = s_spots[i];
+        fprintf(f, "%s = %.2f %.2f %.2f", s.name, (double)s.x, (double)s.y, (double)s.z);
+        if (s.has_facing || s.has_cam) fprintf(f, " %.4f", (double)s.facing);
+        if (s.has_cam) fprintf(f, " %.4f %.4f", (double)s.cyaw, (double)s.cpitch);
+        fprintf(f, "\n");
+    }
+    const bool ok = !ferror(f);
+    if (fclose(f) != 0 || !ok) { remove(tmp); return false; }
+#ifdef _WIN32
+    if (!MoveFileExA(tmp, s_spots_path, MOVEFILE_REPLACE_EXISTING)) { remove(tmp); return false; }
+#else
+    if (rename(tmp, s_spots_path)) { remove(tmp); return false; }
+#endif
+    s_spots_mtime = file_mtime(s_spots_path);
+    return true;
+}
+
+/* Cole's world position as the game computes it (0x004AAF28 for an object no parent holds: +0x90 plus its
+ * origin's +0x80) and his facing (the yaw of the world matrix +0xB0's first row: (cos, sin) x scale).
+ * false: a parent holds him (+0x64 with +0x1C, as 0x004ABDFC tests): climbing, riding -- not a free spot. */
+bool cole_world(uint32_t c, float p[3], float* yaw)
+{
+    if (vm_read8(c + kOAttached) && vm_read32(c + kOParent)) return false;
+    const uint32_t org = vm_read32(c + kOOrigin);
+    for (uint32_t k = 0; k < 3; k++)
+        p[k] = rdf(c + kOPos + 4u * k) + (gptr(org) ? rdf(org + kOriginPos + 4u * k) : 0.0f);
+    *yaw = atan2f(rdf(c + kOWorld + 4u), rdf(c + kOWorld));
+    return true;
+}
+
+/* The game's own placing (func_004AE348): Cole at p (world), upright, facing yaw. Guest thread, from Cole's
+ * update after the game's body (a call boundary: the guest stack below r1 is free). Layout below r1:
+ * [frame .. +0x30) the call's header (it saves LR at frame+0x10), [+0x30 .. +0x70) the parameter area,
+ * [+0x80 .. +0xC0) the matrix (16-byte aligned), up to sp; the call's own frame goes below `frame`. */
+void place(struct ppu_context* ctx, uint32_t c, const float p[3], float yaw)
+{
+    const uint32_t sp = (uint32_t)ctx->gpr[1] & ~0xFu;
+    const uint32_t frame = sp - 0x100u, m = frame + 0x80u;
+    const float cs = cosf(yaw), sn = sinf(yaw);
+    const float rows[16] = { cs, sn, 0.0f, 0.0f,   -sn, cs, 0.0f, 0.0f,   0.0f, 0.0f, 1.0f, 0.0f,
+                             p[0], p[1], p[2], 1.0f };   /* w = 1: SetWorldPosition adds target - current to all 4 lanes */
+    for (uint32_t i = 0; i < 16; i++) wrf(m + 4u * i, rows[i]);
+    call_game(ctx, func_004AE348, [&](struct ppu_context* x) {
+        x->gpr[1] = frame; x->gpr[2] = kToc; x->gpr[3] = c; x->gpr[4] = m; });
+}
+
+void spot_go(struct ppu_context* ctx, uint32_t c, const Spot& s)
+{
+    float p0[3], yaw0;
+    if (vm_read8(c + kOOff)) { spot_status(true, "Go to %s: not now (Cole is in a scripted moment).", s.name); return; }
+    if (!cole_world(c, p0, &yaw0)) { spot_status(true, "Go to %s: Cole is holding on to something; let go first.", s.name); return; }
+    if (!(rdf(c + kHp) > 0.0f)) { spot_status(true, "Go to %s: not now (Cole is down).", s.name); return; }
+    const float p[3] = { s.x, s.y, s.z + kSpotLift };
+    const float yaw = s.has_facing ? s.facing : std::isfinite(yaw0) ? yaw0 : 0.0f;
+    place(ctx, c, p, yaw);
+    float p1[3] = { 0, 0, 0 }, yaw1 = 0.0f;
+    cole_world(c, p1, &yaw1);
+    fprintf(stderr, "[cheats] spot: %s: from (%.1f %.1f %.1f) facing %.3f to (%.1f %.1f %.1f) facing %.3f: now (%.1f %.1f %.1f) "
+            "facing %.3f, velocity copy (%.1f %.1f %.1f)\n", s.name, (double)p0[0], (double)p0[1], (double)p0[2], (double)yaw0,
+            (double)p[0], (double)p[1], (double)p[2], (double)yaw, (double)p1[0], (double)p1[1], (double)p1[2], (double)yaw1,
+            (double)rdf(c + 0x1570), (double)rdf(c + 0x1574), (double)rdf(c + 0x1578));
+    s_settle_cole = c;
+    s_settle_t0 = now_s();
+    memcpy(s_settle_p, p, sizeof s_settle_p);
+    s_settle_yaw = yaw;
+    s_settle_n = 0;
+    s_settle_on.store(true);
+    if (s.has_cam && s_mouse_hook && ppu_hook_exists(kFnFreeCam)) {   /* the free camera hook turns it (tpc_frame) */
+        s_tpc_yaw = s.cyaw;
+        s_tpc_pitch = s.cpitch;
+        s_tpc_t0 = now_s();
+        s_tpc_cancel = false;
+        s_tpc_on.store(1, std::memory_order_release);
+    }
+    spot_status(true, "Went to %s.", s.name);
+}
+
+/* The fall-through guard, each of Cole's updates for kSettleSecs after a Go. */
+void spot_settle(struct ppu_context* ctx, uint32_t c)
+{
+    const double t = now_s() - s_settle_t0;
+    float p[3], yaw;
+    if (c != s_settle_cole || t > kSettleSecs || !cole_world(c, p, &yaw)) {
+        s_settle_on.store(false);
+        fprintf(stderr, "[cheats] spot: guard over after %.2f s, %d re-placement(s)\n", t, s_settle_n);
+        return;
+    }
+    if (fabsf(p[0] - s_settle_p[0]) < kSettleNear && fabsf(p[1] - s_settle_p[1]) < kSettleNear &&
+        p[2] < s_settle_p[2] - kSettleDrop && !vm_read8(c + kOOff) && rdf(c + kHp) > 0.0f) {
+        place(ctx, c, s_settle_p, s_settle_yaw);
+        s_settle_n++;
+        fprintf(stderr, "[cheats] spot: Cole fell to z %.1f (spot %.1f) %.2f s after the jump: placed again (%d)\n",
+                (double)p[2], (double)s_settle_p[2], t, s_settle_n);
+    }
+}
+
+void spot_tick(struct ppu_context* ctx, uint32_t c)
+{
+    if (g_tp_pending.exchange(0, std::memory_order_acquire)) {
+        Spot s;
+        uint32_t want;
+        double t;
+        { std::lock_guard<std::mutex> g(s_req_lock); s = s_req; want = s_req_cole; t = s_req_t; }
+        if (c != want || now_s() - t > kSpotReqSecs)
+            spot_status(true, "Go to %s: not done (the game was paused or loading); press it again in play.", s.name);
+        else
+            spot_go(ctx, c, s);
+    }
+    if (s_settle_on.load()) spot_settle(ctx, c);
+    if (!g_tp_pending.load() && !s_settle_on.load()) hooks_update();   /* Cole's update hook off again if unused */
+}
+
+/* ---- the Saved spots entries (menu thread; Go also from F7's event thread) ---- */
+int apply_spot(ps3_cheat* c)
+{
+    std::lock_guard<std::mutex> g(s_spots_lock);
+    if (!s_nspots) return 0;
+    const int i = (int)c->value;
+    s_spot_sel = i < 0 ? 0 : i >= s_nspots ? s_nspots - 1 : i;
+    spots_write_locked();                                     /* the pick is kept (the file's "selected:") */
+    return 1;
+}
+
+int apply_spot_go(ps3_cheat*)
+{
+    const uint32_t c = player();
+    if (!c) { spot_status(true, "Go to saved spot: Cole is not in play."); return 0; }
+    Spot s;
+    bool have = false;
+    {
+        std::lock_guard<std::mutex> g(s_spots_lock);
+        if (s_nspots) { s = s_spots[s_spot_sel]; have = true; }
+    }
+    if (!have) { spot_status(true, "Go to saved spot: no saved spots (Save this spot adds one)."); return 0; }
+    { std::lock_guard<std::mutex> g(s_req_lock); s_req = s; s_req_cole = c; s_req_t = now_s(); }
+    g_tp_pending.store(1, std::memory_order_release);
+    hooks_update();                                           /* Cole's update hook: it jumps there next frame */
+    return 1;
+}
+
+int apply_spot_save(ps3_cheat*)
+{
+    const uint32_t c = player();
+    if (!c) { spot_status(true, "Save this spot: Cole is not in play."); return 0; }
+    float p[3], yaw;
+    if (!cole_world(c, p, &yaw)) { spot_status(true, "Save this spot: Cole is holding on to something; let go first."); return 0; }
+    if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) {
+        spot_status(true, "Save this spot: Cole's position does not read right now; try again.");
+        return 0;
+    }
+    Spot s;
+    memset(&s, 0, sizeof s);
+    s.x = p[0]; s.y = p[1]; s.z = p[2];
+    s.facing = yaw; s.has_facing = std::isfinite(yaw);
+    const double ct = s_cam_t.load(std::memory_order_acquire);
+    if (ct >= 0.0 && now_s() - ct < 1.0) {                    /* the free camera ran within the last second */
+        uint32_t b = s_cam_yaw_bits.load(std::memory_order_relaxed); memcpy(&s.cyaw, &b, 4);
+        b = s_cam_pitch_bits.load(std::memory_order_relaxed); memcpy(&s.cpitch, &b, 4);
+        s.has_cam = std::isfinite(s.cyaw) && std::isfinite(s.cpitch);
+    }
+    bool full = false, wrote = false;
+    {
+        std::lock_guard<std::mutex> g(s_spots_lock);
+        if (s_nspots >= kSpotsMax) full = true;
+        else {
+            int k = 1;                                        /* "Spot <k> (MM-DD HH:MM)", k not used yet */
+            for (;; k++) {
+                char pre[16];
+                snprintf(pre, sizeof pre, "Spot %d", k);
+                const size_t l = strlen(pre);
+                bool used = false;
+                for (int i = 0; i < s_nspots; i++)
+                    if (!strncmp(s_spots[i].name, pre, l) && (s_spots[i].name[l] == 0 || s_spots[i].name[l] == ' ')) used = true;
+                if (!used) break;
+            }
+            const time_t now = time(nullptr);
+            struct tm tmv;
+#ifdef _WIN32
+            localtime_s(&tmv, &now);
+#else
+            localtime_r(&now, &tmv);
+#endif
+            snprintf(s.name, sizeof s.name - 1, "Spot %d (%02d-%02d %02d:%02d)", k, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+            s_spots[s_nspots++] = s;
+            s_spot_sel = s_nspots - 1;
+            wrote = spots_write_locked();
+        }
+    }
+    if (full) { spot_status(true, "Save this spot: the list is full (%d); delete some lines in %s.", kSpotsMax, s_spots_path); return 0; }
+    spot_status(true, "Saved %s: x %.0f y %.0f z %.0f%s%s", s.name, (double)s.x, (double)s.y, (double)s.z,
+                s.has_cam ? "" : " (without the camera: the free camera was not running -- aiming or paused?)",
+                wrote ? "" : " -- the file could not be written, kept for this session");
+    return 1;
+}
+
+ps3_cheat s_spot = { "spot", "Spot", s_spot_help, "Saved spots", PS3_CHEAT_CHOICE, apply_spot,
+    0, 0, 0, NULL, s_spot_names, 0, NULL, PS3_CHEAT_NO_REMEMBER };
+ps3_cheat s_spotgo = { "spotgo", "Go to saved spot (F7)", s_go_help, "Saved spots", PS3_CHEAT_ACTION, apply_spot_go,
+    0, 0, 0, NULL, NULL, 0, NULL, PS3_CHEAT_HOTKEY };
+ps3_cheat s_spotsave = { "spotsave", "Save this spot",
+    "Adds where Cole stands now, the way he faces and the camera's angles as a new spot (Spot 1, Spot 2, ...) "
+    "and picks it.", "Saved spots", PS3_CHEAT_ACTION, apply_spot_save };
+
+/* The page's texts and the combo (menu thread; also at start). spots.ini changed on disk: read again. */
+void spots_texts_locked()
+{
+    s_spot.choices = s_spot_names;
+    s_spot.n_choices = s_nspots;
+    s_spot.value = s_spot_sel;
+    const char* where = s_spots_path[0] ? s_spots_path : "this session only (PS3_CHEATS_SPOTS is empty)";
+    if (s_nspots) {
+        const Spot& s = s_spots[s_spot_sel];
+        snprintf(s_spot_help, sizeof s_spot_help, "x %.0f  y %.0f  z %.0f, %s, %s. Spots are kept in %s: rename or delete "
+                 "them there.", (double)s.x, (double)s.y, (double)s.z, s.has_facing ? "facing as saved" : "facing as Cole is",
+                 s.has_cam ? "camera as saved" : "camera as it is", where);
+    } else
+        snprintf(s_spot_help, sizeof s_spot_help, "No saved spots: Save this spot adds one. Spots are kept in %s.", where);
+    char st[240];
+    { std::lock_guard<std::mutex> g(s_req_lock); snprintf(st, sizeof st, "%s", s_spot_status); }
+    snprintf(s_go_help, sizeof s_go_help, "Puts Cole at the picked spot, standing still and facing the saved way, and turns "
+             "the camera to the saved view (the game's own placing, as when it puts Cole back after a test play). Use it "
+             "in free play with Cole on his feet. F7 does it too, with the menu open or closed.%s%s",
+             st[0] ? "\nLast: " : "", st);
+}
+
+void spots_refresh()
+{
+    std::lock_guard<std::mutex> g(s_spots_lock);
+    const double t = now_s();
+    if (t - s_spots_check_t >= 1.0) {
+        s_spots_check_t = t;
+        const unsigned long long mt = file_mtime(s_spots_path);
+        if (mt && mt != s_spots_mtime) {
+            spots_load_locked();
+            fprintf(stderr, "[cheats] spot: %s changed: %d spot(s)\n", s_spots_path, s_nspots);
+        }
+    }
+    spots_texts_locked();
+}
+
 /* Which hooks are needed now: each is set only while a cheat (or a test knob) uses it. */
 void hooks_update()
 {
     const bool tick = g_god || g_energy || g_xp_pending.load() != 0 || g_refill || s_probe || s_timeline ||
-                      !s_env_done || g_karma_add.load() != 0 || g_recompute || s_snap_left > 0;
+                      !s_env_done || g_karma_add.load() != 0 || g_recompute || s_snap_left > 0 ||
+                      g_tp_pending.load() != 0 || s_settle_on.load();
     ppu_hook_set(kFnColeUpdate, tick ? hook_cole_update : nullptr);
     ppu_hook_set(kFnSetHealth, g_god ? hook_set_health : nullptr);
     ppu_hook_set(kFnTakeDamage, (g_onehit || s_probe) ? hook_take_damage : nullptr);
@@ -722,6 +1251,8 @@ void refresh()
     const char* k = ppu_hook_exists(kFnAddKarma) ? NULL : lift;
     s_kside.unavailable = s_kmult.unavailable = s_kxp.unavailable = k;
     s_kblue.unavailable = s_kred.unavailable = ppu_hook_exists(kFnColeUpdate) ? NULL : lift;
+    s_spotgo.unavailable = ppu_hook_exists(kFnColeUpdate) ? NULL : lift;   /* Save this spot only reads memory */
+    spots_refresh();
 }
 
 /* ---- test knobs -------------------------------------------------------------------- */
@@ -902,8 +1433,14 @@ struct Init {
     Init()
     {
         ps3_cheat* all[] = { &s_god, &s_energy, &s_maxbat, &s_jump, &s_glide, &s_onehit, &s_speed, &s_noattack, &s_xpc,
-                             &s_kside, &s_kmult, &s_kxp, &s_kblue, &s_kred };
+                             &s_kside, &s_kmult, &s_kxp, &s_kblue, &s_kred, &s_spot, &s_spotgo, &s_spotsave };
         for (ps3_cheat* c : all) ps3_cheat_register(c);
+        spots_path_init();                    /* saved spots: the file (or the seeds), read once here */
+        {
+            std::lock_guard<std::mutex> g(s_spots_lock);
+            spots_load_locked();
+            spots_texts_locked();
+        }
         ps3_cheats_set_note("XP and karma changed here are real: the game writes them into your save the next "
                             "time it saves. Copy your saves first if you want to keep a clean game.");
         ps3_cheats_set_refresh(refresh);

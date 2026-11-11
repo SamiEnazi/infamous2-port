@@ -102,6 +102,7 @@ F2 → Cheats:
 - **karma lock** (blue/red only), a karma multiplier, **XP for karma**, *Add karma* / *Add XP* buttons
 - **one-hit kills**, enemy speed, enemies hold fire
 - **longer glide**: Cole sinks more slowly while gliding (R1, the Static Thrusters), so a glide lasts up to 3× as long and goes further
+- **saved spots**: *Save this spot* remembers where Cole stands, which way he faces and the camera; *Go to saved spot* (or **F7**, menu open or closed) puts him back there, through the game's own placing code (two places in New Marais come with it)
 
 Cheats can be remembered between sessions, with a short reminder at start.
 
@@ -119,6 +120,8 @@ The community's inFAMOUS 2 mods work as they are: the ones made for tiffsomniac'
 - **F2 → Mods**: every mod with its preview picture and what it changes, turn each on or off, pick its options;
   the page shows at once what the next start will use, and **Restart to apply** restarts the game to its title
   screen (Continue there to go on from your last save)
+- options that all change the same texture (a T-shirt in seven designs) are one at a time, as radio buttons;
+  options that change different things (a skin for the sword, the amp and the outfit) are check boxes
 - two mods that change the same file: **Use this one instead** picks the one that wins (the page says first what
   the other loses), else the first by folder name
 - a texture patch made for another version of the game is never written beside its texture: the mod is left out
@@ -152,8 +155,9 @@ the same overflow, forced on purpose, went from **13 to 40 fps**. With normal se
 test ran at **75 fps with no frame over 37 ms**. That rooftop view now runs at **80–91 fps** at native 1080p with
 every extra on.
 
-Long sessions stay smooth too: in a 26-minute test in the city (developer build), no frame took longer than
-150 ms after loading, and memory use stayed flat.
+Every session also watches itself: a frame that takes longer than 80 ms is recorded together with what each
+of the game's threads was doing at that moment (`play\<date-time>\hitches.tsv`, summed up in `summary.txt`), so a
+stutter you report comes with its cause.
 
 ### 🎮 In the city on this port
 
@@ -165,8 +169,8 @@ Setup translates the game's PS3 code into PC code **on your machine** and compil
 runs directly on your CPU, with its graphics drawn through Vulkan.
 
 > 🧪 **Early public test.** It boots, plays and saves, and it is fast on the PC it was built on, but
-> it has only been played from the start to about mission 5, on one PC. Expect bugs; please
-> [report them](../../issues).
+> it has been played on one PC so far. Expect bugs; please [report them](../../issues) with the session's
+> `play\<date-time>` folder.
 
 > 🔒 **No game content is included, and none is downloaded.** You need your own copy of the game,
 > and RPCS3 for Setup. Builds of the game (the `.exe`) are never shared, because they contain the
@@ -178,7 +182,7 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 |---|---|
 | ✅ Tested copy | Europe disc **BCES01143** + the **1.04** update. US and other discs share the same 1.04 code but are untested. |
 | 🖥️ Tested PC | i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p |
-| ⚠️ Known issues | • The Beast fight can drop into the 40s (the CPU side of fights is being worked on). |
+| ⚠️ Known issues | • The Beast fight can drop into the 40s.<br>• Views over a big part of the city (the top of the cathedral spire) run at 75–85 fps: the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them. |
 
 ## 🧰 What you need
 
@@ -253,7 +257,8 @@ Updating later is the same: Setup downloads the build tools again and deletes th
   | **F1** | fps counter |
   | **F2** (or hold L3+R3) | PC settings: Display, Graphics (resolution, anti-aliasing, upscaling, sharpening), Audio (volume, language), Controls (mouse, buttons and keys), HUD, Lighting, Effects, Mods, Cheats |
   | **F3** | your picture vs the original PS3 look |
-  | **F9** | mark a stutter in the session log |
+  | **F7** | go to your saved spot (F2 → Cheats → Saved spots) |
+  | **F9** | mark a moment in the session log (a stutter, a glitch, an enemy missing from the minimap) |
   | **Alt+Enter** | fullscreen |
 
 - **Keyboard and mouse:**
@@ -269,7 +274,8 @@ Updating later is the same: Setup downloads the build tools again and deletes th
   16:10. You see more on the sides (nothing is stretched); the HUD stays in the middle 16:9 and movies get
   black bars. It applies at the next start. 16:9 is the default.
 - **Your saves:** `game\gamedata\dev_hdd0\home\00000001\savedata`, backed up to `saves-backup\` before every session.
-- **Session logs:** each session writes `play\<date-time>\`. Please attach it to bug reports.
+- **Session logs:** each session writes `play\<date-time>\`: frame times every second, your F9 marks, and every
+  frame over 80 ms with what the game was doing. Please attach the folder to bug reports.
 
 ## 🔬 How it works
 

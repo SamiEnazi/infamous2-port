@@ -101,6 +101,18 @@ def main():
         say("longest hitches (time s, ms, main cause):")
         for t, ms in sorted(hitches, key=lambda h: -h[1])[:10]:
             say(f"  {t:7.1f} s  {ms:6.1f} ms  {hitch_cause(hitch_fields.get((t, ms), {}), ms)}")
+    # (hitch catcher) what the guest threads were doing in the worst frames: hitches.tsv, named by
+    # tools/hitch_stacks.py against the exe's PDB. Never fails the summary.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # -I leaves the script's folder out
+        import hitch_stacks
+        hs = hitch_stacks.summary_lines(d)
+    except Exception as e:   # noqa: BLE001 -- the summary must still be written
+        hs = ["worst freezes and their cause: hitch_stacks.py failed (%s: %s)" % (type(e).__name__, e)]
+    if hs:
+        say("")
+        for line in hs:
+            say(line)
     if displays:
         say("")
         say("display power: " + ", ".join(f"{st} at {t:.1f} s" for t, st in displays))

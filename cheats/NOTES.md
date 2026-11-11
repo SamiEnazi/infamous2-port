@@ -311,3 +311,78 @@ so a controller and the keys (I/J/K/L move the PS3 stick) see the game as before
 option does not scale the mouse (the port's sensitivities do); the game's invert options do apply.
 PS3_MOUSE_CAM_HOOK=0: no hooks; PS3_MOUSE_PROBE=1 a [mouse] line per moving camera frame (2: summary only);
 PS3_CHEATS_AT=t:mousemode=0|1 switches the mode (tests).
+
+## Saved spots: Save this spot / Go to saved spot (2026-11-11 night, inf2-cheats; static only, NOT run)
+
+Sami: load a save and jump to an exact place (the cathedral spire slow view, x -43695 y -22816 z 7786) to
+compare performance there. Everything below was read in the EBOOT (IDA 9.3 batch database copied to
+work\teleport, scripts xr.py / dec.py / ids.py / lst.py / bl.py / imm.py / snap.py there); no game run.
+
+How the game places a character (the "one safe way"):
+- Script reflection entries are 0x34 bytes: +0 name, +4 parameter descriptor, +8 id, +0x10 kind (1 = command),
+  +0x14 the native's function descriptor. TELEPORT (0x0096286C) -> 0x005210C4 -> 0x003145B4 starts an AI skill
+  (CTeleportSkill: intro/outro animations, for NPCs), not a placing; SET_POS (0x0095D384) sets 4 bytes of a UI
+  item. MATCH_POSITION_AND_ROTATION (0x00956A18) -> 0x00528944 -> **func_004AE348(r3 object, r4 -> 16-byte
+  aligned 4x4: rows 0-2 rotation, row 3 position)**:
+  1. SetWorldPosition 0x004ABDFC (target in v2): object +0x90 += target - world position (0x004AAF28), the
+     difference turned into the parent's frame when +0x64 and a parent +0x1C; then vtable +0x5C (Cole:
+     0x00325514 -> +0x98 0x0032771C: world matrix +0xB0 made again, attached children, scene node).
+  2. SetWorldRotation 0x004AE158: object +0x80 (quaternion) from the matrix (normalised by 0x004EB51C: scale
+     ignored; position untouched); then +0x5C.
+  3. if 0x001BDB68 (no +0x58 "off" flag on the object or a parent): vtable +0x60. Cole's (vtable 0x0093E1E0)
+     = 0x0015520C: 0x00365060 = the character's teleport reset (0x0032C3D8 animation history; +0x2D0 facing
+     matrix and +0x334 facing yaw (0x00364BF8); components +0x520 (0x0028F590) and +0x3B0 (0x0014A2BC, the
+     ground probe that holds position copies +0x3D0/+0x410); vtable +0x78 / +0x7C with v2 = 0 = linear and
+     angular velocity 0 (0x004AC47C / 0x004AD114 -> physics proxy [+0xF4] +0x10 / +0x20; a proxy marked
+     stale (+8) is made again first)) + 0x0035BA80 (the skill manager [+0x378] restarts its skill).
+- The same three steps exist as func_004AE434 (position in v2, rotation matrix in r7) and, for the hero,
+  0x00154628 (SetWorldPosition + 0x004AE968 rotation + 0x00365060, from a script native 0x0052447C).
+- **The game does exactly our job itself**: 0x003DCF88 (mode changes of the UGC test play, callers 0x003DD278 /
+  0x003DD40C) copies [0x00A6E9E4]'s world matrix +0xB0 when a test play starts and, when it ends, splits it
+  (0x004EB51C) and calls func_004AE434(Cole, position, rotation): Cole back where he stood.
+- Why it sticks (and why Stage B's writes did nothing): the physics proxy [Cole+0xF4] (128 bytes, vtable
+  0x00955B68; +4 owner, +0x10/+0x20 velocities, +0x40/+0x50 result velocities, +0x60 position, +0x70 rotation)
+  is filled each frame by Cole's movement (vtable +0x88 0x00368804 -> skill manager / 0x00367810, which reads
+  his world position with 0x004AAF28), then its sync 0x004A63A0 writes Cole +0x90 = proxy +0x60 - origin
+  [+0x14]+0x80 and +0x80 = proxy +0x70. So +0x90/+0x80 are the state; +0xB0 (world matrix), +0x1F0/+0x250
+  (interpolation history), +0x1560/+0x1C10 (motion block copies), +0x3D0/+0x410 are made from them.
+- Cole's object (snapshots cheats7): +0x14 origin (its +0x80 = offset, 0 at the docks), +0x1C parent (0),
+  +0x58 off flag (0), +0x64 attached flag (1), +0x70 scale (1.11), +0x80 quaternion (yaw about z), +0x90
+  position, +0xB0 world matrix (row 0 = (cos, sin, 0) x 1.11, row 3 = position), +0xF4 proxy, +0x334 facing
+  yaw, +0x378 skill manager, +0x1594 = Cole.
+
+What the cheat writes (cheats.cpp "saved spots"):
+- Go: from Cole's update hook 0x001578F8 AFTER the game's body (Cole not half-updated; same game thread as
+  scripts), 64 bytes on the guest stack 0x80..0xC0 below a frame 0x100 under r1 (free at a call boundary):
+  the matrix rows (cos y, sin y, 0, 0), (-sin y, cos y, 0, 0), (0, 0, 1, 0), (x, y, z + 5, 1) -- w = 1 because
+  SetWorldPosition adds target - current to all four lanes -- then call_game(func_004AE348, r1 = that frame,
+  r2 = TOC 0x009DB730, r3 = Cole, r4 = matrix). Every write to Cole is the game's own code. Upright (yaw only),
+  5 cm above the spot (never inside the ground it was saved on).
+- Refused (nothing written): Cole held by a parent (+0x64 and +0x1C), +0x58 set (cutscene/scripted), health 0,
+  a different Cole than when pressed, or not served within 2 s (a load in between).
+- Fall-through guard (conservative choice: a far spot's ground may still be streaming): for 4 s after the
+  jump, if Cole is within 2 m of the spot horizontally and 2.5 m below it, the same call places him again
+  (logged). A spot saved in mid-air bounces for those 4 s, then he falls normally.
+- Camera: the saved target yaw/pitch of the free camera (D+0x1C0 / +0x1C4) are put into the target with the
+  mouse turn's carry (within 0.19 rad of the view per frame, the manual branch kept by the 1e-6 epsilon stick,
+  now pointing both ways so both axes count as turned and the pitch is not levelled), recomputed each frame
+  from the absolute goal, until the view (D+0x180 / +0x184) is within 0.005 rad, 3 s, or the player turns the
+  camera / aims. Works with a controller too (the turn does not need the mouse). Without a saved camera (the
+  seeded spots) the camera keeps its angles and follows Cole as it always does.
+- Save: read on the menu thread (no hook): world position as 0x004AAF28 computes it (+0x90 + origin +0x80),
+  facing = atan2 of +0xB0 row 0, camera angles from the free camera hook's last frame (host copies, < 1 s old;
+  none while aiming).
+- Unused = the game's code only: Cole's update hook is set only while a Go waits or the guard runs; the free
+  camera hook (always on for the mouse) only copies two floats to host memory each frame.
+
+Menu: F2 > Cheats > "Saved spots": Spot (pick), "Go to saved spot (F7)", "Save this spot" (adds "Spot N
+(MM-DD HH:MM)" and picks it). F7 (toolkit agent/teleport: PS3_CHEAT_HOTKEY, kept from the controls) does Go
+with the menu open or closed. File %APPDATA%\inFAMOUS2-port\spots.ini (PS3_CHEATS_SPOTS=<file>, "" = session
+only; with PS3_OVERLAY_INI set = next to it, so test runs never touch Sami's), one spot a line
+"name = x y z [facing [camera_yaw camera_pitch]]" + "selected: <name>", read again when it changes on disk.
+Seeds (until the first change writes the file): "Cathedral spire" -43695 -22816 7786 (the spire top)
+and "Cathedral roof" -42024.77 -24236.1 6180.76 (below it); no facing/camera.
+Log lines: "[cheats] spot: ..." (from / to / now, re-placements, camera turn end).
+Not checked in a game: everything above (Sami tests). Things to watch: Cole snapping back (would mean
+another state holds the position), a camera that does not turn (camera not in player control), a fall
+through the city at a far spot (the guard's lines).
