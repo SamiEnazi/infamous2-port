@@ -34,6 +34,30 @@ while [ $# -gt 0 ]; do
 done
 [ -x "$exe" ] || { echo "not built yet: $exe (tools/setup.sh, or python3 -I tools/rebuild.py)"; exit 1; }
 game="$root/game"
+
+# Your game folder (GitHub issue #13): game/disc is a link to it with its full path. A game folder kept
+# inside the port's folder (or beside it) keeps the OLD path in the link when the port's folder is renamed
+# or moved: the game then shows its intro logos and a black screen. Find it at the new place and link it
+# again; else say so.
+if [ -L "$game/disc" ] && [ ! -f "$game/disc/PS3_GAME/PARAM.SFO" ]; then
+    old="$(readlink "$game/disc")"; old="${old%/}"; found=""
+    for base in "$root" "$(dirname "$root")"; do
+        tail="${old#/}"
+        while [ -z "$found" ] && [[ "$tail" == */* ]]; do
+            tail="${tail#*/}"
+            if [ "$base/$tail" != "$old" ] && [ -f "$base/$tail/PS3_GAME/PARAM.SFO" ]; then found="$base/$tail"; fi
+        done
+        [ -n "$found" ] && break
+    done
+    if [ -n "$found" ]; then
+        rm -f "$game/disc" && ln -s "$found" "$game/disc"      # the link only, never your game
+        echo "Your game folder moved (it was $old): game/disc links to $found now."
+    else
+        echo "Your game folder is not where it was: game/disc still points to $old, and that folder is gone."
+        echo "Move it back there, or run tools/setup.sh again with --disc <your game folder>."
+        exit 1
+    fi
+fi
 out="$root/play/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out" "$game/gamedata"
 

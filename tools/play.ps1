@@ -59,6 +59,36 @@ $root = Split-Path -Parent $PSScriptRoot
 if (-not $Exe) { $Exe = Join-Path $root "work\port\build\Infamous2Recomp.exe" }
 if (-not (Test-Path $Exe)) { throw "not built yet: $Exe (python -I tools\rebuild_win.py)" }
 $game = Join-Path $root "game"
+
+# --- your game folder (GitHub issue #13) ------------------------------------------------
+# game\disc is a link to your game folder (the one that holds PS3_GAME), with that folder's full path.
+# A game folder kept inside the port's folder (or beside it) keeps the OLD path in the link when the
+# port's folder is renamed or moved: the game then shows its intro logos (they come from the HDD
+# install) and a black screen. Find the folder at the new place and link it again; else say so.
+$discLink = Join-Path $game "disc"
+$discItem = Get-Item -LiteralPath $discLink -Force -ErrorAction SilentlyContinue
+if ($discItem -and $discItem.LinkType -eq "Junction" -and -not (Test-Path -LiteralPath (Join-Path $discLink "PS3_GAME\PARAM.SFO"))) {
+    $old = ([string]@($discItem.Target)[0]).TrimEnd('\')
+    $parts = @($old -split '\\' | Where-Object { $_ })
+    $found = $null
+    foreach ($base in @($root, (Split-Path -Parent $root))) {      # the same folder under the port's (or its parent's) new place
+        for ($i = 1; $i -lt $parts.Count -and -not $found; $i++) {
+            $cand = Join-Path $base ($parts[$i..($parts.Count - 1)] -join '\')
+            if ($cand -ne $old -and (Test-Path -LiteralPath (Join-Path $cand "PS3_GAME\PARAM.SFO"))) { $found = $cand }
+        }
+        if ($found) { break }
+    }
+    if ($found) {
+        cmd /c rmdir "$discLink" | Out-Null                          # the link only, never your game
+        New-Item -ItemType Junction -Path $discLink -Target $found | Out-Null
+        "Your game folder moved (it was $old): game\disc links to $found now."
+    } else {
+        "Your game folder is not where it was: game\disc still points to $old, and that folder is gone."
+        "Move it back there, or run Setup.exe and press Install to choose your game folder again."
+        "(Renaming or moving the port's own folder is fine; this is about the folder that holds PS3_GAME.)"
+        exit 1
+    }
+}
 $out = Join-Path $root ("play\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 New-Item -ItemType Directory -Force $out, "$game\gamedata" | Out-Null
 

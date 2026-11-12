@@ -577,17 +577,20 @@ void power_dump(struct ppu_context* ctx, uint32_t c)
 void hook_arc_draw(struct ppu_context* ctx, ppu_hook_body body)
 {
     if (g_black.load(std::memory_order_relaxed) && (uint32_t)ctx->lr == kLrArcSite) {
-        s_bl_calls.fetch_add(1, std::memory_order_relaxed);
+        const long long call = s_bl_calls.fetch_add(1, std::memory_order_relaxed);
         const uint32_t def = vm_read32((uint32_t)ctx->gpr[3] + 0x14);
         const uint32_t ref = vm_read32(kEvilShaderRef);
-        if (gptr(def) && vm_read32(def + kDefNoSwap) == 0 && gptr(ref)) {
+        const uint32_t flag = gptr(def) ? vm_read32(def + kDefNoSwap) : 0xFFFFFFFFu;
+        const uint32_t own5 = (uint32_t)ctx->gpr[5], own6 = (uint32_t)ctx->gpr[6], own7 = (uint32_t)ctx->gpr[7];
+        uint32_t g = 0; int32_t n = -1;
+        if (gptr(def) && flag == 0 && gptr(ref)) {
             ppu_context x;
             memcpy(&x, ctx, sizeof x);
             x.gpr[3] = ref;
             ppu_hook_call(&x, func_002F96AC);                               /* Resolve(ref) */
-            const uint32_t g = (uint32_t)x.gpr[3];
+            g = (uint32_t)x.gpr[3];
             if (gptr(g)) {
-                const int32_t n = (int32_t)vm_read32(g + 0x60);
+                n = (int32_t)vm_read32(g + 0x60);
                 if (n > 0) {
                     ctx->gpr[5] = (uint32_t)n;
                     ctx->gpr[6] = vm_read32(g + 0x5C);
@@ -596,6 +599,15 @@ void hook_arc_draw(struct ppu_context* ctx, ppu_hook_body body)
                 }
             }
         }
+        /* One line in the session log for the first arc redrawn and the first one left alone (GitHub/Discord
+         * 2026-11-12: "it's on but nothing changes" was a lift that did not pass r3 into the hook). */
+        static std::atomic<int> s_logged_swap{0}, s_logged_skip{0};
+        const bool swapped = gptr(g) && n > 0;
+        std::atomic<int>& once = swapped ? s_logged_swap : s_logged_skip;
+        if (!once.exchange(1))
+            fprintf(stderr, "[cheats] blacklight: arc %lld %s: def %08X flag %08X ref %08X shader %08X variants %d "
+                    "(own: n %u, variants %08X, ref %08X)\n", call, swapped ? "redrawn" : "left as it is", def, flag,
+                    ref, g, n, own5, own6, own7);
     }
     ppu_hook_call(ctx, body);
 }

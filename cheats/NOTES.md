@@ -476,6 +476,14 @@ Not checked in a game: everything above. To watch: arcs that vanish instead of t
 cannot draw), Flight's Circle starting the drop attack, a glide that does not end (Flight holds Cole up while R1
 is held; letting go of R1 ends Float as before).
 
+**Black lightning, checked in a game 2026-11-12 (a player: "it's on but nothing changes"):** SubmitDraws itself never
+reads r3 (it sets r3 before any use), so the lifter's call sites did not write r3 back into ctx, and the hook read a
+stale r3: def = 0x100, every test failed, nothing was swapped. The lifter now writes back every argument register at
+a call to a hooked function (ppu_lifter: solve() gets the PPU_HOOK_FILE set; it was given an empty set). With that,
+in the city from the first save (workl_city.steps, nativeecordingsl-city3): every arc redrawn (EVIL_LIGHTNING_SHADER
+set even at neutral karma, 2 variants), and Cole's bolts turn black at his hand and at the hit. (Correction to the
+table above: r3 = the renderer at that call, but SubmitDraws does not read it.)
+
 ## Karma rank (2026-11-11, inf2-cheats; static only, NOT run)
 
 The ranks, from the code (0x0012D0F4: the first of 7 (lo, hi) ranges at 0x00745EC8 = tuning 0x00745CF0 + 0x1D8 that

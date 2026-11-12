@@ -639,8 +639,8 @@ _RE_FUNC_HEAD = re.compile(r"^void (func_[0-9A-F]{8})\(ppu_context\* ctx\) \{$")
 # whose slot registers itself with the runtime at start (runtime/ppu/ppu_loader.cpp
 # ppu_hook_register). An empty slot costs one load and a never-taken branch per call; the
 # title's code fills one with ppu_hook_set(addr, fn) while the game runs (include/ps3emu/
-# ppu_hooks.h). The hook sees in ctx the registers the lifted body reads at entry (its callers
-# write those back) and runs the body itself (ppu_hook_call: the body and its trampoline drain);
+# ppu_hooks.h). The hook sees in ctx every argument register as the call made it (r3-r10, f1-f13,
+# v2-v13: the callers write those back for a hooked function, ppu_lifter's solve) and runs the body itself (ppu_hook_call: the body and its trampoline drain);
 # after that ctx holds what the callers read back (r3/f1 returns).
 _hook_set = None
 

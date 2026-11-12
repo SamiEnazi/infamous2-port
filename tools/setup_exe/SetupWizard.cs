@@ -45,9 +45,9 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("inFAMOUS 2 Native PC Port (unofficial fan project)")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Sami Enazi. MIT license.")]
 [assembly: AssemblyTrademark("inFAMOUS is a trademark of Sony Interactive Entertainment LLC. Not affiliated with Sony or Sucker Punch.")]
-[assembly: AssemblyVersion("0.5.0.0")]
-[assembly: AssemblyFileVersion("0.5.0.0")]
-[assembly: AssemblyInformationalVersion("0.5.0")]
+[assembly: AssemblyVersion("0.5.1.0")]
+[assembly: AssemblyFileVersion("0.5.1.0")]
+[assembly: AssemblyInformationalVersion("0.5.1")]
 
 namespace Inf2Setup
 {

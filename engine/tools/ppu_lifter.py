@@ -4688,7 +4688,14 @@ class PPULifter:
                 entries = getattr(self, "opd_entries", None) or set(summ)
                 ends = {f.start_addr: f.end_addr for f in funcs}
                 log = {}
-                need = nvm.solve(summ, entries, set(), fall, ends, log)
+                # A function with a cheat hook in front (PPU_HOOK_FILE): its callers write back every
+                # argument register, not only the ones the lifted body reads, so the hook sees the call
+                # as the game made it (Black lightning reads r3, which SubmitDraws itself never reads).
+                import ppu_fastpath
+                hooked = set()
+                if not getattr(self, "prefix", ""):
+                    hooked = {int(n[5:], 16) for n in ppu_fastpath._hooks()} & set(summ)
+                need = nvm.solve(summ, entries, hooked, fall, ends, log)
                 self._nv_counts = [0, 0]
                 self._nv_summ = summ
                 # r14-r31 are re-read after a direct call to a function that hands

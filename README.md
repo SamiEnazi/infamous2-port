@@ -29,8 +29,15 @@ No emulator while you play.
 > game from your copy once (20–60 minutes), then **Play**. Details: [What you need](#-what-you-need) ·
 > [Install](#-install). On **Linux**: [Linux (experimental)](#-linux-experimental).
 
-## 🆕 New in v0.5.0
+## 🆕 What's new
 
+**v0.5.1**
+- ⚡ **Black lightning works:** F2 → Cheats → *Black lightning* now turns Cole's bolts black. Before, it was on but
+  changed nothing.
+- 📁 **Renaming or moving the port's folder is fine:** the game finds your game folder again instead of showing a
+  black screen after the intro logos ([#13](../../issues/13)).
+
+**v0.5.0**
 - 🔄 **Updates from inside the game:** a notice says when a new version is out, and **F2 → Update** installs it.
   Later updates rebuild only what changed, so they take minutes. [More](#-updates)
 - 🐧 **Linux (experimental):** builds and runs natively, with `tools/setup.sh` and `tools/play.sh`. [More](#-linux-experimental)
@@ -251,7 +258,7 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 |---|---|
 | ✅ Tested copies | Played and confirmed by players: the **Europe** disc (**BCES01143**) and the **US** disc (**BCUS98125**), each with the **1.04** update, and the **digital (PSN)** version 01.03. |
 | 🖥️ Tested PCs | The test PC: i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p to 4K. Players: Windows 10 and 11 PCs, up to an RTX 5070 at 1440p. Linux: Ubuntu 22.04 with an AMD GPU (experimental). |
-| ⚠️ Known issues | • The Beast fight can drop into the 40s.<br>• Views over a big part of the city (the top of the cathedral spire) run at 75–85 fps: the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them.<br>• Renaming or moving the port's folder after Setup can leave a black screen after the intro logos ([#13](../../issues/13)): give the folder its old name back. |
+| ⚠️ Known issues | • The Beast fight can drop into the 40s.<br>• Views over a big part of the city (the top of the cathedral spire) run at 75–85 fps: the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them. |
 
 ## 🧰 What you need
 
