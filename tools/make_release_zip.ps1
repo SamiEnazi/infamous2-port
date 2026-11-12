@@ -101,10 +101,14 @@ Remove-Item -LiteralPath $zip -ErrorAction SilentlyContinue
 # ZIP format does not allow (other unzippers make files named "tools\play.ps1")
 $fs = [System.IO.File]::Open($zip, [System.IO.FileMode]::CreateNew)
 $za = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+# Every entry dated 26 hours ago (GitHub #21/#22): a ZIP's times have no time zone, so this PC's local times came
+# out hours in the FUTURE west of it, and ninja then re-ran CMake until it gave up ("build.ninja still dirty").
+$stamp = [DateTimeOffset]::Now.AddHours(-26)
 try {
     foreach ($f in Get-ChildItem -LiteralPath $stage -Recurse -File -Force) {
         $rel = $f.FullName.Substring($stage.Length + 1).Replace('\', '/')
-        [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($za, $f.FullName, $rel, [System.IO.Compression.CompressionLevel]::Optimal)
+        $e = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($za, $f.FullName, $rel, [System.IO.Compression.CompressionLevel]::Optimal)
+        $e.LastWriteTime = $stamp
     }
 } finally { $za.Dispose(); $fs.Dispose() }
 Remove-Item -LiteralPath $stage -Recurse -Force

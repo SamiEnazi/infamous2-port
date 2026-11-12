@@ -272,6 +272,28 @@ def lift_done(step):
             f.write(fingerprint(step) + "\n")
 
 
+def clamp_future_times():
+    """GitHub issues #21/#22: "ninja: error: manifest 'build.ninja' still dirty after 100 tries". A zip's file
+    times have no time zone, so west of UTC the files of a commit made a few hours ago come out dated hours in
+    the FUTURE; CMake's inputs then stay newer than build.ninja, and ninja re-runs CMake until it gives up.
+    Any file dated after now (the engine, the port's sources) gets now; content and fingerprints are unchanged."""
+    now = time.time()
+    fixed = 0
+    for top in (TK, PORT):
+        for dirpath, dirnames, filenames in os.walk(top):
+            dirnames[:] = [d for d in dirnames if not d.startswith(("build", ".git"))]
+            for n in filenames:
+                f = os.path.join(dirpath, n)
+                try:
+                    if os.lstat(f).st_mtime > now + 60:
+                        os.utime(f, (now, now))
+                        fixed += 1
+                except OSError:
+                    pass
+    if fixed:
+        print(f"  {fixed} file(s) were dated in the future (a time zone or clock difference): dated now", flush=True)
+
+
 def lift_restore_times():
     """Every newly lifted file with the same bytes as the one it replaces gets that one's time back."""
     if not os.path.isdir(HELD):
@@ -539,6 +561,7 @@ def step_compile():
         return step_compile_linux()
     spu_rewrites()
     lift_restore_times()   # (PORT_LIFT_REUSE) after spu_rewrites: its spu/zz_native_* files count too
+    clamp_future_times()   # (GitHub #21/#22) before CMake: no input dated after build.ninja
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from vsenv import vs_env, rc_compiler
     env = dict(vs_env(), PS3RECOMP=TK)
@@ -744,6 +767,7 @@ def linux_configure_cmd(build, tools, flags, port=None, tk=None, python=None):
 
 def step_compile_linux():
     spu_rewrites()
+    clamp_future_times()
     tools = linux_tools()
     env = dict(os.environ, PS3RECOMP=TK)
     build = os.environ.get("PORT_BUILD") or os.path.join(PORT, "build")
