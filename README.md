@@ -17,6 +17,8 @@ No emulator while you play.
 [![Made with Claude Code](https://img.shields.io/badge/made%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](#-made-with-claude-code)
 [![Visitors](https://komarev.com/ghpvc/?username=SamiEnazi-infamous2-port&label=visitors&color=3fa9ff&style=flat)](https://github.com/SamiEnazi/infamous2-port)
 
+<a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 </div>
 
 ## 🚀 Performance: native vs RPCS3
@@ -180,7 +182,7 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 
 | | |
 |---|---|
-| ✅ Tested copy | Europe disc **BCES01143** + the **1.04** update. US and other discs share the same 1.04 code but are untested. |
+| ✅ Tested copies | Played and confirmed by players: the **Europe** disc (**BCES01143**) and the **US** disc (**BCUS98125**), each with the **1.04** update, and the **digital (PSN)** version 01.03. |
 | 🖥️ Tested PC | i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p |
 | ⚠️ Known issues | • The Beast fight can drop into the 40s.<br>• Views over a big part of the city (the top of the cathedral spire) run at 75–85 fps: the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them. |
 
@@ -189,8 +191,8 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 - 💿 **Your copy of inFAMOUS 2**
   - The disc's files: the folder that holds `PS3_GAME`.
   - The **1.04 update**, installed in RPCS3.
-  - 🛒 **Digital (PSN) copy** (NPUA80638 / NPEA00318, version 01.03, the same code as 1.04; untested,
-    please report how it goes): install the game and its license in RPCS3. Then make a folder with a
+  - 🛒 **Digital (PSN) copy** (NPUA80638 / NPEA00318, version 01.03, the same code as 1.04; works, tested
+    by players): install the game and its license in RPCS3. Then make a folder with a
     `PS3_GAME` folder inside, copy the game's `PARAM.SFO`, `ICON0.PNG` and `USRDIR` from RPCS3's
     `dev_hdd0\game\<ID>` into `PS3_GAME`, and choose that folder in Setup. No update is needed.
 - 🕹️ **[RPCS3](https://rpcs3.net)** with the **PS3 firmware** installed (*File > Install Firmware*, using

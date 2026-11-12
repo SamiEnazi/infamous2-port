@@ -81,6 +81,51 @@ Windows (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`, .NET Framework
 | `--page done` / `--page ask` | show the Play screen / the "Where is RPCS3?" dialog (for screenshots) |
 | `--test-fail-build` | make the build fail on purpose at step 2 (no license flag), to check that the old game and the saves come back |
 
+## RecompLauncher: `--prepare` and `--play`
+
+[RecompLauncher](https://recomplauncher.com) installs the port from the release's
+`inFAMOUS2-port-v<version>-Windows-x64.zip` (made by `tools\make_release_zip.ps1`: the port, the toolkit and the
+port base at the release's commits, `Setup.exe`, `port-version.txt` and `recomplauncher.json` at the top). The
+repo's `recomplauncher.json` tells it to use Setup.exe in two ways, both without a window. Without these
+switches Setup.exe is exactly as before.
+
+- `Setup.exe --prepare --disc <game folder> [--rpcs3 <folder>]` is the launcher's setup step, after the player
+  picks their game folder. It does what Install does after the download:
+  - finds RPCS3 the same way
+  - runs the same checks
+  - backs up an existing game and its saves
+  - runs `tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup -NoShortcut`. The launcher's setup screen says that
+    going ahead accepts Microsoft's license. There is no "Optimise for this PC": its training run opens the
+    game's window, which a setup step must not.
+
+  It prints `progress <0..1> <text>` lines, writes the whole log to `play\setup.log`, and after a build writes
+  `work\launcher-built.txt` (a copy of `port-version.txt`).
+- `Setup.exe --play [play.ps1's options]` is the launcher's Play button. It runs `tools\play.ps1` without a
+  console window, and adds `-Fullscreen` when `RECOMPLAUNCHER_MODE` is `bigpicture`. play.ps1's lines go to
+  `play\launcher.log`, followed by the last 150 lines of the session's `stderr.log`. It ends with the game's own
+  exit code (0 for a normal quit). If the port was updated after the game was built, the log says so.
+- `--dry-run` with either one does everything up to the build or the start, then stops. Nothing is built or
+  started. Setup.exe has no console, so pipe it to see the lines: `Setup.exe --prepare --dry-run --disc <folder> | more`.
+
+Both put themselves in a job object that Windows closes with them. When the launcher stops Setup.exe, the
+build or the game stops too. Exit codes (`recomplauncher.json`'s `exit_codes` has the player's message for each):
+
+| Code | Meaning |
+|---|---|
+| 69 | Setup is already running in this folder |
+| 70 | the port's files are not next to Setup.exe |
+| 71 | no `PS3_GAME\PARAM.SFO` in the game folder |
+| 72 | not a supported copy of inFAMOUS 2 |
+| 73 | RPCS3 not found |
+| 74 | no PS3 firmware in RPCS3 |
+| 75 | no 1.04 update in RPCS3 (or, for the digital version, no game) |
+| 76 | RPCS3 is open |
+| 77 | this PC can't run the port (64-bit Windows, AVX2, Vulkan) |
+| 78 | a drive that can't hold the `game\disc` link |
+| 79 | the checks or the build failed (`play\setup.log`) |
+| 80 | `--play`: the game is not built yet |
+| 82 | `--play`: play.ps1 could not run |
+
 ## Known limits
 
 - The exe is not signed, so Windows SmartScreen says "Windows protected your PC" on the first start.

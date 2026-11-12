@@ -1,0 +1,256 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "inFAMOUS 2: native Windows port",
+  "repo": "SamiEnazi/infamous2-port",
+  "requires": ["start", "setup", "exit_codes", "settings.ini", "settings.choices", "settings.slider", "settings.groups"],
+  "game": {
+    "kind": "folder",
+    "label": "Your inFAMOUS 2 game folder, the one that holds PS3_GAME: the Europe disc BCES01143 or the US disc BCUS98125, each with the 1.04 update installed in RPCS3, or the digital (PSN) version 01.03 (NPUA80638 / NPEA00318, made into a folder with PS3_GAME as the README says). RPCS3 with the PS3 firmware must be on this PC during setup. Setup downloads build tools (about 1.3 GB, deleted afterwards) and builds the game from your copy in 20-60 minutes; going ahead accepts Microsoft's Visual Studio Build Tools license (https://go.microsoft.com/fwlink/?LinkId=2179911).",
+    "check": { "file": "PS3_GAME/PARAM.SFO" }
+  },
+  "prepare": {
+    "program": ["Setup.exe"],
+    "args": ["--prepare", "--disc", "{game}"],
+    "label": "Building the game from your copy: 20-60 minutes, with about 1.3 GB of build tools downloaded and deleted afterwards (Microsoft's Visual Studio Build Tools license)",
+    "timeout": 10800
+  },
+  "start": {
+    "program": ["Setup.exe"],
+    "args": ["--play"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{config}/inFAMOUS2-port/settings.ini" }]
+    }
+  ],
+  "saves": ["{install}/game/gamedata/dev_hdd0/home/00000001/savedata"],
+  "folders": {
+    "saves": [{ "path": "{install}/game/gamedata/dev_hdd0/home/00000001/savedata" }],
+    "logs": [{ "path": "{install}/play" }],
+    "mods": [{ "path": "{install}/mods" }],
+    "settings": [{ "path": "{config}/inFAMOUS2-port" }]
+  },
+  "actions": [
+    { "id": "saves", "label": "Saves", "help": "Your save slots. The game also copies them to saves-backup in its folder before every session.", "open": "saves" },
+    { "id": "logs", "label": "Logs", "help": "One folder per session (frame times, F9 marks, freezes), launcher.log and setup.log. Attach them to a bug report.", "open": "logs" },
+    { "id": "mods", "label": "Mods", "help": "Mods made for the inFAMOUS Mod Manager, one folder each. F2 > Mods in the game turns them on and off.", "open": "mods" },
+    { "id": "settings", "label": "Settings file", "help": "settings.ini: these settings and the rest of the game's F2 menu.", "open": "settings" }
+  ],
+  "exit_codes": {
+    "69": "Setup is already running for this game (in its own window, or another setup). Let it finish, then try again.",
+    "70": "The port's files are missing from the game's folder. Install it again from the launcher.",
+    "71": "That folder isn't a PS3 game folder. Pick the folder that holds PS3_GAME.",
+    "72": "That copy isn't one this port supports: the Europe disc BCES01143 or the US disc BCUS98125 with the 1.04 update, or the digital version 01.03.",
+    "73": "Setup couldn't find RPCS3. Keep the RPCS3 folder in Documents, Downloads, on the Desktop, in Program Files or at the top of a drive, then pick your copy again.",
+    "74": "RPCS3 has no PS3 firmware yet. In RPCS3: File > Install Firmware, then pick your copy again.",
+    "75": "RPCS3 doesn't have the game's 1.04 update (or, for the digital version, the game itself). Install it in RPCS3 with File > Install Packages/Raps/Edats, then pick your copy again.",
+    "76": "Close RPCS3 (setup uses it to unlock your game), then pick your copy again.",
+    "77": "This PC can't run the port: it needs 64-bit Windows, a CPU with AVX2 and a Vulkan graphics driver.",
+    "78": "The game's folder or your game folder is on a drive that can't hold the link setup makes (a USB stick, an exFAT or FAT32 disk, or a network drive). Use an internal NTFS drive for both.",
+    "79": "The build stopped. Open Logs, attach setup.log to an issue at github.com/SamiEnazi/infamous2-port, then pick your copy again to retry.",
+    "80": "The game isn't built yet. Pick your copy on the game's page to set it up.",
+    "82": "The game couldn't be started. Open Logs and attach launcher.log to an issue at github.com/SamiEnazi/infamous2-port."
+  },
+  "looks": {
+    "allowed": false,
+    "reason": "The port has its own picture options (F2 > Graphics and Lighting: anti-aliasing, sharpening, tone and clarity), and ReShade hasn't been tried with its Vulkan renderer."
+  },
+  "settings": [
+    {
+      "id": "window", "label": "Window", "group": "Display",
+      "help": "Fullscreen is borderless. Alt+Enter switches in the game. Big Picture mode always starts fullscreen.",
+      "choices": [
+        { "label": "Fullscreen", "set": { "PS3RECOMP_VK_FULLSCREEN": "1" } },
+        { "label": "Windowed", "set": { "PS3RECOMP_VK_FULLSCREEN": "0" } }
+      ],
+      "defaults": { "PS3RECOMP_VK_FULLSCREEN": "0" }
+    },
+    {
+      "id": "fps_cap", "label": "Frame rate cap", "group": "Display",
+      "help": "60 is the port's target. Higher caps are for high-refresh screens where the scene allows it. Story videos and cutscenes stay at 30, as on the PS3.",
+      "choices": [
+        { "label": "30 fps", "set": { "PS3RECOMP_FPS_CAP": "30" } },
+        { "label": "60 fps", "set": { "PS3RECOMP_FPS_CAP": "60" } },
+        { "label": "72 fps (smooth on 144 Hz)", "set": { "PS3RECOMP_FPS_CAP": "72" } },
+        { "label": "120 fps", "set": { "PS3RECOMP_FPS_CAP": "120" } },
+        { "label": "144 fps", "set": { "PS3RECOMP_FPS_CAP": "144" } },
+        { "label": "Unlimited", "set": { "PS3RECOMP_FPS_CAP": "0" } }
+      ],
+      "defaults": { "PS3RECOMP_FPS_CAP": "60" }
+    },
+    {
+      "id": "present", "label": "Present mode", "group": "Display",
+      "help": "Low latency shows the newest frame at each refresh, with no tearing. V-Sync queues frames behind the screen. Immediate is the quickest but may tear.",
+      "choices": [
+        { "label": "Low latency (Mailbox)", "set": { "PS3RECOMP_VK_PRESENT": "mailbox" } },
+        { "label": "V-Sync (FIFO)", "set": { "PS3RECOMP_VK_PRESENT": "fifo" } },
+        { "label": "Immediate", "set": { "PS3RECOMP_VK_PRESENT": "immediate" } }
+      ],
+      "defaults": { "PS3RECOMP_VK_PRESENT": "mailbox" }
+    },
+    {
+      "id": "aspect", "label": "Aspect ratio", "group": "Display",
+      "help": "Wider screens see more at the sides, nothing stretched. The HUD and movies stay 16:9 in the middle.",
+      "choices": [
+        { "label": "16:9 (the game's)", "set": { "PS3RECOMP_ASPECT": "16:9" } },
+        { "label": "Auto (your screen's shape)", "set": { "PS3RECOMP_ASPECT": "auto" } },
+        { "label": "21:9", "set": { "PS3RECOMP_ASPECT": "21:9" } },
+        { "label": "32:9", "set": { "PS3RECOMP_ASPECT": "32:9" } },
+        { "label": "16:10", "set": { "PS3RECOMP_ASPECT": "16:10" } }
+      ],
+      "defaults": { "PS3RECOMP_ASPECT": "16:9" }
+    },
+    {
+      "id": "theme", "label": "Menu theme", "group": "Display",
+      "help": "The colours of the F2 menu, the save list and the game's questions.",
+      "choices": [
+        { "label": "Hero (blue)", "set": { "PS3_OVERLAY_THEME": "hero" } },
+        { "label": "Infamous (red)", "set": { "PS3_OVERLAY_THEME": "infamous" } }
+      ],
+      "defaults": { "PS3_OVERLAY_THEME": "hero" }
+    },
+    {
+      "id": "resolution", "label": "Internal resolution", "group": "Graphics",
+      "help": "What the game draws at. 720p is the PS3's own, 1080p is the port's default. 1440p and 4K need a fast graphics card and are untested.",
+      "choices": [
+        { "label": "720p", "set": { "PS3RECOMP_RENDER_SCALE": "1" } },
+        { "label": "1080p", "set": { "PS3RECOMP_RENDER_SCALE": "1.5" } },
+        { "label": "1440p", "set": { "PS3RECOMP_RENDER_SCALE": "2" } },
+        { "label": "4K", "set": { "PS3RECOMP_RENDER_SCALE": "3" } }
+      ],
+      "defaults": { "PS3RECOMP_RENDER_SCALE": "1.5" }
+    },
+    {
+      "id": "aa", "label": "Anti-aliasing", "group": "Graphics",
+      "help": "Smooths jagged edges. SMAA is sharper, FXAA is a little faster.",
+      "choices": [
+        { "label": "SMAA", "set": { "PS3RECOMP_AA": "smaa" } },
+        { "label": "FXAA", "set": { "PS3RECOMP_AA": "fxaa" } },
+        { "label": "Off", "set": { "PS3RECOMP_AA": "off" } }
+      ],
+      "defaults": { "PS3RECOMP_AA": "smaa" }
+    },
+    {
+      "id": "upscale", "label": "Upscaling", "group": "Graphics",
+      "help": "How the picture is fitted to a window larger than the internal resolution. FSR is the sharpest.",
+      "choices": [
+        { "label": "AMD FSR 1", "set": { "PS3RECOMP_UPSCALE": "fsr" } },
+        { "label": "AMD CAS", "set": { "PS3RECOMP_UPSCALE": "cas" } },
+        { "label": "Bilinear", "set": { "PS3RECOMP_UPSCALE": "bilinear" } }
+      ],
+      "defaults": { "PS3RECOMP_UPSCALE": "fsr" }
+    },
+    {
+      "id": "sharpen", "label": "Sharpening", "group": "Graphics",
+      "help": "Crisper detail. 0 turns it off.",
+      "slider": { "key": "PS3RECOMP_SHARPEN", "min": 0, "max": 1, "step": 0.05, "format": "%.2f" },
+      "defaults": { "PS3RECOMP_SHARPEN": "0.1" }
+    },
+    {
+      "id": "aniso", "label": "Texture filtering", "group": "Graphics",
+      "help": "Keeps streets and walls sharp at shallow angles. Costs next to nothing.",
+      "choices": [
+        { "label": "16x", "set": { "PS3RECOMP_ANISO": "16" } },
+        { "label": "8x", "set": { "PS3RECOMP_ANISO": "8" } },
+        { "label": "4x", "set": { "PS3RECOMP_ANISO": "4" } },
+        { "label": "2x", "set": { "PS3RECOMP_ANISO": "2" } },
+        { "label": "Off", "set": { "PS3RECOMP_ANISO": "1" } }
+      ],
+      "defaults": { "PS3RECOMP_ANISO": "16" }
+    },
+    {
+      "id": "dof", "label": "Depth of field", "group": "Graphics",
+      "help": "The game's blur by distance, strongest in cutscenes. Off shows everything sharp.",
+      "choices": [
+        { "label": "On", "set": { "PS3RECOMP_DOF": "1" } },
+        { "label": "Off", "set": { "PS3RECOMP_DOF": "0" } }
+      ],
+      "defaults": { "PS3RECOMP_DOF": "1" }
+    },
+    {
+      "id": "edge_blur", "label": "Edge blur", "group": "Graphics", "advanced": true,
+      "help": "The game's soft picture borders, where its lighting asks for them. Off keeps the borders sharp.",
+      "choices": [
+        { "label": "On", "set": { "PS3RECOMP_EDGE_BLUR": "1" } },
+        { "label": "Off", "set": { "PS3RECOMP_EDGE_BLUR": "0" } }
+      ],
+      "defaults": { "PS3RECOMP_EDGE_BLUR": "1" }
+    },
+    {
+      "id": "culling", "label": "Triangle culling", "group": "Graphics", "advanced": true,
+      "help": "At the render resolution keeps the game's culling without holes in faces above 720p. Off draws whole meshes. The PS3's 720p culling leaves holes above 720p.",
+      "choices": [
+        { "label": "At the render resolution", "set": { "PS3RECOMP_MESH_TRIM": "1", "PS3RECOMP_EDGE_VP": "1" } },
+        { "label": "Off: whole meshes", "set": { "PS3RECOMP_MESH_TRIM": "0", "PS3RECOMP_EDGE_VP": "1" } },
+        { "label": "The PS3's 720p culling", "set": { "PS3RECOMP_MESH_TRIM": "1", "PS3RECOMP_EDGE_VP": "0" } }
+      ],
+      "defaults": { "PS3RECOMP_MESH_TRIM": "1", "PS3RECOMP_EDGE_VP": "1" }
+    },
+    {
+      "id": "shadows", "label": "Shadow softness", "group": "Lighting and effects",
+      "help": "Smooths the stair-stepped edges of the sun's shadows. Off is the PS3's look.",
+      "choices": [
+        { "label": "Off (as on PS3)", "set": { "PS3RECOMP_SOFT_SHADOWS": "0" } },
+        { "label": "Soft", "set": { "PS3RECOMP_SOFT_SHADOWS": "1" } },
+        { "label": "Softer", "set": { "PS3RECOMP_SOFT_SHADOWS": "2" } },
+        { "label": "Softest", "set": { "PS3RECOMP_SOFT_SHADOWS": "3" } }
+      ],
+      "defaults": { "PS3RECOMP_SOFT_SHADOWS": "2" }
+    },
+    {
+      "id": "ssao", "label": "Ambient occlusion", "group": "Lighting and effects",
+      "help": "Soft darkening in corners and under objects. The PS3 drew it at half resolution; full resolution gives finer contact shadows.",
+      "choices": [
+        { "label": "Half resolution (as on PS3)", "set": { "PS3RECOMP_SSAO": "0" } },
+        { "label": "Full resolution", "set": { "PS3RECOMP_SSAO": "1" } },
+        { "label": "Full resolution, high", "set": { "PS3RECOMP_SSAO": "2" } }
+      ],
+      "defaults": { "PS3RECOMP_SSAO": "2" }
+    },
+    {
+      "id": "ssao_strength", "label": "Ambient occlusion strength", "group": "Lighting and effects", "advanced": true,
+      "help": "100 is the game's own.",
+      "slider": { "key": "PS3RECOMP_SSAO_STRENGTH", "min": 0, "max": 300, "step": 5, "format": "%d" },
+      "defaults": { "PS3RECOMP_SSAO_STRENGTH": "125" }
+    },
+    {
+      "id": "light_dither", "label": "Smooth light gradients", "group": "Lighting and effects",
+      "help": "Removes the banding in the soft light of street lamps and fires. Same brightness.",
+      "choices": [
+        { "label": "On", "set": { "PS3RECOMP_LIGHT_DITHER": "1" } },
+        { "label": "Off (as on PS3)", "set": { "PS3RECOMP_LIGHT_DITHER": "0" } }
+      ],
+      "defaults": { "PS3RECOMP_LIGHT_DITHER": "1" }
+    },
+    {
+      "id": "fx_res", "label": "Effects resolution", "group": "Lighting and effects",
+      "help": "Fire, smoke and sparks. The PS3 drew them small and stretched them; Full draws them at the picture's size.",
+      "choices": [
+        { "label": "Full", "set": { "PS3RECOMP_FX_RES": "full" } },
+        { "label": "High", "set": { "PS3RECOMP_FX_RES": "2" } },
+        { "label": "As on PS3", "set": { "PS3RECOMP_FX_RES": "1" } }
+      ],
+      "defaults": { "PS3RECOMP_FX_RES": "full" }
+    },
+    {
+      "id": "button_icons", "label": "Button icons", "group": "Controls",
+      "help": "The buttons the game shows. Automatic follows what you play with: Xbox glyphs for an Xbox-style pad, the PlayStation ones for a DualShock, DualSense or Switch pad, your keys for the keyboard.",
+      "choices": [
+        { "label": "Automatic", "set": { "PS3_BUTTON_ICONS": "auto" } },
+        { "label": "PlayStation", "set": { "PS3_BUTTON_ICONS": "playstation" } },
+        { "label": "Xbox", "set": { "PS3_BUTTON_ICONS": "xbox" } },
+        { "label": "Keyboard and mouse", "set": { "PS3_BUTTON_ICONS": "keyboard" } }
+      ],
+      "defaults": { "PS3_BUTTON_ICONS": "auto" }
+    },
+    {
+      "id": "volume", "label": "Volume", "group": "Sound",
+      "help": "What the PC plays. The game's own sound options are untouched.",
+      "slider": { "key": "PS3_AUDIO_VOLUME", "min": 0, "max": 100, "step": 5, "format": "%d" },
+      "defaults": { "PS3_AUDIO_VOLUME": "100" }
+    }
+  ]
+}

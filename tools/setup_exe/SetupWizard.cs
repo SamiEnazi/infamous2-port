@@ -61,6 +61,8 @@ namespace Inf2Setup
             AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { Oops(e.ExceptionObject as Exception); };
 
             Opts opt = Opts.Parse(args);
+            // RecompLauncher (recomplauncher.json): --prepare and --play, without a window
+            if (opt.Prepare || opt.Play) return Headless.Run(opt, Path.GetDirectoryName(Path.GetFullPath(Application.ExecutablePath)));
             Theme.Init(FitScale());
             string exeDir = Path.GetDirectoryName(Path.GetFullPath(Application.ExecutablePath));
             bool first;
@@ -106,9 +108,11 @@ namespace Inf2Setup
         }
     }
 
-    // Command-line switches, for testing (README.md).
+    // Command-line switches, for testing (README.md), and RecompLauncher's --prepare / --play (class Headless).
     sealed class Opts
     {
+        public bool Prepare, Play, DryRun;
+        public List<string> PlayArgs = new List<string>();   // after --play: play.ps1's own options
         public string Page, Disc, Rpcs3, Folder;
         public bool TestBuild, NoShortcut, ExitWhenDone, NoCleanup, OnlyCache, TestFailBuild;
 
@@ -121,6 +125,16 @@ namespace Inf2Setup
                 string v = i + 1 < a.Length ? a[i + 1] : null;
                 switch (k)
                 {
+                    case "--prepare": o.Prepare = true; break;
+                    case "--dry-run": o.DryRun = true; break;
+                    case "--play":
+                        o.Play = true;
+                        for (i++; i < a.Length; i++)
+                        {
+                            if (string.Equals(a[i], "--dry-run", StringComparison.OrdinalIgnoreCase)) o.DryRun = true;
+                            else o.PlayArgs.Add(a[i]);
+                        }
+                        break;
                     case "--page": o.Page = v; i++; break;
                     case "--disc": o.Disc = v; i++; break;
                     case "--rpcs3": o.Rpcs3 = v; i++; break;
@@ -1278,6 +1292,483 @@ namespace Inf2Setup
                 if (File.Exists(b) && !File.Exists(live)) { File.Copy(b, live); added++; }
             }
             return "saves reapplied from " + Dir + ": " + added + " added, " + back + " overwritten" + (newer > 0 ? ", " + newer + " newer kept" : "");
+        }
+    }
+
+    // ------------------------------------------------------------------ RecompLauncher: no window
+
+    // recomplauncher.json starts Setup.exe in two ways. Only these switches come here; the window is untouched.
+    //   Setup.exe --prepare --disc <game folder> [--rpcs3 <folder>] [--dry-run]
+    //     Easy Setup's "prepare" step: Install's checks and tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup
+    //     (the setup screen's label says that it accepts Microsoft's license), plus -NoShortcut (the launcher
+    //     is the shortcut), without "Optimise for this PC" (its training run opens the game's window).
+    //     RPCS3 is found the way Install finds it. No window: "progress <0..1> <text>" lines on stdout, the
+    //     whole log in play\setup.log. --dry-run stops before the build (nothing is written but the log).
+    //   Setup.exe --play [play.ps1's options]
+    //     Play: tools\play.ps1 without a console window (-Fullscreen added in Big Picture mode). Its lines go
+    //     to play\launcher.log with the end of the session's stderr.log; ends with the game's own exit code.
+    // Both put themselves and everything they start in a job that ends with them: when the launcher stops
+    // Setup.exe, the build or the game stops too. recomplauncher.json's "exit_codes" explains each code.
+    static class Headless
+    {
+        public const int Busy = 69, NoPort = 70, NotGameFolder = 71, NotThisGame = 72, NoRpcs3 = 73, NoFirmware = 74,
+                         NoUpdate = 75, Rpcs3Open = 76, PcCannot = 77, BadDrive = 78, BuildFailed = 79,
+                         NotBuilt = 80, PlayFailed = 82;
+
+        static StreamWriter stdout, stderr, log;
+        static double lastFrac;
+
+        public static int Run(Opts opt, string exeDir)
+        {
+            try
+            {
+                StayWithMe();
+                return opt.Prepare ? Prepare(opt, exeDir) : Play(opt, exeDir);
+            }
+            catch (Exception ex)
+            {
+                Write(ref stderr, true, "Setup.exe: " + ex.Message);
+                Log("== stopped: " + ex);
+                return opt.Prepare ? BuildFailed : PlayFailed;
+            }
+            finally
+            {
+                Native.KeepAwake(false);
+                if (log != null) { try { log.Dispose(); } catch (Exception) { } log = null; }
+            }
+        }
+
+        // stdout / stderr: the pipes the launcher reads (Stream.Null when nobody does)
+        static void Write(ref StreamWriter w, bool err, string line)
+        {
+            try
+            {
+                if (w == null)
+                {
+                    w = new StreamWriter(err ? Console.OpenStandardError() : Console.OpenStandardOutput(), new UTF8Encoding(false));
+                    w.AutoFlush = true;
+                }
+                w.WriteLine(line);
+            }
+            catch (Exception) { }
+        }
+
+        static void Say(string line) { Write(ref stdout, false, line); }
+
+        static void Progress(double f, string text)
+        {
+            lastFrac = Math.Max(0, Math.Min(1, f));
+            Say("progress " + lastFrac.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture) + " " + text);
+        }
+
+        static void OpenLog(string path)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                log = new StreamWriter(new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite), new UTF8Encoding(false));
+                log.AutoFlush = true;
+            }
+            catch (Exception) { log = null; }
+        }
+
+        static void Log(string line)
+        {
+            if (log != null) { try { log.WriteLine(line); } catch (Exception) { } }
+        }
+
+        // The reason in the log, as the step's last line and on stderr; the code for the launcher.
+        static int Stop(int code, string reason)
+        {
+            Log("== stopped (exit code " + code + "): " + reason);
+            Progress(lastFrac, "Stopped: " + reason);
+            Write(ref stderr, true, reason);
+            return code;
+        }
+
+        // ---------------------------------------------------------- --prepare
+
+        static int Prepare(Opts opt, string dir)
+        {
+            OpenLog(Path.Combine(dir, "play\\setup.log"));
+            Log(string.Format("Setup.exe --prepare{0} {1:yyyy-MM-dd HH:mm}, Windows {2}", opt.DryRun ? " --dry-run" : "", DateTime.Now, Environment.OSVersion.Version));
+            Progress(0, "Checking your PC and your game");
+            bool first;
+            using (Mutex m = new Mutex(true, "inFAMOUS2-port-setup-" + Util.Hash(dir.ToLowerInvariant()), out first))
+            {
+                if (!first) return Stop(Busy, "Setup is already running in " + dir);
+                if (!Util.PortComplete(dir)) return Stop(NoPort, "the port's files are not next to Setup.exe in " + dir);
+                string disc = Util.NormalizeDisc(opt.Disc);
+                if (!Util.IsDisc(disc)) return Stop(NotGameFolder, "no PS3_GAME\\PARAM.SFO in " + (opt.Disc ?? "(no --disc given)"));
+                string rpcs3 = string.IsNullOrEmpty(opt.Rpcs3) ? Util.FindRpcs3(dir, dir) : opt.Rpcs3;
+                if (rpcs3 == null || !File.Exists(Path.Combine(rpcs3, "rpcs3.exe"))) return Stop(NoRpcs3, "RPCS3 was not found on this PC");
+                Log("RPCS3: " + rpcs3);
+                Log("game: " + disc);
+                string err;
+                List<Row> rows = Checker.Run(dir, disc, rpcs3, out err);
+                if (err != null) return Stop(BuildFailed, "the checks could not run: " + err);
+                foreach (Row r in rows) Log(string.Format("  {0,-5} {1}: {2}", r.Ok == true ? "ok" : r.Ok == false ? "MISS" : "note", r.Name, r.Detail));
+                foreach (Row r in rows)
+                    if (r.Ok == false) return Stop(CheckCode(r.Name), r.Name + ": " + r.Detail);
+                if (Process.GetProcessesByName("rpcs3").Length > 0) return Stop(Rpcs3Open, "RPCS3 is open: close it (Setup uses it to unlock your game)");
+                string cmd = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; & " + Util.Q(Path.Combine(dir, "tools\\setup_build.ps1")) +
+                             " -Disc " + Util.Q(disc) + " -Rpcs3 " + Util.Q(rpcs3) + " -AcceptMsvcLicense -NoShortcut -Cleanup; exit [int]$LASTEXITCODE";
+                if (opt.DryRun)
+                {
+                    Log("dry run, nothing built. The build would be: powershell -Command \"" + cmd + "\"");
+                    Progress(1, "Dry run: the checks passed, nothing was built");
+                    return 0;
+                }
+                return Build(dir, cmd);
+            }
+        }
+
+        // A MISS row of the checks (tools\setup_common.ps1 Get-SetupChecks) -> its exit code.
+        static int CheckCode(string n)
+        {
+            if (n == "64-bit Windows" || n == "CPU with AVX2" || n == "Vulkan graphics driver") return PcCannot;
+            if (n == "Game disc folder") return NotGameFolder;
+            if (n.StartsWith("Game disc", StringComparison.Ordinal)) return NotThisGame;
+            if (n == "Port folder's drive" || n == "Game folder's drive") return BadDrive;
+            if (n.StartsWith("RPCS3", StringComparison.Ordinal)) return NoRpcs3;
+            if (n == "PS3 firmware in RPCS3") return NoFirmware;
+            if (n.StartsWith("Game update", StringComparison.Ordinal) || n.StartsWith("Digital game", StringComparison.Ordinal)) return NoUpdate;
+            return BuildFailed;
+        }
+
+        static int Build(string dir, string cmd)
+        {
+            // over an existing game: the saves and the game as it is backed up first, as Install does
+            SaveBackup backup = null;
+            if (File.Exists(Util.BuiltExe(dir)))
+            {
+                try { backup = new SaveBackup(dir); Log("saves backed up to " + backup.Dir + " (" + backup.Files + " files, and the game as it is)"); }
+                catch (Exception ex) { return Stop(BuildFailed, "Setup could not back up your saves (" + ex.Message + "), so it changed nothing"); }
+            }
+            Util.RefreshPath();
+            Native.KeepAwake(true);
+            Log("> setup_build.ps1");
+            Job j = new Job();
+            j.Start(Util.PowerShellExe(), "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"" + cmd + "\"", dir, null);
+            BuildProgress p = new BuildProgress(dir);
+            string lastKey = null;
+            DateTime lastAt = DateTime.MinValue;
+            double shown = 0;
+            while (true)
+            {
+                string ln;
+                while (j.Lines.TryDequeue(out ln)) { Log(ln); p.Line(ln); }
+                p.TailCompileLog();
+                string key = p.Key();
+                if (key != lastKey || (DateTime.Now - lastAt).TotalMilliseconds >= 1000)
+                {
+                    // never backwards: step 2 counts Python's own download, then all the other tools from 0%
+                    shown = Math.Max(shown, p.Fraction());
+                    Progress(shown, p.Text());
+                    lastKey = key; lastAt = DateTime.Now;
+                }
+                if (j.Exited && j.Lines.IsEmpty) break;
+                Thread.Sleep(250);
+            }
+            Log("[exit code " + j.ExitCode + "]");
+            bool built = j.ExitCode == 0 && p.SawDone && File.Exists(Util.BuiltExe(dir));
+            if (backup != null)
+            {
+                try { if (built) backup.DropGame(); else Log(backup.RestoreGame()); }
+                catch (Exception ex) { Log("could not put the previous game back from " + backup.Dir + ": " + ex.Message); }
+                try { Log(backup.Reapply()); }
+                catch (Exception ex) { Log("could not reapply the saves from " + backup.Dir + ": " + ex.Message); }
+            }
+            if (!built) return Stop(BuildFailed, "the build stopped: " + (p.FailReason ?? "exit code " + j.ExitCode));
+            // which port version this game was built from (--play notes it when an update brought another)
+            try
+            {
+                string pv = Path.Combine(dir, "port-version.txt"), st = BuiltStamp(dir);
+                if (File.Exists(pv)) File.Copy(pv, st, true);
+                else if (File.Exists(st)) File.Delete(st);
+            }
+            catch (Exception) { }
+            Log("== ready to play");
+            Progress(1, "Ready to play");
+            return 0;
+        }
+
+        static string BuiltStamp(string dir) { return Path.Combine(dir, "work\\launcher-built.txt"); }
+
+        // setup_build.ps1's lines -> how far it is and one line for the player. The weights are the window's
+        // (MainForm.StepWeight, SubNames, SubWeight) for the 10 steps without "Optimise for this PC".
+        sealed class BuildProgress
+        {
+            static readonly double[] StepWeight = { 0, 1, 22, 4, 2, 3, 10, 1, 52, 1, 4 };
+            static readonly string[] StepText = { "", "Checking your PC and your game", "Downloading the build tools",
+                "Copying the update and the firmware files from RPCS3", "Unlocking your game with RPCS3", "Setting up the build tools",
+                "Getting SDL2, the Vulkan headers and glslang", "Making the game's icon from your copy",
+                "Translating and compiling the game (15-40 minutes)", "Almost done", "Cleaning up" };
+            static readonly string[] SubNames = { "inputs", "port", "firmware", "ppu", "spu", "jobs", "compile" };
+            static readonly double[] SubWeight = { 2, 3, 10, 22, 4, 9, 50 };
+            static readonly string[] SubText = { "reading your game", "the port's code", "the firmware modules",
+                "translating the game's code", "the SPU programs", "the SPU jobs", "compiling" };
+            const int CompileStep = 8;
+
+            int step, steps = 10, sub = -1, ninjaDone, ninjaTotal;
+            double frac;
+            string scriptText = "", detail = "", compileLog;
+            long compilePos = -1;
+            readonly string repo;
+            public string FailReason;
+            public bool SawDone;
+
+            public BuildProgress(string dir) { repo = dir; compileLog = Path.Combine(dir, "work\\logs\\compile.log"); }
+
+            bool Known() { return steps + 1 == StepWeight.Length; }
+
+            public void Line(string line)
+            {
+                string t = line.Trim();
+                int k, n;
+                if (t.StartsWith("== [", StringComparison.Ordinal))
+                {
+                    int slash = t.IndexOf('/'), close = t.IndexOf(']');
+                    if (slash > 4 && int.TryParse(t.Substring(4, slash - 4), out n)) step = n;
+                    if (slash > 0 && close > slash && int.TryParse(t.Substring(slash + 1, close - slash - 1), out n)) steps = n;
+                    scriptText = close > 0 ? t.Substring(close + 1).Trim() : t;
+                    int so = scriptText.LastIndexOf("   (", StringComparison.Ordinal);
+                    if (so > 0) scriptText = scriptText.Substring(0, so).Trim();
+                    frac = 0; sub = -1; ninjaTotal = 0; detail = "";
+                }
+                else if (t.StartsWith("== FAILED:", StringComparison.Ordinal)) FailReason = t.Substring(10).Trim();
+                else if (t.StartsWith("== done", StringComparison.Ordinal)) SawDone = true;
+                else if (t.StartsWith("progress:", StringComparison.Ordinal))
+                {
+                    int pct = Util.Percent(t);
+                    if (pct >= 0) frac = pct / 100.0;
+                    detail = t.Substring(9).Trim();
+                }
+                else if (t.StartsWith("compile log:", StringComparison.Ordinal))
+                {
+                    string rel = t.Substring(12).Trim();
+                    if (rel.Length > 0) { compileLog = Path.Combine(repo, rel); compilePos = -1; }
+                }
+                else if (step == CompileStep && t.Length > 2 && t[0] == '[' && t[t.Length - 1] == ']' &&
+                         Array.IndexOf(SubNames, t.Substring(1, t.Length - 2)) >= 0)
+                {
+                    sub = Array.IndexOf(SubNames, t.Substring(1, t.Length - 2));
+                    if (sub == SubNames.Length - 1)
+                    {
+                        try { compilePos = File.Exists(compileLog) ? new FileInfo(compileLog).Length : 0; } catch (Exception) { compilePos = 0; }
+                    }
+                }
+                else if (Util.Ninja(t, out k, out n)) frac = k / (double)n;
+            }
+
+            // ninja's [k/N] lines in the compile log (the compile writes there, not to setup_build's output)
+            public void TailCompileLog()
+            {
+                if (step != CompileStep || sub != SubNames.Length - 1 || compilePos < 0) return;
+                try
+                {
+                    using (FileStream fs = new FileStream(compileLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    {
+                        if (fs.Length < compilePos) compilePos = 0;
+                        if (fs.Length == compilePos) return;
+                        fs.Seek(compilePos, SeekOrigin.Begin);
+                        int want = (int)Math.Min(fs.Length - compilePos, 8 << 20), got = 0, r;
+                        byte[] buf = new byte[want];
+                        while (got < want && (r = fs.Read(buf, got, want - got)) > 0) got += r;
+                        int last = got > 0 ? Array.LastIndexOf(buf, (byte)'\n', got - 1) : -1;
+                        if (last < 0) { if (got == (8 << 20)) compilePos += got; return; }
+                        int start = 0;
+                        for (int i = 0; i <= last; i++)
+                        {
+                            if (buf[i] != '\n') continue;
+                            if (buf[start] == '[' && i - start > 4)
+                            {
+                                int k, n;
+                                if (Util.Ninja(Encoding.ASCII.GetString(buf, start, Math.Min(32, i - start)), out k, out n)) { ninjaDone = k; ninjaTotal = n; }
+                            }
+                            start = i + 1;
+                        }
+                        compilePos += last + 1;
+                    }
+                }
+                catch (Exception) { }
+            }
+
+            public double Fraction()
+            {
+                if (step < 1) return 0;
+                if (!Known()) return Math.Min(1, (step - 1 + Math.Min(1, frac)) / Math.Max(1, steps));
+                int st = Math.Min(step, steps);
+                double done = 0;
+                for (int i = 1; i < st; i++) done += StepWeight[i];
+                double f = frac;
+                if (st == CompileStep)
+                {
+                    f = 0;
+                    if (sub >= 0)
+                    {
+                        for (int i = 0; i < sub; i++) f += SubWeight[i];
+                        if (sub == SubNames.Length - 1 && ninjaTotal > 0) f += SubWeight[sub] * ninjaDone / (double)ninjaTotal;
+                        f /= 100.0;
+                    }
+                }
+                return (done + StepWeight[st] * Math.Min(1, f)) / 100.0;
+            }
+
+            public string Text()
+            {
+                if (step < 1) return "Getting ready";
+                string head = Known() && step < StepText.Length ? StepText[step] : scriptText;
+                if (step == CompileStep && sub >= 0)
+                    return head + ": " + SubText[sub] + (sub == SubNames.Length - 1 && ninjaTotal > 0 ? " " + ninjaDone + " of " + ninjaTotal : "");
+                return detail.Length > 0 ? head + ": " + detail : head;
+            }
+
+            // changes when the step or what it says changes (a new line is printed at once then)
+            public string Key() { return step + "/" + sub + "/" + detail; }
+        }
+
+        // ---------------------------------------------------------- --play
+
+        static int Play(Opts opt, string exeDir)
+        {
+            string repo = Util.HasPort(exeDir) ? exeDir : Util.ExistingInstall(exeDir);
+            if (repo == null) return Stop(NoPort, "the port's files are not next to Setup.exe in " + exeDir);
+            string ps1 = Path.Combine(repo, "tools\\play.ps1");
+            if (!File.Exists(ps1)) return Stop(NoPort, "tools\\play.ps1 is missing in " + repo);
+            OpenLog(Path.Combine(repo, "play\\launcher.log"));
+            Log(string.Format("Setup.exe --play {0:yyyy-MM-dd HH:mm}, Windows {1}, launcher {2} ({3})", DateTime.Now, Environment.OSVersion.Version,
+                              Environment.GetEnvironmentVariable("RECOMPLAUNCHER_VERSION") ?? "-", Environment.GetEnvironmentVariable("RECOMPLAUNCHER_MODE") ?? "-"));
+            if (!File.Exists(Util.BuiltExe(repo))) return Stop(NotBuilt, "the game is not built yet (" + Util.BuiltExe(repo) + ")");
+            // an update of the port arrived after this game was built: it still plays, the log says so
+            try
+            {
+                string pv = Path.Combine(repo, "port-version.txt"), st = BuiltStamp(repo);
+                if (File.Exists(pv) && File.Exists(st) && VersionLines(pv) != VersionLines(st))
+                    Log("note: this game was built from an older version of the port than the one installed now (" + st + " vs " + pv +
+                        "): setting it up again builds the new one");
+            }
+            catch (Exception) { }
+            StringBuilder a = new StringBuilder("-NoProfile -ExecutionPolicy Bypass -File " + Arg(ps1));
+            bool fs = false;
+            foreach (string s in opt.PlayArgs) if (string.Equals(s, "-Fullscreen", StringComparison.OrdinalIgnoreCase)) fs = true;
+            if (!fs && string.Equals(Environment.GetEnvironmentVariable("RECOMPLAUNCHER_MODE"), "bigpicture", StringComparison.OrdinalIgnoreCase)) a.Append(" -Fullscreen");
+            foreach (string s in opt.PlayArgs) a.Append(' ').Append(Arg(s));
+            Log("> powershell " + a);
+            if (opt.DryRun) { Log("dry run: the game was not started"); Say("dry run: powershell " + a); return 0; }
+
+            Job j = new Job();
+            try { j.Start(Util.PowerShellExe(), a.ToString(), repo, null); }
+            catch (Exception ex) { return Stop(PlayFailed, "could not start PowerShell: " + ex.Message); }
+            int code = 0;
+            bool sawExit = false;
+            string session = null;
+            while (true)
+            {
+                string ln;
+                while (j.Lines.TryDequeue(out ln))
+                {
+                    Log(ln);
+                    Say(ln);
+                    // play.ps1's last line: "Exited (code 0x<hex>) after <n> min. Logs: <session folder>"
+                    int e = ln.IndexOf("Exited (code 0x", StringComparison.Ordinal);
+                    if (e < 0) continue;
+                    int h = e + 15, end = ln.IndexOf(')', h);
+                    uint v;
+                    if (end > h && uint.TryParse(ln.Substring(h, end - h), System.Globalization.NumberStyles.HexNumber, null, out v)) { code = unchecked((int)v); sawExit = true; }
+                    int lg = ln.IndexOf("Logs: ", StringComparison.Ordinal);
+                    if (lg > 0) session = ln.Substring(lg + 6).Trim();
+                }
+                if (j.Exited && j.Lines.IsEmpty) break;
+                Thread.Sleep(200);
+            }
+            Log("[play.ps1 exit code " + j.ExitCode + "]");
+            if (session != null) LogTail(Path.Combine(session, "stderr.log"), 150);
+            if (sawExit) { Log("the game's exit code: " + code); return code; }
+            return j.ExitCode == 0 ? 0 : Stop(PlayFailed, "play.ps1 ended with exit code " + j.ExitCode + " (see play\\launcher.log)");
+        }
+
+        // port-version.txt without its first line ("Downloaded by Setup.exe <time>" or the release's own)
+        static string VersionLines(string path)
+        {
+            string[] l = File.ReadAllLines(path);
+            return l.Length > 1 ? string.Join("\n", l, 1, l.Length - 1).Trim() : "";
+        }
+
+        // The last lines of the session's own log, for the crash report the launcher sends with launcher.log.
+        static void LogTail(string path, int lines)
+        {
+            try
+            {
+                if (!File.Exists(path)) return;
+                using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    long from = Math.Max(0, f.Length - (256 << 10));
+                    f.Seek(from, SeekOrigin.Begin);
+                    string[] all = new StreamReader(f, Encoding.UTF8).ReadToEnd().Split('\n');
+                    int s = Math.Max(from > 0 ? 1 : 0, all.Length - lines);
+                    Log("---- the end of " + path);
+                    for (int i = s; i < all.Length; i++) Log(all[i].TrimEnd('\r'));
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // One command-line argument, quoted the way Windows splits them again.
+        static string Arg(string s)
+        {
+            if (s.Length > 0 && s.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) return s;
+            StringBuilder b = new StringBuilder("\"");
+            int bs = 0;
+            foreach (char c in s)
+            {
+                if (c == '\\') { bs++; continue; }
+                if (c == '"') { b.Append('\\', bs * 2 + 1); b.Append('"'); bs = 0; continue; }
+                b.Append('\\', bs); bs = 0;
+                b.Append(c);
+            }
+            b.Append('\\', bs * 2);
+            b.Append('"');
+            return b.ToString();
+        }
+
+        // ---------------------------------------------------------- a job that ends with Setup.exe
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct BasicLimits
+        {
+            public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass, SchedulingClass;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct ExtendedLimits
+        {
+            public BasicLimits Basic;
+            public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes;   // IO_COUNTERS
+            public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+        }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+        [DllImport("kernel32.dll")] static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimits info, int size);
+        [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+        static IntPtr job;   // held until Setup.exe ends: then Windows ends everything in it
+
+        static void StayWithMe()
+        {
+            try
+            {
+                job = CreateJobObject(IntPtr.Zero, null);
+                if (job == IntPtr.Zero) return;
+                ExtendedLimits l = new ExtendedLimits();
+                l.Basic.LimitFlags = 0x2000;   // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                if (SetInformationJobObject(job, 9, ref l, Marshal.SizeOf(typeof(ExtendedLimits))))   // JobObjectExtendedLimitInformation
+                    AssignProcessToJobObject(job, GetCurrentProcess());
+            }
+            catch (Exception) { }
         }
     }
 

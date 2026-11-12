@@ -173,10 +173,6 @@ $vars = @{
     SDL_GAMECONTROLLER_USE_BUTTON_LABELS = "0"
     SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS = "1"
     PS3_INPUT_MAP               = $(if (Test-Path $inputToml) { $inputToml } else { "" })
-    # F9 (the play log's MARK) also logs the HUD draws of the next two frames into stderr.log:
-    # the minimap diagnostic (agent/minimap 2b79848, "some enemies did not show up on the
-    # minimap"); costs nothing until F9 is pressed.
-    PS3RECOMP_ENG_HUDLOG_KEY    = "1"
 }
 if ($Fullscreen) { $vars["PS3RECOMP_VK_FULLSCREEN"] = "1" }
 if ($PSBoundParameters.ContainsKey('Fps')) { $vars["PS3RECOMP_FPS_CAP"] = [string]$Fps }
