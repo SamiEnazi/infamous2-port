@@ -332,7 +332,7 @@ namespace Inf2Setup
 
     static class Util
     {
-        public static readonly string[] Titles = { "BCES01143", "BCES01144", "BCES01229", "BCUS98125", "NPUA80638" };
+        public static readonly string[] Titles = { "BCES01143", "BCES01144", "BCES01229", "BCUS98125", "NPUA80638", "NPEA00318" };
 
         // Re-read PATH from the registry (Machine + User), so the checks see what the PC has now.
         public static void RefreshPath()

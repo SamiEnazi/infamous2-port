@@ -25,6 +25,16 @@
  *   0x0007E0A4 / 0x00098A00  the free / aim camera's input step (the mouse camera, NOTES.md "Mouse camera")
  *   0x004AE348            MatchPositionAndRotation(r3 object, r4 -> matrix): the game's own placing of an
  *                         object, with a character's teleport reset (saved spots, NOTES.md "Saved spots")
+ *   0x0012F6E0            SetKarma(r3 G, f1 karma, r5 reason): Karma rank (NOTES.md "Karma rank")
+ *   0x002BB874 / 0x0019B274 / 0x0019B350  L_'s RPCS3 patches re-made as hooks: Black lightning, Static Thrusters
+ *                         flight and speed (NOTES.md "L_'s patches")
+ *   0x00A64E60            G+0x40: the powers, one word each (0..95; the save's STATE +0x24): 1 unlocked, 2 its
+ *                         requirement met, 4 bought (7 = owned), 8 / 0x10 forced on / off (missions), 0x20 new
+ *   0x001307C4            SetPowerState(r3 G, r4 power, r5 word): every change (story, Powers menu, scripts)
+ *   0x00A64E58 / Cole+0x2578  ionic charges (G+0x38, saved) / the most he can hold; AddIonicCharges 0x00154CE8
+ *                         (r3 Cole, r4 delta, clamped): Infinite ionic charges (NOTES.md "Ionic charges")
+ *   0x0012D18C / 0x0012D6C8  the power word as the game reads it (karma powers: the 1 bit only once their rank was
+ *                         reached) / "karma allows this power now": Unlock all powers (NOTES.md "Powers")
  *
  * Test knobs (scripted runs; Sami never needs them):
  *   PS3_CHEATS="id=value,..."        at the first Cole update
@@ -37,6 +47,7 @@
  *   PS3_CHEATS_XP=<hex>              the XP pair's guest address (overrides the built-in one)
  *   PS3_CHEATS_POKE=<hex>:<n>        with t:poke=1: add n to that u32 pair (the XP search);
  *                                    t:drain=<e> sets Cole's energy to e (tests the refill)
+ *   t:powerdump=1                    one line per power: its word, karma rank, definition (NOTES.md "Powers")
  */
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -68,6 +79,9 @@
 #include <sys/stat.h>
 #endif
 
+/* The in-game menu (libs/video/vk_overlay.cpp): 1 while F2's menu is open. The karma rank pick waits for 0. */
+extern "C" int vk_overlay_menu_open(void);
+
 namespace {
 
 /* ---- inFAMOUS 2 v1.04 --------------------------------------------------------------- */
@@ -92,6 +106,15 @@ constexpr uint32_t kFnAddKarma = 0x0012FC6C;      /* AddKarma(r3 G, f1 delta, r5
  * derived from the shards at every load). */
 constexpr uint32_t kFnBatteryBonus = 0x0009B780;  /* r3 shard progress: [r3+0x14] data: +0x38 energy/level, +0x40 levels */
 constexpr uint32_t kGBatteryBits = kG + 0x944;
+/* Ionic charges (2026-11-12, NOTES.md "Ionic charges"; static, not run): the count is an int at G+0x38 (getter
+ * 0x001538C4; saved: STATE +0x1C), the most Cole can hold at Cole+0x2578. AddIonicCharges 0x00154CE8(r3 Cole,
+ * r4 delta) = clamp(count + delta, 0, max) -> SetIonicCharges 0x00154CB4 -> 0x0012B4A4 (stores G+0x38, marks the
+ * save changed). A power's use (0x00154D68) takes its cost table's +8 ints of charges through it; pickups
+ * (0x00152920) and the script native 0x00524834 add through it. The max is made by RecomputeMaxEnergy 0x00154DB4:
+ * Cole+0x2574 (0 from the constructor) + one per owned power 0x57, 0x5B, 0x5C (0..3); 0x57's requirement bit also
+ * lets Cole collect charges (0x00152BB8). */
+constexpr uint32_t kIonicCount = kG + 0x38;
+constexpr uint32_t kColeIonicMax = 0x2578;      /* the game's own value: Cole+0x2574 + owned 0x57/0x5B/0x5C */
 /* Movement (snapshots, runs cheats5-7): position +0x1560, velocity +0x1570 (x, y, z up; ~cm), copies
  * at +0x1C14/+0x1C20; gravity ~-1500/s^2, Static Thrusters ~-350/s^2. Writing the velocity here does
  * nothing (run cheats7): those are copies; the air movement runs in a jump/fall controller A.
@@ -105,6 +128,54 @@ constexpr uint32_t kGBatteryBits = kG + 0x944;
 constexpr uint32_t kFnUpdateGravity = 0x0019BB20;  /* UpdateGravity(r3 A) */
 constexpr uint32_t kAOwner = 0x1C, kAGravityZ = 0x68, kAFallState = 0x120;
 constexpr uint32_t kFallFloat = 2;
+/* Karma ranks (2026-11-11, NOTES.md "Karma rank"): the rank of a karma value is 0x0012D0F4: the first of 7
+ * (lo, hi) float ranges at 0x00745EC8 (= tuning 0x00745CF0 + 0x1D8) that holds it, else 3 (Neutral):
+ * 0 Infamous [-3200,-2500], 1 Outlaw [-2500,-1000], 2 Thug [-1000,-1], 3 Neutral [-1,1], 4 Guardian [1,1000],
+ * 5 Champion [1000,2500], 6 Hero [2500,3200]. SetKarma 0x0012F6E0(r3 G, f1 karma, r5 reason) is the game's
+ * setter (loads use it; AddKarma ends in it): it stores G+0x20 and sends the karma-changed event (42) and, when
+ * the rank changes, the rank-changed event (43: the rank screen, Cole's karma look). */
+constexpr uint32_t kKarmaRanks = 0x00745EC8;   /* SetKarma = func_0012F6E0 (krank_tick) */
+/* L_'s RPCS3 patches for this EBOOT (2026-11-11, NOTES.md "L_'s patches"), re-made as hooks:
+ *   0x002BB874 SubmitDraws(r3 renderer, r4 pass, r5 n, r6 -> n shader variants, r7 shader reference,
+ *              r8 instance, r9 -> its bounds): for each variant, the pass's vtable +0x68 draw. The electric
+ *              arc renderer 0x002CF8F0 calls it from 0x002CFA3C (lr 0x002CFA40) with its own single variant
+ *              (table[def+0x124]) and reference def+0x120 (def = [renderer+0x14]).
+ *   0x002F96AC Resolve(r3 asset reference) -> the asset (cached at ref+0x18); a shader: +0x5C -> its variants,
+ *              +0x60 how many.
+ *   0x00A80104 the reference the level property EVIL_LIGHTNING_SHADER sets (0x0049A8B8; 0 = not set).
+ *   0x0019B274 the glide's forward speed (r3 = jump/fall controller A): A+0x44, but 1350.0 when the
+ *              thrusters' first upgrade A+0x114 is on, A+0x118 jump state 2 (Fall), A+0x120 fall state 2
+ *              (Float) and the float has lasted > 0.5 s (clock [0x00A2C500]+4 - A+0x124, x 1/1440 s).
+ *   0x0019B350 the glide's floor on Cole's vertical speed: 0, but splat(-1000.0) with the top thruster upgrade
+ *              A+0x116 in that same state (the air code eases a faster fall back to it).
+ *   A+0x114/0x115/0x116 = the thruster upgrades owned: power 0x4A sets 0x114, 0x4B 0x114+0x115, 0x4C all three
+ *   (0x001A6F10; power 0x49 = the Static Thrusters themselves). Pad 0 = [0x009A4CC0] = 0x00A73130, +0x1C the
+ *   held buttons (the game's own bits: 0x20 Cross, 0x80 Circle, as L_'s patch has them). */
+constexpr uint32_t kFnArcDraw = 0x002BB874, kLrArcSite = 0x002CFA40;   /* Resolve = func_002F96AC */
+constexpr uint32_t kEvilShaderRef = 0x00A80104;
+constexpr uint32_t kDefNoSwap = 0x11C;           /* the arc definition's flag: set = L_'s patch leaves it alone */
+constexpr uint32_t kFnThrustSpeed = 0x0019B274, kFnThrustFloor = 0x0019B350;
+constexpr uint32_t kAUp1 = 0x114, kAUp2 = 0x115, kAUp3 = 0x116, kAJumpState = 0x118, kAFallSince = 0x124;
+constexpr uint32_t kJumpFall = 2;
+constexpr uint32_t kPadPtr = 0x009A4CC0, kPadHeld = 0x1C, kBtnCross = 0x20, kBtnCircle = 0x80;
+/* Powers (2026-11-12, NOTES.md "Powers"; static, not run). The progress struct G keeps one word per power at
+ * G+0x40 + 4p, p = 0..95 (the save writes them as they are: STATE +0x24 + 4p). Bits: 1 unlocked (the story;
+ * the power wheel's getter 0x0012D18C hides it for a karma power whose rank Cole never reached, from the
+ * karma trackers G+0x24 lowest / G+0x28 highest), 2 its requirement met (the stunts: 0x00058D64), 4 bought
+ * (the Powers menu's script native 0x0004FC94 -> 0x00130AEC), 8 forced on / 0x10 forced off (mission scripts:
+ * 0x00130A54), 0x20 "new" (SetPowerState sets it when the 1 bit comes on). Owned = (word & 7) == 7 (0x0012D2FC),
+ * or forced on; usable also needs 0x0012D6C8 (karma: an evil power at its rank or worse, a hero one at its rank
+ * or better). SetPowerState 0x001307C4(r3 G, r4 power, r5 word) is every change: the story's recompute
+ * 0x00393E00, the scripts' "give power" 0x0004FBF8 (word | 7), the Powers menu; it re-checks the 16 power
+ * slots G+0x1C0 (0x00130228: an empty slot gets a usable power), marks the save changed (0x0012B274) and
+ * sends event 78. The definitions: Cole's hero-powers skill (class 406 in his skill list [Cole+0x378],
+ * 0x0030EFF0) +0x91C + 4p (0 = no such power). Karma rank each power needs: int table 0x00745CF0 + 4p. */
+constexpr uint32_t kPowerWords = kG + 0x40;
+constexpr int kNPowers = 96;
+constexpr uint32_t kPowerKarmaReq = 0x00745CF0;            /* 0..6 as kRankName below, 3 = none */
+constexpr uint32_t kColeSkills = 0x378, kSkillPowerDefs = 0x91C;
+constexpr uint32_t kSkillHeroPowers = 406;
+constexpr uint32_t kFnPowerWord = 0x0012D18C, kFnPowerKarmaOk = 0x0012D6C8;   /* both-sides hooks */
 
 /* ---- guest helpers (guest thread: inside a hook) ------------------------------------ */
 bool gptr(uint32_t a) { return a >= 0x10000u && a < 0xC0000000u && !(a & 3u); }
@@ -119,6 +190,7 @@ double now_s()
 
 /* ---- state ------------------------------------------------------------------------- */
 std::atomic<int> g_god{0}, g_energy{0}, g_onehit{0}, g_refill{0};
+std::atomic<int> g_ionic{0};                     /* Infinite ionic charges */
 std::atomic<long long> g_xp_pending{0};
 uint32_t s_xp = kXpDefault;
 bool s_probe, s_timeline, s_env_done;
@@ -149,9 +221,24 @@ double s_tpc_t0;
 bool s_tpc_cancel;
 std::atomic<uint32_t> s_cam_yaw_bits{0}, s_cam_pitch_bits{0};
 std::atomic<double> s_cam_t{-1.0};
+/* karma rank: a pick waits for the menu to close (the game rank index wanted, the Cole it was made for) */
+std::atomic<int> g_krank_pending{0}, g_krank_want{3};
+std::atomic<uint32_t> s_krank_cole{0};
+/* L_'s patches: Black lightning (on/off), Static Thrusters flight / fast (choice index, 0 = off); what the
+ * hooks saw (the page's status lines) */
+std::atomic<int> g_black{0}, g_tfly{0}, g_tfast{0};
+std::atomic<long long> s_bl_swaps{0}, s_bl_calls{0}, s_fly_frames{0}, s_fast_frames{0};
+std::atomic<int> s_thr_tier{-1};                 /* Cole's thruster upgrades seen by a hook: 0 none .. 3 all */
+/* Unlock all powers: the choice (0 off, 1 every upgrade, 2 every power), Karma powers of both sides; requests
+ * to Cole's update (scan now, put back, re-check the slots); what the last scan saw (the page's line) */
+std::atomic<int> g_pw{0}, g_pw_both{0};
+std::atomic<int> s_pw_kick{0}, s_pw_slots{0};
+std::atomic<int> s_pw_owned{-1}, s_pw_given{0};
 
 void hooks_update();
 void spot_tick(struct ppu_context* ctx, uint32_t c);
+void krank_tick(struct ppu_context* ctx, uint32_t c);
+void power_tick(struct ppu_context* ctx, uint32_t c);
 
 /* ---- the hooks ----------------------------------------------------------------------- */
 void timeline_poll(struct ppu_context* ctx, uint32_t c);
@@ -182,6 +269,21 @@ void call_game(struct ppu_context* ctx, ppu_hook_body fn, F setup)
 
 void snap_write(uint32_t c);
 
+/* Infinite ionic charges (v2 after Sami's test: forced, whatever the game's rules say), from Cole's update every
+ * frame: Cole's max (Cole+0x2578) = 3 written directly (the game's RecomputeMaxEnergy would make it 0..3 from the
+ * powers 0x57/0x5B/0x5C), and the count (G+0x38) = 3 through the game's own setter 0x00154CB4 (no clamp; it stores
+ * and marks the save changed, as a pickup does). Everything that reads them sees 3: the getter 0x001538C4 (the
+ * power check 0x001538E0: an ionic power fires while the count is above 0), AddIonicCharges' clamp, the
+ * collector. A use takes one (clamped to the 3 here) and the next frame puts it back. */
+constexpr int32_t kIonicForced = 3;
+void ionic_tick(struct ppu_context* ctx, uint32_t c)
+{
+    if ((int32_t)vm_read32(c + kColeIonicMax) != kIonicForced) vm_write32(c + kColeIonicMax, (uint32_t)kIonicForced);
+    if ((int32_t)vm_read32(kIonicCount) != kIonicForced)
+        call_game(ctx, func_00154CB4, [&](struct ppu_context* x) { x->gpr[3] = c; x->gpr[4] = (uint64_t)kIonicForced; });
+    if ((int32_t)vm_read32(kIonicCount) != kIonicForced) vm_write32(kIonicCount, (uint32_t)kIonicForced);   /* belt and braces */
+}
+
 /* Cole's per-frame update: after the game's own, refill / add what the cheats ask for. */
 void hook_cole_update(struct ppu_context* ctx, ppu_hook_body body)
 {
@@ -199,6 +301,7 @@ void hook_cole_update(struct ppu_context* ctx, ppu_hook_body body)
         const float mx = rdf(c + kEnergyMax);
         if (mx > 0.0f && rdf(c + kEnergy) < mx) wrf(c + kEnergy, mx);
     }
+    if (g_ionic.load(std::memory_order_relaxed)) ionic_tick(ctx, c);
     if (g_refill.exchange(0)) {
         const float mx = rdf(c + kHpMax);
         if (mx > 0.0f) wrf(c + kHp, mx);
@@ -227,6 +330,10 @@ void hook_cole_update(struct ppu_context* ctx, ppu_hook_body body)
     }
     if (g_tp_pending.load(std::memory_order_relaxed) || s_settle_on.load(std::memory_order_relaxed))
         spot_tick(ctx, c);                          /* Go to saved spot (after the game's own update) */
+    if (g_krank_pending.load(std::memory_order_acquire) && !vk_overlay_menu_open())
+        krank_tick(ctx, c);                         /* Karma rank: the pick, once the menu is closed */
+    if (g_pw.load(std::memory_order_relaxed) || s_pw_slots.load(std::memory_order_relaxed))
+        power_tick(ctx, c);                         /* Unlock all powers (after the game's own update) */
     if (s_snap_left > 0) snap_write(c);
     if (s_timeline) timeline_poll(ctx, c);
     if (s_probe) { probe_tick(c); glide_probe(c); }
@@ -306,6 +413,250 @@ void glide_probe(uint32_t c)
                 dt, (double)dz, dt > 0.0 ? dz / dt : 0.0, (double)g0, g_glide.load());
     }
     was = in_float;
+}
+
+/* ---- karma rank (2026-11-11; NOTES.md "Karma rank") ------------------------------------------------
+ * The rank of a karma value as the game's 0x0012D0F4 finds it: the first of its 7 ranges that holds it,
+ * else Neutral. A pick from the menu sets karma to the middle of that rank through the game's own SetKarma
+ * once the menu is closed, if Cole's rank is not that one already (krank_tick, from Cole's update). */
+constexpr int kRanks = 7, kRankNeutral = 3;
+const char* const kRankName[kRanks] = { "Infamous", "Outlaw", "Thug", "Neutral", "Guardian", "Champion", "Hero" };
+constexpr float kRankKarma[kRanks] = { -2850.0f, -1750.0f, -500.0f, 0.0f, 500.0f, 1750.0f, 2850.0f };   /* inside each */
+int rank_of(float k)
+{
+    for (int i = 0; i < kRanks; i++)
+        if (rdf(kKarmaRanks + 8u * i) <= k && rdf(kKarmaRanks + 8u * i + 4u) >= k) return i;
+    return kRankNeutral;
+}
+
+void krank_tick(struct ppu_context* ctx, uint32_t c)
+{
+    g_krank_pending.store(0, std::memory_order_relaxed);
+    const int want = g_krank_want.load(std::memory_order_relaxed);
+    const float before = rdf(kKarma);
+    const int now = rank_of(before);
+    char msg[160];
+    if (c != s_krank_cole.load(std::memory_order_relaxed)) {
+        snprintf(msg, sizeof msg, "Karma rank: not changed (another game was loaded since the pick)");
+    } else if (want < 0 || want >= kRanks || want == now) {
+        snprintf(msg, sizeof msg, "Karma rank: already %s (karma %.0f)", kRankName[now], (double)before);
+    } else {
+        call_game(ctx, func_0012F6E0, [&](struct ppu_context* x) {           /* SetKarma(G, karma, reason -1) */
+            x->gpr[3] = kG; x->gpr[5] = (uint64_t)(int64_t)-1; x->fpr[1] = (double)kRankKarma[want]; });
+        const float after = rdf(kKarma);
+        snprintf(msg, sizeof msg, "Karma rank: %s (%.0f) -> %s (%.0f)", kRankName[now], (double)before,
+                 kRankName[rank_of(after)], (double)after);
+    }
+    fprintf(stderr, "[cheats] %s\n", msg);
+    ps3_cheats_notice(msg, 4.0);
+    hooks_update();
+}
+
+/* ---- Unlock all powers (2026-11-12, v2 after Sami's test: on = everything, off = nothing taken; NOT run) ------
+ * On: every power word 0..95 is made owned -- bits 1|2|4 set, the missions' forced-off bit 0x10 cleared (the
+ * forced-on bit 8 and the "new" mark 0x20 are left) -- through the game's SetPowerState 0x001307C4, so the
+ * Powers menu, the power wheel and the slots follow (it re-checks the 16 slots: an empty one takes a usable
+ * power). At most kPwPerFrame calls a frame. Every second while on it does it again for any word the story or a
+ * mission changed back (the story's recompute 0x00393E00 rebuilds the bits it controls at each story step).
+ * The karma checks are bypassed while it is on (hook_power_word / hook_power_karma_ok below, the slots of
+ * "Karma powers of both sides"). Off: nothing more is done; nothing is taken away. */
+constexpr int kPwPerFrame = 8;
+constexpr double kPwRescanSecs = 1.0;
+double s_pw_next;                                   /* guest thread only, from here on */
+long long s_pw_regiven;
+
+/* Cole's hero-powers skill (0x0030EFF0 on his skill list, class 406), run on a copy of the registers: its
+ * definitions +0x91C + 4p (t:powerdump; Sami's run m26 found 45 of the 96 defined there). */
+uint32_t hero_powers(struct ppu_context* ctx, uint32_t c)
+{
+    const uint32_t mgr = vm_read32(c + kColeSkills);
+    if (!gptr(mgr)) return 0;
+    ppu_context x;
+    memcpy(&x, ctx, sizeof x);
+    x.gpr[3] = mgr;
+    x.gpr[4] = kSkillHeroPowers;
+    ppu_hook_call(&x, func_0030EFF0);
+    const uint32_t s = (uint32_t)x.gpr[3];
+    return gptr(s) ? s : 0;
+}
+
+/* One power's word, through the game's SetPowerState (it may add 0x20, "new"). SetPowerState compares with the
+ * word as the getter shows it; if that makes it skip the change (the karma getter hid a bit the cheat sets), the
+ * stored word is set as asked. */
+void set_power(struct ppu_context* ctx, int p, uint32_t word)
+{
+    const uint32_t a = kPowerWords + 4u * (uint32_t)p;
+    call_game(ctx, func_001307C4, [&](struct ppu_context* x) {
+        x->gpr[3] = kG; x->gpr[4] = (uint64_t)(int64_t)p; x->gpr[5] = word; });
+    if ((vm_read32(a) & ~0x20u) != (word & ~0x20u)) vm_write32(a, word);
+}
+
+void power_tick(struct ppu_context* ctx, uint32_t c)
+{
+    (void)c;
+    if (s_pw_slots.exchange(0))                     /* karma bypass switched: the game's slot check once */
+        call_game(ctx, func_00130228, [&](struct ppu_context* x) { x->gpr[3] = kG; });
+    if (!g_pw.load()) { hooks_update(); return; }   /* off: nothing to do (Cole's update hook off if unused) */
+    const double t = now_s();
+    if (!s_pw_kick.exchange(0) && t < s_pw_next) return;
+    s_pw_next = t + kPwRescanSecs;
+    int budget = kPwPerFrame, owned = 0, gave = 0;
+    bool more = false;
+    for (int p = 0; p < kNPowers; p++) {
+        const uint32_t cur = vm_read32(kPowerWords + 4u * (uint32_t)p);
+        const uint32_t nw = (cur | 7u) & ~0x10u;
+        if (nw == cur) { owned++; continue; }
+        if (budget <= 0) { more = true; continue; }
+        budget--;
+        if (s_pw_given.load() >= kNPowers) s_pw_regiven++;   /* all given once already: the game took it back */
+        set_power(ctx, p, nw);
+        const uint32_t w = vm_read32(kPowerWords + 4u * (uint32_t)p);
+        owned += (w & 7u) == 7u && !(w & 0x10u);
+        gave++;
+    }
+    if (more) s_pw_next = 0.0;                      /* the rest next frame */
+    s_pw_owned.store(owned);
+    if (gave) {
+        s_pw_given.fetch_add(gave);
+        fprintf(stderr, "[cheats] powers: %d made owned this frame, %d of %d owned%s (%lld given again since on)\n",
+                gave, owned, kNPowers, more ? ", more next frame" : "", s_pw_regiven);
+    }
+}
+
+/* Karma powers of both sides: the getter and the karma check answer as the game itself does once both endings
+ * are done (their bypass: G+0x8F0 > 34 with the trophy flags 5 and 6, [0x00B03BC0]+0x35/+0x36): the stored word
+ * as it is / 1. Read-only: nothing is written; off = the karma rules again. On with Unlock all powers too. */
+bool karma_bypass()
+{
+    return g_pw_both.load(std::memory_order_relaxed) || g_pw.load(std::memory_order_relaxed);
+}
+void hook_power_word(struct ppu_context* ctx, ppu_hook_body body)      /* 0x0012D18C(r3 G, r4 power) */
+{
+    const uint32_t g = (uint32_t)ctx->gpr[3];
+    const int32_t p = (int32_t)ctx->gpr[4];
+    ppu_hook_call(ctx, body);
+    if (karma_bypass() && g == kG && p >= 0 && p < kNPowers)
+        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)vm_read32(kPowerWords + 4u * (uint32_t)p);
+}
+void hook_power_karma_ok(struct ppu_context* ctx, ppu_hook_body body)  /* 0x0012D6C8(r3 G, r4 power) */
+{
+    ppu_hook_call(ctx, body);
+    if (karma_bypass()) ctx->gpr[3] = 1;
+}
+
+/* t:powerdump=1 (tests): each power the skill defines, with its word and the karma rank it needs, and the first
+ * words of its definition (to tell the powers apart in a run: their names live in the game's data). */
+void power_dump(struct ppu_context* ctx, uint32_t c)
+{
+    const uint32_t skill = hero_powers(ctx, c);
+    fprintf(stderr, "[cheats] powerdump: Cole %08X skill %08X\n", c, skill);
+    for (int p = 0; skill && p < kNPowers; p++) {
+        const uint32_t def = vm_read32(skill + kSkillPowerDefs + 4u * p);
+        const int32_t req = (int32_t)vm_read32(kPowerKarmaReq + 4u * p);
+        char words[200] = "";
+        size_t n = 0;
+        for (uint32_t o = 0; gptr(def) && o < 0x30 && n < sizeof words - 10; o += 4)
+            n += (size_t)snprintf(words + n, sizeof words - n, " %08X", vm_read32(def + o));
+        fprintf(stderr, "[cheats] powerdump %02X: word %08X karma %s def %08X%s\n", p, vm_read32(kPowerWords + 4u * p),
+                req >= 0 && req < kRanks ? kRankName[req] : "?", def, words);
+    }
+}
+
+/* ---- L_'s RPCS3 patches, re-made as hooks (2026-11-11; NOTES.md "L_'s patches") ----------------------
+ * Black lightning: L_'s patch turns the `bl SubmitDraws` at 0x002CFA3C (the electric arc renderer
+ * 0x002CF8F0) into a call of his code cave, which checks [[r3+0x14]+0x11C] == 0, [0x00A80104] != 0,
+ * G = Resolve([0x00A80104]) != 0 and [G+0x60] > 0, and then calls SubmitDraws with r5 = [G+0x60],
+ * r6 = [G+0x5C], r7 = [0x00A80104] (r3, r4, r8, r9 as they were), else with every register as it was: the
+ * arc is drawn with the variants of the shader the level names as EVIL_LIGHTNING_SHADER instead of its own.
+ * Here: the hook on SubmitDraws does the same for that call site only (lr), before the game's body; the
+ * Resolve call runs on a copy of the registers (the cave's own call clobbered the volatile ones, which
+ * SubmitDraws does not read), so any guest thread may run it. */
+void hook_arc_draw(struct ppu_context* ctx, ppu_hook_body body)
+{
+    if (g_black.load(std::memory_order_relaxed) && (uint32_t)ctx->lr == kLrArcSite) {
+        s_bl_calls.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t def = vm_read32((uint32_t)ctx->gpr[3] + 0x14);
+        const uint32_t ref = vm_read32(kEvilShaderRef);
+        if (gptr(def) && vm_read32(def + kDefNoSwap) == 0 && gptr(ref)) {
+            ppu_context x;
+            memcpy(&x, ctx, sizeof x);
+            x.gpr[3] = ref;
+            ppu_hook_call(&x, func_002F96AC);                               /* Resolve(ref) */
+            const uint32_t g = (uint32_t)x.gpr[3];
+            if (gptr(g)) {
+                const int32_t n = (int32_t)vm_read32(g + 0x60);
+                if (n > 0) {
+                    ctx->gpr[5] = (uint32_t)n;
+                    ctx->gpr[6] = vm_read32(g + 0x5C);
+                    ctx->gpr[7] = ref;
+                    s_bl_swaps.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+    }
+    ppu_hook_call(ctx, body);
+}
+
+/* Cole's thruster upgrades, from his jump/fall controller (the page says whether the save has them). */
+void thr_seen(uint32_t a)
+{
+    const int t = vm_read8(a + kAUp3) ? 3 : vm_read8(a + kAUp2) ? 2 : vm_read8(a + kAUp1) ? 1 : 0;
+    s_thr_tier.store(t, std::memory_order_relaxed);
+}
+bool cole_float(uint32_t a)   /* A is Cole's controller, in the air (Fall) and gliding (Float) */
+{
+    if (!gptr(a)) return false;
+    const uint32_t c = player();
+    if (!c || vm_read32(a + kAOwner) != c) return false;
+    thr_seen(a);
+    return vm_read32(a + kAJumpState) == kJumpFall && vm_read32(a + kAFallState) == kFallFloat;
+}
+
+/* Static Thrusters - Fast: L_'s patch replaces the 1350.0 the game returns at 0x0019B2EC (first upgrade,
+ * gliding for over 0.5 s) by 2000.0. Here: after the game's body, the same test as the body's (same data,
+ * same single-precision arithmetic), and in that case f1 = the chosen speed. Cole only (the patch changed the
+ * constant for every character). */
+constexpr float kFastSpeed[] = { 0.0f, 2000.0f, 3000.0f };
+void hook_thrust_speed(struct ppu_context* ctx, ppu_hook_body body)
+{
+    const uint32_t a = (uint32_t)ctx->gpr[3];
+    const uint32_t kc = vm_read32((uint32_t)ctx->gpr[2] - 0x7D28);   /* the body's r30: its constants */
+    ppu_hook_call(ctx, body);
+    const int k = g_tfast.load(std::memory_order_relaxed);
+    if (k <= 0 || k >= (int)(sizeof kFastSpeed / sizeof kFastSpeed[0]) || !gptr(kc) || !cole_float(a)) return;
+    if (!vm_read8(a + kAUp1)) return;
+    const uint32_t clk = vm_read32(kc - 0x7FF0);                       /* 0x00A2C500 */
+    if (!gptr(clk)) return;
+    const float secs = (float)(double)(int32_t)(vm_read32(clk + 4) - vm_read32(a + kAFallSince)) * rdf(kc - 0x7FDC);
+    if (!(secs > 0.5f)) return;
+    ctx->fpr[1] = (double)kFastSpeed[k];
+    s_fast_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+/* Static Thrusters - Flight: L_'s patch replaces the splat(-1000.0) floor at 0x0019B388 (top upgrade,
+ * gliding) by a vector from pad 0's held buttons: Cross (0, 600 up) x4, else Circle (-1200 down) x4, else
+ * (5.5, 0, 0, 0) (hover). Here: after the game's body, in that same case, the same vector (the speeds by the
+ * choice) into v2 -- vector registers hold the guest's big-endian bytes. Cole only. */
+struct FlySpeeds { float up, down; };
+constexpr FlySpeeds kFly[] = { { 0.0f, 0.0f }, { 600.0f, -1200.0f }, { 1200.0f, -2400.0f } };
+constexpr float kHover = 5.5f;
+void put_vr(ppu_vr* v, float x, float y, float z, float w)
+{
+    const float f[4] = { x, y, z, w };
+    for (int i = 0; i < 4; i++) { uint32_t u; memcpy(&u, &f[i], 4); v->w[i] = __builtin_bswap32(u); }
+}
+void hook_thrust_floor(struct ppu_context* ctx, ppu_hook_body body)
+{
+    const uint32_t a = (uint32_t)ctx->gpr[3];
+    ppu_hook_call(ctx, body);
+    const int k = g_tfly.load(std::memory_order_relaxed);
+    if (k <= 0 || k >= (int)(sizeof kFly / sizeof kFly[0]) || !cole_float(a) || !vm_read8(a + kAUp3)) return;
+    const uint32_t pad = vm_read32(kPadPtr);
+    const uint32_t held = gptr(pad) ? vm_read32(pad + kPadHeld) : 0;
+    if (held & kBtnCross) { const float u = kFly[k].up; put_vr(&ctx->vr[2], u, u, u, u); }
+    else if (held & kBtnCircle) { const float d = kFly[k].down; put_vr(&ctx->vr[2], d, d, d, d); }
+    else put_vr(&ctx->vr[2], kHover, 0.0f, 0.0f, 0.0f);
+    s_fly_frames.fetch_add(1, std::memory_order_relaxed);
 }
 
 /* SetHealth: with Invincibility Cole's health never goes down (healing still works). */
@@ -1143,10 +1494,18 @@ void spots_refresh()
 /* Which hooks are needed now: each is set only while a cheat (or a test knob) uses it. */
 void hooks_update()
 {
-    const bool tick = g_god || g_energy || g_xp_pending.load() != 0 || g_refill || s_probe || s_timeline ||
+    const bool tick = g_god || g_energy || g_ionic || g_xp_pending.load() != 0 || g_refill || s_probe || s_timeline ||
                       !s_env_done || g_karma_add.load() != 0 || g_recompute || s_snap_left > 0 ||
-                      g_tp_pending.load() != 0 || s_settle_on.load();
+                      g_tp_pending.load() != 0 || s_settle_on.load() || g_krank_pending.load() != 0 ||
+                      g_pw.load() != 0 || s_pw_slots.load() != 0;
     ppu_hook_set(kFnColeUpdate, tick ? hook_cole_update : nullptr);
+    /* Unlock all powers: Karma powers of both sides (read-only hooks, set only while on) */
+    ppu_hook_set(kFnPowerWord, (g_pw_both || g_pw) ? hook_power_word : nullptr);
+    ppu_hook_set(kFnPowerKarmaOk, (g_pw_both || g_pw) ? hook_power_karma_ok : nullptr);
+    /* L_'s patches: set only while switched on */
+    ppu_hook_set(kFnArcDraw, g_black ? hook_arc_draw : nullptr);
+    ppu_hook_set(kFnThrustSpeed, g_tfast ? hook_thrust_speed : nullptr);
+    ppu_hook_set(kFnThrustFloor, g_tfly ? hook_thrust_floor : nullptr);
     ppu_hook_set(kFnSetHealth, g_god ? hook_set_health : nullptr);
     ppu_hook_set(kFnTakeDamage, (g_onehit || s_probe) ? hook_take_damage : nullptr);
     ppu_hook_set(kFnAddKarma, (g_kside || g_kmult > 1 || g_kxp > 0) ? hook_add_karma : nullptr);
@@ -1163,6 +1522,7 @@ void hooks_update()
 /* ---- the menu's cheats --------------------------------------------------------------- */
 int apply_god(ps3_cheat* c)    { g_god = c->value != 0.0; if (g_god) g_refill = 1; hooks_update(); return 1; }
 int apply_energy(ps3_cheat* c) { g_energy = c->value != 0.0; hooks_update(); return 1; }
+int apply_ionic(ps3_cheat* c)  { g_ionic = c->value != 0.0; hooks_update(); return 1; }
 int apply_onehit(ps3_cheat* c) { g_onehit = c->value != 0.0; hooks_update(); return 1; }
 int apply_jump(ps3_cheat* c)   { ppu_patch_set(SLOT_JUMP, (int)c->value); return ppu_patch_lifted(SLOT_JUMP); }
 int apply_speed(ps3_cheat* c)  { ppu_patch_set(SLOT_NPC_SPEED, (int)c->value); return ppu_patch_lifted(SLOT_NPC_SPEED); }
@@ -1194,6 +1554,51 @@ int apply_maxbat(ps3_cheat* c)
     hooks_update();
     return 1;
 }
+/* Karma rank (menu thread): the list runs Hero (top) .. Infamous, i.e. entry i = the game's rank 6 - i.
+ * Nothing changes now: Cole's next update after the menu has closed sets it (krank_tick). */
+int apply_krank(ps3_cheat* c)
+{
+    const int rank = kRanks - 1 - (int)c->value;
+    const uint32_t cole = player();
+    if (!cole || rank < 0 || rank >= kRanks) { g_krank_pending.store(0); hooks_update(); return 0; }
+    if (rank == rank_of(rdf(kKarma))) { g_krank_pending.store(0); hooks_update(); return 1; }   /* already there */
+    s_krank_cole.store(cole, std::memory_order_relaxed);
+    g_krank_want.store(rank, std::memory_order_relaxed);
+    g_krank_pending.store(1, std::memory_order_release);
+    hooks_update();
+    return 1;
+}
+int apply_black(ps3_cheat* c) { g_black = c->value != 0.0; s_bl_swaps = 0; s_bl_calls = 0; hooks_update(); return ppu_hook_exists(kFnArcDraw) ? 1 : 0; }
+int apply_tfly(ps3_cheat* c)
+{
+    const int k = (int)c->value;
+    g_tfly = k > 0 && k < (int)(sizeof kFly / sizeof kFly[0]) ? k : 0;
+    hooks_update();
+    return ppu_hook_exists(kFnThrustFloor) ? 1 : 0;
+}
+int apply_tfast(ps3_cheat* c)
+{
+    const int k = (int)c->value;
+    g_tfast = k > 0 && k < (int)(sizeof kFastSpeed / sizeof kFastSpeed[0]) ? k : 0;
+    hooks_update();
+    return ppu_hook_exists(kFnThrustSpeed) ? 1 : 0;
+}
+/* Unlock all powers (menu thread): Cole's next update does the work (power_tick). Off takes nothing away. */
+int apply_pw(ps3_cheat* c)
+{
+    g_pw = c->value != 0.0;
+    s_pw_kick.store(1);
+    s_pw_slots.store(1);            /* the karma bypass comes and goes with it: the game's slot check once */
+    hooks_update();
+    return ppu_hook_exists(kFnColeUpdate) ? 1 : 0;
+}
+int apply_pwboth(ps3_cheat* c)
+{
+    g_pw_both = c->value != 0.0;
+    s_pw_slots.store(1);            /* the game's slot check once: an empty slot may take a power usable now */
+    hooks_update();
+    return ppu_hook_exists(kFnPowerWord) && ppu_hook_exists(kFnPowerKarmaOk) ? 1 : 0;
+}
 
 const char* const kKarmaSide[] = { "Off", "Hero (blue) only", "Infamous (red) only" };
 const char* const kJump[] = { "Normal", "2x higher", "3x higher", "5x higher", "10x higher" };
@@ -1205,6 +1610,8 @@ ps3_cheat s_god = { "god", "Invincibility",
     "die, such as deep water, switch it off.", "Cole", PS3_CHEAT_TOGGLE, apply_god };
 ps3_cheat s_energy = { "energy", "Infinite energy",
     "Electricity refills every frame: use any power as often as you like.", "Cole", PS3_CHEAT_TOGGLE, apply_energy };
+char s_ionic_help[600];
+ps3_cheat s_ionic = { "ionic", "Infinite ionic charges", s_ionic_help, "Cole", PS3_CHEAT_TOGGLE, apply_ionic };
 ps3_cheat s_jump = { "jump", "Super jump", "How high Cole jumps.", "Cole", PS3_CHEAT_CHOICE, apply_jump,
     0, 0, 0, NULL, kJump, 5 };
 ps3_cheat s_glide = { "glide", "Longer glide",
@@ -1236,11 +1643,130 @@ ps3_cheat s_kblue = { "karmablue", "hero karma", NULL, "Karma", PS3_CHEAT_ACTION
 ps3_cheat s_kred = { "karmared", "infamous karma", NULL, "Karma", PS3_CHEAT_ACTION, apply_kred,
     500, 50, 2500, "%d", NULL, 0, "Add infamous karma (red)", PS3_CHEAT_SAVES };
 
+/* Karma rank: the game's 7 ranks, top hero to top infamous (entry i = game rank 6 - i), with their ranges. */
+const char* const kRankChoices[kRanks] = {
+    "Hero (karma 2500 to 3200)", "Champion (1000 to 2500)", "Guardian (1 to 1000)", "Neutral (-1 to 1)",
+    "Thug (-1 to -1000)", "Outlaw (-1000 to -2500)", "Infamous (-2500 to -3200)" };
+char s_krank_help[600];
+ps3_cheat s_krank = { "karmarank", "Karma rank", s_krank_help, "Karma", PS3_CHEAT_CHOICE, apply_krank,
+    6 - kRankNeutral, 0, 0, NULL, kRankChoices, kRanks, NULL, PS3_CHEAT_SAVES | PS3_CHEAT_NO_REMEMBER };
+
+/* L_'s patches */
+const char* const kFlyChoices[] = { "Off", "On (climb 600, dive 1200: L_'s)", "Faster (climb 1200, dive 2400)" };
+const char* const kFastChoices[] = { "Off (the game's own)", "2000 (L_'s)", "3000" };
+char s_black_help[700], s_fly_help[900], s_fast_help[700];
+ps3_cheat s_black = { "blacklight", "Black lightning", s_black_help, "Lightning and Static Thrusters (patches by L_)",
+    PS3_CHEAT_TOGGLE, apply_black };
+ps3_cheat s_tfly = { "thrustfly", "Static Thrusters flight", s_fly_help, "Lightning and Static Thrusters (patches by L_)",
+    PS3_CHEAT_CHOICE, apply_tfly, 0, 0, 0, NULL, kFlyChoices, 3 };
+ps3_cheat s_tfast = { "thrustfast", "Static Thrusters speed", s_fast_help, "Lightning and Static Thrusters (patches by L_)",
+    PS3_CHEAT_CHOICE, apply_tfast, 0, 0, 0, NULL, kFastChoices, 3 };
+
+/* Unlock all powers: never remembered (it changes the save that is loaded: switched on by hand, in that save) */
+char s_pw_help[1200], s_pwboth_help[700];
+ps3_cheat s_pw = { "allpowers", "Unlock all powers", s_pw_help, "Powers", PS3_CHEAT_TOGGLE, apply_pw,
+    0, 0, 0, NULL, NULL, 0, NULL, PS3_CHEAT_SAVES | PS3_CHEAT_NO_REMEMBER };
+ps3_cheat s_pwboth = { "bothkarma", "Karma powers of both sides", s_pwboth_help, "Powers", PS3_CHEAT_TOGGLE,
+    apply_pwboth };
+
+const char* thr_tier_text()
+{
+    switch (s_thr_tier.load(std::memory_order_relaxed)) {
+    case 0: return "Seen on the last glide: this save has no Static Thrusters upgrade.";
+    case 1: return "Seen on the last glide: this save has the first Static Thrusters upgrade (power 0x4A).";
+    case 2: return "Seen on the last glide: this save has the first two Static Thrusters upgrades (powers 0x4A, 0x4B).";
+    case 3: return "Seen on the last glide: this save has every Static Thrusters upgrade (powers 0x4A-0x4C).";
+    default: return "Upgrades not seen yet: switch this on and glide once, then this line says what the save has.";
+    }
+}
+
+/* The page's status lines (menu thread, before each draw; guest reads only). */
+void l_texts()
+{
+    if (!vm_base) return;                       /* the window can open before guest memory exists: keep the texts */
+    const uint32_t ref = vm_read32(kEvilShaderRef);
+    const long long sw = s_bl_swaps.load(), calls = s_bl_calls.load();
+    snprintf(s_black_help, sizeof s_black_help,
+             "Electric arcs are drawn with the shader the game keeps for evil lightning (all its variants) instead of "
+             "their own: L_'s \"Black Lightning\", made for evil (infamous) karma. The code itself does not look at "
+             "karma; it needs the game to have that shader set (the line below says). Patch by L_ (RPCS3), re-made "
+             "for the port.\nNow: the game's evil-lightning shader is %s%s",
+             gptr(ref) ? "set" : "NOT set (nothing changes until the game sets it)",
+             !g_black ? "." : sw ? "; arcs redrawn with it since switching on." : calls ? "; arcs seen, none redrawn yet." :
+                                                                           "; no arc drawn yet since switching on.");
+    snprintf(s_fly_help, sizeof s_fly_help,
+             "While gliding (hold R1 in the air): hold Cross to climb, Circle to dive, neither to hover. Needs the game's "
+             "Improved Static Thrusters upgrade (L_'s name; in the code the last of the three thrusters upgrades, power "
+             "0x4C): without it nothing changes and the glide is the game's own. Circle in the air may also start the game's drop attack. Patch by L_ "
+             "(RPCS3), re-made for the port.\n%s", thr_tier_text());
+    snprintf(s_fast_help, sizeof s_fast_help,
+             "Half a second into a glide Cole flies forward at this speed instead of the game's 1350 (upgraded "
+             "thrusters). Needs a Static "
+             "Thrusters upgrade (any of them, power 0x4A or later): without one nothing changes. Patch by L_ (RPCS3, "
+             "2000), re-made for the port.\n%s", thr_tier_text());
+    /* karma rank: the current one (unless a pick waits), the pick, the values */
+    const float k = rdf(kKarma);
+    const int now = rank_of(k);
+    const bool pend = g_krank_pending.load(std::memory_order_acquire) != 0;
+    if (!pend) s_krank.value = kRanks - 1 - now;
+    const int want = pend ? g_krank_want.load() : now;
+    char pick[200] = "";
+    if (pend) snprintf(pick, sizeof pick, "Changes to %s (karma %.0f) when you close the menu.\n", kRankName[want],
+                       (double)kRankKarma[want]);
+    snprintf(s_krank_help, sizeof s_krank_help,
+             "%sNow: %s (karma %.0f). Picking a rank sets karma to the middle of it (Hero 2850, Champion 1750, Guardian "
+             "500, Neutral 0, Thug -500, Outlaw -1750, Infamous -2850) through the game's own karma setter when you "
+             "close the menu, so the karma meter, the rank screen and Cole's look follow. The change is real: the game "
+             "writes it into your save the next time it saves. Karma lock does not block it.",
+             pick, kRankName[now], (double)k);
+}
+
+/* Unlock all powers: the page's texts (menu thread; guest reads only). */
+void pw_texts()
+{
+    char now[200] = "";
+    if (vm_base && player()) {
+        int owned = 0;
+        for (int p = 0; p < kNPowers; p++) {
+            const uint32_t w = vm_read32(kPowerWords + 4u * (uint32_t)p);
+            owned += (w & 7u) == 7u && !(w & 0x10u);
+        }
+        snprintf(now, sizeof now, "\nNow: %d of the game's %d power numbers owned.", owned, kNPowers);
+    }
+    snprintf(s_pw_help, sizeof s_pw_help,
+             "Every power in the game is Cole's: bought, unlocked and not switched off by a mission, through the game's "
+             "own power code, so the Powers menu and the power wheel show them at once. Karma does not matter while "
+             "this is on (hero and evil powers together). It checks again every second, so the story cannot take "
+             "them back. Off stops that and takes nothing away.\n"
+             "PERMANENT: the game writes the powers into the save that is loaded the next time it saves. A mission "
+             "that rewards a power may not count your progress while you already own it (bungholio saw it with the "
+             "Pincer Bolt).%s", now);
+    snprintf(s_pwboth_help, sizeof s_pwboth_help,
+             "Hero and evil karma powers work together, at any karma: the game's own rule once both endings are done "
+             "(its power code skips the karma checks then). Nothing is written to the save; off = the karma rules "
+             "again. Unlock all powers does this too while it is on.%s",
+             ppu_hook_exists(kFnPowerWord) ? "" : "\nThis build lacks its two hook slots (a new lift is needed).");
+}
+
+/* Infinite ionic charges: the page's text (menu thread; guest reads only). */
+void ionic_text()
+{
+    char now[120] = "";
+    if (const uint32_t c = vm_base ? player() : 0)
+        snprintf(now, sizeof now, "\nNow: %d of %d.", (int32_t)vm_read32(kIonicCount), (int32_t)vm_read32(c + kColeIonicMax));
+    snprintf(s_ionic_help, sizeof s_ionic_help,
+             "Cole always has 3 ionic charges, the game's most, whether or not the story has given him any yet: they "
+             "refill the moment one is used, so the Ionic powers fire as often as you like (they also need the Ionic "
+             "powers themselves: Unlock all powers). The game saves the count.%s", now);
+}
+
 void refresh()
 {
     const char* lift = "needs the cheats lift";
     s_god.unavailable    = ppu_hook_exists(kFnSetHealth) && ppu_hook_exists(kFnColeUpdate) ? NULL : lift;
     s_energy.unavailable = ppu_hook_exists(kFnColeUpdate) ? NULL : lift;
+    s_ionic.unavailable  = ppu_hook_exists(kFnColeUpdate) ? NULL : lift;
+    ionic_text();
     s_onehit.unavailable = ppu_hook_exists(kFnTakeDamage) ? NULL : lift;
     s_jump.unavailable   = ppu_patch_lifted(SLOT_JUMP) ? NULL : lift;
     s_glide.unavailable  = ppu_hook_exists(kFnUpdateGravity) ? NULL : lift;
@@ -1252,6 +1778,17 @@ void refresh()
     s_kside.unavailable = s_kmult.unavailable = s_kxp.unavailable = k;
     s_kblue.unavailable = s_kred.unavailable = ppu_hook_exists(kFnColeUpdate) ? NULL : lift;
     s_spotgo.unavailable = ppu_hook_exists(kFnColeUpdate) ? NULL : lift;   /* Save this spot only reads memory */
+    s_krank.unavailable = !ppu_hook_exists(kFnColeUpdate) ? lift : (vm_base && player()) ? NULL : "only while playing";
+    s_black.unavailable = ppu_hook_exists(kFnArcDraw) ? NULL : lift;
+    s_tfly.unavailable  = ppu_hook_exists(kFnThrustFloor) ? NULL : lift;
+    s_tfast.unavailable = ppu_hook_exists(kFnThrustSpeed) ? NULL : lift;
+    /* Unlock all powers: in play only (so it is never switched on at the title for whatever save loads next) */
+    const bool playing = vm_base && player();
+    s_pw.unavailable = !ppu_hook_exists(kFnColeUpdate) ? lift : (playing || g_pw.load()) ? NULL : "only while playing";
+    s_pwboth.unavailable = ppu_hook_exists(kFnPowerWord) && ppu_hook_exists(kFnPowerKarmaOk) ? NULL :
+                           "needs a new cheats lift (two hook slots)";
+    l_texts();
+    pw_texts();
     spots_refresh();
 }
 
@@ -1324,6 +1861,7 @@ void timeline_poll(struct ppu_context* ctx, uint32_t c)
             fprintf(stderr, "[mouse] mode %s (turns so far %lld in %lld camera frames)\n", e.v != 0.0 ? "direct" : "stick",
                     s_mt_turns.load(), s_mt_frames.load());
         }
+        else if (!strcmp(e.id, "powerdump")) power_dump(ctx, c);   /* the powers, one line each */
         else if (!strcmp(e.id, "drain")) {          /* energy as if spent (tests the refill) */
             wrf(c + kEnergy, (float)e.v);
             fprintf(stderr, "[cheats] drain: energy set to %g\n", rdf(c + kEnergy));
@@ -1432,8 +1970,10 @@ void probe_tick(uint32_t c)
 struct Init {
     Init()
     {
-        ps3_cheat* all[] = { &s_god, &s_energy, &s_maxbat, &s_jump, &s_glide, &s_onehit, &s_speed, &s_noattack, &s_xpc,
-                             &s_kside, &s_kmult, &s_kxp, &s_kblue, &s_kred, &s_spot, &s_spotgo, &s_spotsave };
+        ps3_cheat* all[] = { &s_god, &s_energy, &s_ionic, &s_maxbat, &s_jump, &s_glide, &s_onehit, &s_speed, &s_noattack, &s_xpc,
+                             &s_pw, &s_pwboth,
+                             &s_krank, &s_kside, &s_kmult, &s_kxp, &s_kblue, &s_kred,
+                             &s_black, &s_tfly, &s_tfast, &s_spot, &s_spotgo, &s_spotsave };
         for (ps3_cheat* c : all) ps3_cheat_register(c);
         spots_path_init();                    /* saved spots: the file (or the seeds), read once here */
         {
@@ -1441,8 +1981,9 @@ struct Init {
             spots_load_locked();
             spots_texts_locked();
         }
-        ps3_cheats_set_note("XP and karma changed here are real: the game writes them into your save the next "
-                            "time it saves. Copy your saves first if you want to keep a clean game.");
+        ps3_cheats_set_note("XP, karma and powers changed here are real: the game writes them into your save the next "
+                            "time it saves. Copy your saves first (or play in a New Save Data slot) if you want to "
+                            "keep a clean game.");
         ps3_cheats_set_refresh(refresh);
         if (const char* e = getenv("PS3_CHEATS_XP")) s_xp = (uint32_t)strtoul(e, nullptr, 16);
         s_onehit_any = getenv("PS3_CHEATS_ONEHIT_ANY") && atoi(getenv("PS3_CHEATS_ONEHIT_ANY")) != 0;

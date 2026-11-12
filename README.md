@@ -101,9 +101,13 @@ own game's textures, so none are included.
 F2 → Cheats:
 - **Invincibility**, **infinite energy**, **max battery**
 - **super jump** (2× to 10×)
+- **karma rank**: pick any of the game's seven ranks (Hero to Infamous) and karma is set inside it when you close the menu, through the game's own karma setter
 - **karma lock** (blue/red only), a karma multiplier, **XP for karma**, *Add karma* / *Add XP* buttons
+- **unlock all powers**: every power in the game is Cole's at once (rockets, Kinetic Pulse, the Ionic powers, every upgrade, hero and evil together), through the game's own power code, and the story can't take them back while it's on; *karma powers of both sides* alone lets hero and evil karma powers work together. The game saves the powers: try it in a New Save Data slot
+- **infinite ionic charges**: Cole always has 3, the game's most, and they refill the moment one is used
 - **one-hit kills**, enemy speed, enemies hold fire
 - **longer glide**: Cole sinks more slowly while gliding (R1, the Static Thrusters), so a glide lasts up to 3× as long and goes further
+- L_'s patches, re-made for the port: **black lightning** (electric arcs drawn with the game's evil-lightning shader), **Static Thrusters flight** (while gliding, Cross climbs, Circle dives, neither hovers; needs the Improved Static Thrusters upgrade) and a faster glide
 - **saved spots**: *Save this spot* remembers where Cole stands, which way he faces and the camera; *Go to saved spot* (or **F7**, menu open or closed) puts him back there, through the game's own placing code (two places in New Marais come with it)
 
 Cheats can be remembered between sessions, with a short reminder at start.
@@ -341,7 +345,11 @@ This port stands on other people's work:
   freeze fix, and the idea of giving the game's Edge geometry code the real picture size (MIT).
 - **bungholio** and the [ArtemisPS3](https://github.com/bucanero/ArtemisPS3) cheat-code collection: three of the
   cheats (jump height, AI speed, enemies hold fire) are their codes for this exact game version, turned into
-  menu switches, and their "Hold L2 + X To Fly" code led us to the game's glide physics (see `cheats/NOTES.md`).
+  menu switches, their "Hold L2 + X To Fly" code led us to the game's glide physics, and their "Have All Powers" and
+  "Can Use All Powers" codes to the game's power state (see `cheats/NOTES.md`).
+- **L_**: the RPCS3 patches "Black Lightning", "Static Thrusters - Flight" and "Static Thrusters - Fast" for this
+  exact game version. On the port they are re-made as run-time hooks with the same effect (F2 → Cheats; how in
+  `cheats/NOTES.md`).
 - **tiffsomniac**: the **inFAMOUS Mod Manager** and its mod format (whole files, texture and xpps patches,
   options). The port reads these mods as they are (F2 → Mods); its own code, written from the format.
 - **Yahfz**: the RPCS3 community patch "Disable Mesh Trimming" (one instruction word in the game's Edge

@@ -17,7 +17,15 @@ BCUS98125/BCES01229 1.04, NPUA80638/NPEA00318 1.03). Gitignored: never commit or
   Infinite HP ([0x9E8D20]+0x7BC/0x7C0), Infinite Energy (+0x1F34..0x1F3C). Not our build
   (that list's sites do not match even our EU 1.01 disc ELF), but the layout guided the 1.04
   search: same fields, +0x30 later in 1.04.
+- **bungholio** -- the US 1.00 list "inFamous 2 BCUS98125 v01.00 av01.00 & v02.00 av01.00.ncl": "Have All
+  Powers" (stores 7 into every power word from the getter; his note on the Pincer Bolt mission) and "Can Use
+  All Powers" (the karma checks; three of its four AoBs match our 0x0012D220, 0x001302AC, 0x0016D1CC) were the
+  leads for Unlock all powers (section "Powers"); the cheat itself is written from the game's code.
 - No NetCheat/CCAPI/Cheat Engine tables for inFAMOUS 2 were found (searched 2026-11-09).
+- **L_** -- RPCS3 patches for PPU-41a7d047 (= this EBOOT): "Black Lightning", "Static Thrusters - Flight
+  (Requires Improved Static Thrusters)", "Static Thrusters - Fast" (and "Expand pack buffer", not used: the
+  author says it is not needed). Each injects PPU code into a code cave; on this static lift that does nothing,
+  so each is re-made as a run-time hook with the same effect (section "L_'s patches" below).
 
 ## Own findings (static, capstone on eboot\EBOOT_upd104.elf; tools in this folder)
 
@@ -386,3 +394,240 @@ Log lines: "[cheats] spot: ..." (from / to / now, re-placements, camera turn end
 Not checked in a game: everything above (Sami tests). Things to watch: Cole snapping back (would mean
 another state holds the position), a camera that does not turn (camera not in player control), a fall
 through the city at a far spot (the guard's lines).
+
+## L_'s patches: Black lightning, Static Thrusters flight and speed (2026-11-11, inf2-cheats; static only, NOT run)
+
+Source: an RPCS3 patch file by **L_** ("RPCS3 patches for black lightning on evil karma, and the static thrusters
+flight"), anchor PPU-41a7d047c573c78c0307506c9d1b52d15a66e4f5 = our EBOOT. The caves (0x0075FA50.., 0x0075FC00..,
+0x0075FD00..) lie in zero padding after the code (0x00742E18) in the first segment. Decoded with capstone
+(work\cheats\ppcdis.py) and IDA 9.3 batch (work\blacklight: dec.py / xr.py / scanw.py / stb.py, d_*.txt, xr_*.txt);
+the lifted bodies in work\port-m23\recompiled agree. No game run (Sami tests).
+
+### Black lightning
+
+- The patch: 0x002CFA3C `bl 0x002BB874` -> `bl 0x0075FD00`. The cave saves r3..r9 and LR (frame 0xB0), then:
+  [[r3+0x14]+0x11C] == 0, r3' = [0x00A80104] != 0, G = 0x002F96AC(r3') != 0, [G+0x60] > 0 (signed) -> calls
+  0x002BB874 with r5 = [G+0x60], r6 = [G+0x5C], r7 = [0x00A80104], r3/r4/r8/r9 restored; any test failing -> calls
+  it with r3..r9 restored. The lead's decode was right.
+- 0x002BB874 = SubmitDraws(r3 renderer, r4 pass, r5 n, r6 -> n shader variants, r7 shader reference, r8 the
+  instance, r9 -> its bounds): a visibility test of the bounds (0x00482D74 on pass+0x890), then for each variant
+  the pass's vtable +0x68 draw (renderer, variant, 0, r7, 0, instance, 0). It reads r3..r9 only (not r10, which the
+  cave does not keep). Four renderers call it: 0x002CD590, 0x002CF8F0, 0x002D4D20, 0x002D6FEC.
+- 0x002CF8F0 (vtable word 0x009BCAE0) walks a list of items (renderer+0x148, next at +0x190), each with two
+  points (item+0x00 and item+0x0C: an arc from one point to the other), and draws each with ONE variant,
+  table[def+0x124] (table = [K]+0x2F40 of all shader variants), and the reference def+0x120 (def = [renderer+0x14])
+  -- the electric arc renderer. def+0x11C is a flag of that definition (meaning not found): set = the patch
+  leaves those arcs alone.
+- 0x002F96AC = Resolve(asset reference X): X+0x18 = the cached asset, else looked up from X+0x14 (0x002F9668) and
+  cached. For a shader asset G: G+0x5C -> its variant pointers, G+0x60 how many (0x002BBA5C picks one of them for
+  a reference the same way). So the patch draws each arc with every variant of another shader.
+- 0x00A80104 = that other shader's reference. Code that touches it: only the property setter 0x0049A8B8 (resolves
+  an asset id through the level's asset table, 0x002F975C, stores the reference, marks its owner +0x60), the
+  owner's destructor 0x0049AD44 (clears it) and the getter 0x00499C2C. The script property table (0x0095D7C8..)
+  names it EVIL_LIGHTNING_SHADER: these property entries are read "name, then the fields of the NEXT entry" --
+  the only reading in which both *_PSYS properties get the same type (0x20CD), both *_LIMITS the same (0xA,
+  vector setters), the *_DISTANCE a float, and this global is used as a shader reference as the cave does. (The
+  other reading would call it ELECTRIC_WRAP_SOUND; it is not a sound.) Its neighbours DOF_BLUR_SKY, DESAT_*,
+  EDGE_BLUR_LIMITS, ELECTRIC_ARC_FACTORY, ELECTRIC_WRAP_PSYS/_SOUND, WATER_ELECTRIFY_PSYS look like a level's
+  render/FX settings, so it is most likely set from level data, not from karma: the native code never tests karma
+  around it. L_ titles the file "black lightning on evil karma"; why the look depends on karma (if it does) is
+  not in the native code. The page shows whether the game has it set right now.
+  Side note: the same reading moves the command names by one too: 0x00528944 (the native the saved spots call,
+  func_004AE348 with a matrix) would be MATCH_MATRIX, not MATCH_POSITION_AND_ROTATION. The saved spots were built
+  from the code, not the name: nothing changes for them.
+- Re-made (cheats.cpp hook_arc_draw, hook slot 0x002BB874): only for lr == 0x002CFA40 (that one call), before the
+  game's body, the same four tests and the same r5/r6/r7; Resolve runs on a copy of the registers (any guest
+  thread may run it; the cave's own call clobbered the volatile registers, which SubmitDraws does not read).
+  Off = empty slot.
+
+### Static Thrusters: Flight and Fast
+
+- Thruster upgrades: 0x001A6F10 sets the jump/fall controller's A+0x114/0x115/0x116 from the powers owned
+  (0x0012D2FC): 0x4C -> all three, else 0x4B -> 0x114+0x115, else 0x4A -> 0x114. (Power 0x49 = the Static
+  Thrusters themselves, glide allowed.) In-game names are not in the EBOOT; L_ calls the one Flight needs
+  "Improved Static Thrusters", i.e. power 0x4C, the last of the three.
+- 0x0019B274 (glide forward speed, r3 = A): f1 = A+0x44, but K[-0x7FD4] = 1350.0 when A+0x114, A+0x118 == 2
+  (jump state Fall), A+0x120 == 2 (fall state Float) and (int)(clock - A+0x124) * 1/1440 > 0.5 s (clock =
+  [[K-0x7FF0] = 0x00A2C500]+4, K = [r2-0x7D28] = 0x009ACE5C). Fast: 0x0019B2EC `lfs f1,-0x7FD4(r30)` -> a cave
+  doing `lfs f1, 2000.0` then the same `b 0x0019B298` (return). Callers 0x0019F970, 0x001A370C, 0x001A918C,
+  0x001A9B50 (air movement).
+- 0x0019B350 (glide vertical-speed floor, r3 = A): v2 = 0, but splat([0x007C1370]) = splat(-1000.0) when A+0x116
+  and the same Fall/Float state. The air code eases a fall faster than the floor back to it (0x001A8E7C: v2 != 0
+  and every lane of v2 > the speed's z -> push back; 0x001A8B34 hands it to the integrator 0x0019BE18). Flight:
+  0x0019B388 (`lwz r9,-0x7FC8(r30)`) -> a cave: pad = [0x009A4CC0] (= 0x00A73130, pad 0); if pad != 0 and
+  [pad+0x1C] & 0x20 (Cross) -> v2 = (600 x4) from 0x0075FC20; else & 0x80 (Circle) -> (-1200 x4) from 0x0075FC30;
+  else (5.5, 0, 0, 0) from 0x0075FC10 (not splat: only lane 0); then `b 0x0019B374` (return). So with the top
+  upgrade: Cross = rise at up to 600/s, Circle = sink at up to 1200/s, neither = no falling (hover). Without A+0x116
+  the function returns before the patched word: nothing changes.
+- Re-made (hook slots 0x0019B274, 0x0019B350): after the game's body, the same tests on the same data (the time in
+  the body's single precision), then f1 = the speed / v2 = the vector (vector registers hold the guest's
+  big-endian bytes). Differences from the patch: Cole's controller only ([A+0x1C] == [0x00A6E9E4]; the patch
+  changed every character's), and the speeds are a choice: Flight Off / On (L_'s 600 up, 1200 down) / Faster
+  (1200, 2400); speed Off / 2000 (L_'s) / 3000 (the faster ones are mine, not tested by L_). The hooks also note
+  the upgrade bytes they see, for the page's status line.
+
+| Cheat | How |
+|---|---|
+| Black lightning | hook SubmitDraws 0x002BB874, the arc renderer's call (lr 0x002CFA40) only: L_'s tests, then r5/r6/r7 = the evil-lightning shader's variants, count and reference |
+| Static Thrusters flight | hook 0x0019B350: with the top thrusters upgrade, gliding: v2 = up/down/hover by Cross/Circle (L_'s vectors) |
+| Static Thrusters speed | hook 0x0019B274: with a thrusters upgrade, 0.5 s into a glide: f1 = 2000 (or 3000) instead of 1350 |
+
+Not checked in a game: everything above. To watch: arcs that vanish instead of turning black (a variant the pass
+cannot draw), Flight's Circle starting the drop attack, a glide that does not end (Flight holds Cole up while R1
+is held; letting go of R1 ends Float as before).
+
+## Karma rank (2026-11-11, inf2-cheats; static only, NOT run)
+
+The ranks, from the code (0x0012D0F4: the first of 7 (lo, hi) ranges at 0x00745EC8 = tuning 0x00745CF0 + 0x1D8 that
+holds the karma value, else 3; the karma side 0x0012D4F8 = [0x00745CF0 + 0x210 + 4 x rank] = 0 0 0 1 2 2 2):
+
+| Game index | Rank | Karma range (first match wins) | Side | Value the menu sets |
+|---|---|---|---|---|
+| 6 | Hero | 2500 .. 3200 | good | 2850 |
+| 5 | Champion | 1000 .. 2500 (1000 itself is Guardian) | good | 1750 |
+| 4 | Guardian | 1 .. 1000 (1 itself is Neutral) | good | 500 |
+| 3 | Neutral | -1 .. 1 (and anything outside -3200..3200) | neutral | 0 |
+| 2 | Thug | -1000 .. -1 | evil | -500 |
+| 1 | Outlaw | -2500 .. -1000 | evil | -1750 |
+| 0 | Infamous | -3200 .. -2500 | evil | -2850 |
+
+No stages inside a rank exist in the code: the rank test, the side table and AddKarma's rank-crossing step (at
+least 50 = K[-0x7F44] past the old rank's edge, 0x0012FE64..) all work on these 7 ranges only. The names come from
+the game's text, not the EBOOT; GUARDIAN and THUG were seen on the rank screen in run cheats5 (above).
+
+How a pick is applied: the page only records it ("Changes to X when you close the menu"); Cole's update hook, on
+the first frame with the menu closed (vk_overlay_menu_open() == 0) and the same Cole as at the pick, calls
+**SetKarma 0x0012F6E0** (r3 G = 0x00A64E20, f1 = the value above, r5 reason -1) if Cole's rank is not already that
+one. SetKarma, not AddKarma: it is the game's setter (loads and resets use it, and AddKarma itself ends in it), it
+lands on the exact value, it stores G+0x20 and its trackers +0x24/+0x28, sends the karma-changed event (42) and,
+when the rank changes, the rank-changed event (43) that the game's rank screen and karma look follow. AddKarma
+would scale the change (0x003D911C), clamp it and add its own rank-crossing step, so it cannot hit a chosen value,
+and the Karma lock / multiplier hook sits on it. The pick is not remembered between sessions (NO_REMEMBER) and is
+dropped if another save was loaded in between. While nothing waits, the page shows Cole's current rank (karma
+G+0x20 read on the menu thread). If the game is paused (START) when the menu closes, the change comes when play
+goes on (Cole's update does not run while paused).
+
+For Black lightning's shots: go evil. The cheat's own tests do not read karma; L_ made it for evil karma. Pick
+**Infamous** (the top evil rank) to be sure; the page's "Now:" line says whether the game has the evil-lightning
+shader set.
+
+## Powers: Unlock all powers, Karma powers of both sides (2026-11-12, inf2-cheats; static only, NOT run)
+
+Read in the EBOOT (IDA 9.3 batch on a copy of the database, scripts and outputs in work\powers: dec.sh, xr.sh,
+lsf.py, refl.py, callsites.py, d_*.txt) and in the test saves (work\saves\*\STATE). Sami was recording; no game run.
+
+Where the powers live (proven: code + saves):
+- One word per power in the progress struct G = 0x00A64E20: G+0x40 + 4p, p = 0..95 (the loops 0x0012D364 and
+  0x00393E00 run 96; 0x0038C718 checks p <= 95). The save writes them as they are: STATE +0x24 + 4p (STATE +0x00
+  = G+0x1C: karma -492.5 at STATE +0x04 = G+0x20, XP at STATE +0x14 = G+0x30, as found before). Then G+0x1C0 = 16
+  power slots (the save's FFFFFFFF words), G+0x200 + 64 x slot their candidate lists.
+- Bits (the setters 0x00130BBC / 0x00130B54 / 0x00130AEC / 0x00130A54, each read-modify-write through
+  SetPowerState): 1 unlocked (the story), 2 its requirement met (the stunt counter 0x00058D64 sets it once the
+  count is reached, if 1 is set), 4 bought (the script native 0x0004FC94), 8 forced on / 0x10 forced off (script
+  native 0x0004F9C4 -> 0x00130A54 mode 1 / 0; other = clear both; UGC uses it too, 0x0040CE30), 0x20 "new"
+  (SetPowerState sets it when 1 comes on; script native 0x0004FB74 clears it). Owned = (word & 7) == 7
+  (0x0012D2FC with r5 = 1; with r5 = 0: forced on -> yes, forced off -> no, else (word & 7) == 7). The early test
+  save (first-save) holds 0x27 for its 17 powers (08 0B 0C 0E 17 19 1C 3E 46 48 49 4F 50 53 54 55 56), hitch-save
+  adds 0x29 and has some at 7 (the "new" mark cleared). Community check: bungholio's "Have All Powers" (US 1.00)
+  hooks the same getter (its AoB matches our 0x0012D18C byte for byte) and stores 7 into every word; his note
+  "3 = everything unlocked but not purchased" agrees with 1/2/4.
+- The getter 0x0012D18C(G, p) hides the 1 bit of a karma power whose rank Cole never reached: rank table
+  0x00745CF0 + 4p (int, 3 = none), the karma trackers G+0x24 = lowest karma ever, G+0x28 = highest (SetKarma
+  0x0012F6E0 keeps them with fsel; the saves agree: first-save -492.5 / -500.5 / 0, hitch-save 714 / 0 / 714).
+  0x0012D6C8(G, p) = "usable now": an evil power needs the current rank at or below its rank, a hero one at or
+  above. Both skip the karma test when G+0x8F0 > 34 and the trophy flags 5 and 6 are set (0x003BFA68 on
+  0x00B03BC0: byte +0x30 + k; 0x003BFB0C unlocks trophy k) -- read as "both endings done" (guess: which trophies
+  5/6 are was not looked up).
+- Karma powers (rank table): hero 02 10 25 28 (Hero), 03 0D 1A 2B (Champion), 18 21 2C (Guardian); evil 06 12 23
+  2E (Infamous), 04 0F 1B 2D (Outlaw), 16 24 2F (Thug); every other power needs no rank. The names are not in
+  the EBOOT (the game's data packages hold them): which numbers are Kuo's ice and Nix's fire powers is NOT known.
+  Hard-coded in native code (checked with 0x0012D2FC): 3E 3F 40 41 42 46 48 49 (Static Thrusters) 4A 4B 4C
+  (its upgrades) 4D 4E 4F 50 51 52 53 54 55 56 57 59 5A 5B 5C 5D.
+
+How the game grants (proven: code):
+- SetPowerState 0x001307C4(r3 G, r4 p, r5 word): compares with the getter's word; stores the word (| 0x20 when 1
+  comes on); a power whose 2 comes on without 4 goes to the "can be bought" list G+0x92C4; 0x00130228 re-checks
+  the 16 slots (an equipped power that is no longer usable is swapped for the first usable candidate; an empty
+  slot takes the highest usable power of its slot kind, power def +0x14); 0x0012B274 marks the save changed when
+  bits 0x27 change; event 78 (p, new, old). Every change goes through it: the script natives 0x0004FBF8 ("give":
+  word | 7), 0x0004FCC8 / 0x0004F304 / 0x0004FC94 / 0x0004F9C4 / 0x0004FB08 / 0x0004FB74 (the 0x14-stride native
+  table at 0x009E8148.., names by id only), the stunt counter, and the story.
+- The story: 0x00393E00 (run from 0x00394818 / 0x00394CC8 / 0x00394E60 / 0x00394F40, i.e. whenever a story node
+  changes state) rebuilds every power word as (word & ~mask[p]) | storybits[p]: mask = [[[0x00B03210]+0x2C] + 4p] (0x0038C718),
+  storybits from the nodes' entries. So the bits the story controls (which ones: data, guess = the 1 bit of its
+  powers) are set back from the story at every story step. While Unlock all powers is on, its rescan gives them
+  back within a second.
+- Cole's power definitions: his skill list [Cole+0x378] -> class 406 (0x0030EFF0; 0x00130228 does the same),
+  +0x91C + 4p (0 = no such power; 0x0016C8CC reads +0x14 = slot kind). Written by 0x0017267C / 0x00173020.
+  Guess: every power has one from Cole's setup (the Powers menu lists locked powers too) -- the scan uses them to
+  skip unused numbers; if it finds none, it gives nothing and says so in the log.
+
+Safe "all" (guesses, unless marked):
+- Kuo and Nix at once: no code keeps them apart (no check of one power against another found; the gates are the
+  story bits, the karma rank, the missions' force bits). Karma swings already let a save own hero and evil karma
+  powers (both trackers), usable by the current side; the game's own both-endings mode makes both usable.
+- Missions: bungholio (US 1.00, "Have All Powers"): the mission that gives the Pincer Bolt did not count kills
+  while that power was already bought. Missions that take powers away use the force-off bit, which the cheat
+  never touches (it wins over owned). Unlocking early does not change story nodes (the story writes powers, it
+  does not read them -- seen in 0x00393E00; scripts may, not checked).
+- The save: the words are saved (proven: STATE +0x24). The save list's "Powers: N" (0x001328DC, text 1344) counts
+  owned powers (0x0012D364).
+
+| Cheat | How |
+|---|---|
+| Unlock all powers: Every upgrade | Cole's update hook (no new hook): each second, for each defined power with the 1 bit: word \| 2 \| 4 through SetPowerState (at most 8 a frame) |
+| Unlock all powers: Every power | the same with word \| 7 for every defined power; karma powers stay under the karma rules |
+| Off / a lower choice | per power, the word before the cheat's first change (or, if the game changed it since, only the cheat's bits off), through SetPowerState; record per Cole object (a load starts a new one) |
+| Karma powers of both sides | NEW hook slots 0x0012D18C (returns the stored word) and 0x0012D6C8 (returns 1): the game's own both-endings answer; read-only |
+
+Test knobs: t:powerdump=1 (a line per defined power: word, karma rank, definition words -- to map numbers to
+names in a run), PS3_CHEATS_POWERS_DIRECT=1 (words written directly, then the slot check 0x00130228 and the save
+mark 0x0012B274 once: a fallback if the per-power path floods the screen with messages).
+Not checked in a game: everything above. To watch: a flood of "new power" messages, an ice or fire power that
+draws nothing (its effects not loaded), a mission that does not count (switch it off), the save list's
+"Powers: N" after a save.
+
+## Ionic charges: Infinite ionic charges (2026-11-12, inf2-cheats; static only, NOT run)
+
+Found from bungholio's US 1.00 "Ionic Charges Never Decrease": it patches a 7-word getter (`lwz r30,-0x7D70(r2);
+lwz r9,-0x7FEC(r30); lwz r3,0x38(r9)`) to store and return 3. The same getter with this EBOOT's TOC offset is
+0x001538C4 (`lwz r30,-0x7D68(r2)`; [0x009ABD84-0x7FEC] = 0x00A64E20 = G). (His 1.04 list's version, a nop at
+0x001582F4, is the call of a joint lookup, 0x00324A00 with joint 500/503 from 0x00158284, used for a hand position
+by 0x00174FB0 -- not the charges; not used.)
+- Count: int G+0x38 = 0x00A64E58 (saved: STATE +0x1C; 0 in both test saves). Setter 0x00154CB4(r4 n) ->
+  0x0012B4A4(G, n): store if changed, 0x0012B274 (save changed). AddIonicCharges 0x00154CE8(r3 Cole, r4 delta):
+  clamp(count + delta, 0, Cole+0x2578) -> the setter. Callers: a power's use 0x00154D68 (energy -= cost table
+  Cole+0x1F74+16p +0 (bungholio's "electricity" nop at 0x00154DAC is that store), charges -= its +8), pickups
+  0x00152920 (from 0x00152790, the collector 0x00152BB8, gated by power 0x57's requirement bit 0x0012D438), the
+  script native 0x00524834; the loader/reset 0x003D8AF8 / 0x001D5C34 call 0x0012B4A4 directly.
+- Max: Cole+0x2578, set by RecomputeMaxEnergy 0x00154DB4 = Cole+0x2574 (0 from the constructor 0x0015896C; no
+  other writer in the lift) + 1 each for owned powers 0x57, 0x5B, 0x5C (0x0012D2FC r5 = 0): 0..3. The test saves
+  own none of them -> max 0. Power 0x57 also opens the collecting.
+- 0x001538E0 (a power usable): energy above the floor, or charges > 0, or the power's charge cost 0.
+
+| Cheat | How |
+|---|---|
+| Infinite ionic charges | Cole's update hook (no new hook): count < max -> AddIonicCharges(Cole, max - count); if Cole owns more of 0x57/0x5B/0x5C than the max counts (Unlock all powers gave them), RecomputeMaxEnergy once (at most every 2 s) |
+
+With no ionic upgrade owned the max is 0 and nothing is filled (the page says so); Unlock all powers > Every power
+gives the three, the cheat then has the max recomputed (3) and fills it. Not checked: the HUD's charge display
+(the HUD agent's guess: the purple orb by the karma meter) and whether it shows slots = max.
+
+## v2 after Sami's test (2026-11-12 ~02:15, his run play\20261112-015846; static, NOT run)
+
+What his log showed: "Every power" gave 45 of 45 (the hero-powers skill defines 45 of the 96 numbers; the other 51
+-- among them the hard-coded abilities 0x3E..0x5D such as the thruster upgrades 0x4A-0x4C and the ionic ones
+0x57/0x5B/0x5C, which got no "ionic: max charges" line -- were skipped by that filter); then "Every upgrade" put 32
+back (the lower-choice undo). Ionic: max 0 by the game's rule, so nothing to fill. Sami: "its a cheat why follow
+game logic" -- both changed:
+- Unlock all powers = one switch. On: all 96 words get | 7 and & ~0x10 (the missions' forced-off bit cleared too),
+  through SetPowerState, at most 8 a frame, again every second; the karma bypass hooks (0x0012D18C / 0x0012D6C8)
+  are on with it. Off: nothing more, nothing taken. No levels, no undo, no direct-write knob, no definition filter.
+  Still never remembered and only switched on in play. Clearing 0x10 overrides a mission that switches a power
+  off on purpose (Sami's choice).
+- Infinite ionic charges = forced: every frame Cole+0x2578 = 3 (written) and G+0x38 = 3 (the setter 0x00154CB4,
+  unclamped; a direct write if it did not take). Readers that see it: the scripts' property table entry
+  "CURRENT_HEAVY_MAGIC_POINTS" (getter 0x001538C4, entry 0x00963C94; the game calls ionic charges "heavy magic")
+  and "MAX_HEAVY_MAGIC_POINTS" (field Cole+0x2578, entry 0x00963CC8) -- what a HUD script would read -- the power
+  check 0x001538E0 (fires while the count is above 0, given energy above its floor or a power without an energy
+  cost), AddIonicCharges' clamp, the collector. The ionic powers themselves still have to be owned (Unlock all).

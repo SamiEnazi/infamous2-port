@@ -14,3 +14,11 @@
 00098A00   # [mouse] the aim camera, once a frame while aiming (r3 = aim camera A: +0x254 yaw, +0x258 pitch)
 0008D7C8   # [mouse] stick -> target turn rates (aim assist): only the cameras' manual paths call it
 0019609C   # [mouse] pad vtable +0x38, the camera stick (r4 1 = right; r5/r6 <- x|x|, y|y|, the game's invert)
+002BB874   # [L_] SubmitDraws(r3 renderer, r4 pass, r5 n, r6 -> n shader variants, r7 shader reference, r8 instance,
+           # r9 -> bounds); Black lightning swaps r5/r6/r7 for the electric arc renderer's call only (lr 0x002CFA40)
+0019B274   # [L_] the glide's forward speed (r3 = jump/fall controller A; f1 = A+0x44, or 1350 with a thrusters upgrade)
+0019B350   # [L_] the glide's vertical-speed floor (r3 = A; v2 = 0, or splat(-1000) with the last thrusters upgrade)
+0012D18C   # [powers] a power's word as the game reads it (r3 G = 0x00A64E20, r4 power 0..95): G+0x40+4p, its 1 bit hidden
+           # for a karma power whose rank was never reached; "Karma powers of both sides" returns the stored word
+0012D6C8   # [powers] karma allows power r4 now (r3 G): evil ones at their rank or worse, hero ones at theirs or better;
+           # "Karma powers of both sides" returns 1 (the game's own answer once both endings are done)

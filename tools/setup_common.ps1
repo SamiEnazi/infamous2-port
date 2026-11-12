@@ -25,9 +25,12 @@ if (-not ("PortSetup.Cpu" -as [type])) {
 
 # The game's title IDs whose 1.04 code is the one this port translates (same PPU hash).
 $script:KnownTitles = @{
-    "BCES01143" = "Europe disc (the tested one)"; "BCES01144" = "Europe disc"; "BCES01229" = "disc";
+    "BCES01143" = "Europe disc"; "BCES01144" = "Europe disc"; "BCES01229" = "disc";
     "BCUS98125" = "USA disc"; "NPUA80638" = "USA PSN (digital)"; "NPEA00318" = "Europe PSN (digital)"
 }
+# Players have built and played these (README: EU disc, US disc, the PSN version 01.03); the others
+# have the same code but nobody has reported on them yet.
+$script:TestedTitles = @("BCES01143", "BCUS98125", "NPUA80638")
 
 # A build tool's path, the way tools\port_paths.py finds it for Setup: environment variable
 # (PORT_PYTHON ...), then config.local.json, then tools-cache\ (fetch_tools.ps1). PORT_ONLY_CACHE=1:
@@ -149,8 +152,9 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     else {
         $sfo = Read-Sfo (Join-Path $Disc "PS3_GAME\PARAM.SFO"); $title = $sfo["TITLE_ID"]
         $known = $script:KnownTitles[$title]
-        Add $(if ($title -eq "BCES01143") { $true } elseif ($known) { $null } else { $false }) "Game disc" `
-            "$($sfo['TITLE']) [$title] $(if ($known) { $known } else { 'not inFAMOUS 2' })$(if ($known -and $title -ne 'BCES01143') { ' -- untested: please report how it goes' })"
+        $tested = $script:TestedTitles -contains $title
+        Add $(if ($tested) { $true } elseif ($known) { $null } else { $false }) "Game disc" `
+            "$($sfo['TITLE']) [$title] $(if ($known) { $known } else { 'not inFAMOUS 2' })$(if ($tested) { ' (tested)' } elseif ($known) { ' -- untested: please report how it goes' })"
     }
     if (-not $Rpcs3) { Add $false "RPCS3 folder" "choose the folder that holds rpcs3.exe" }
     elseif (-not (Test-Path (Join-Path $Rpcs3 "rpcs3.exe"))) { Add $false "RPCS3 folder" "no rpcs3.exe in $Rpcs3" }

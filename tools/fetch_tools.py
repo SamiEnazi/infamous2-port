@@ -148,9 +148,41 @@ def _ready(path, text):
 
 def _tar():
     t = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "tar.exe")
-    if not os.path.isfile(t):
-        raise SystemExit("Windows' tar.exe is missing (it comes with Windows 10 1803 and newer)")
-    return t
+    return t if os.path.isfile(t) else None
+
+
+class _Counted:
+    """A read-only file that counts the bytes read (progress while Python unpacks)."""
+
+    def __init__(self, f):
+        self.f, self.n = f, 0
+
+    def read(self, size=-1):
+        b = self.f.read(size)
+        self.n += len(b)
+        return b
+
+
+def _untar_py(arc, tmp, wanted, label, prog):
+    """Unpack the members under `wanted` (paths in the archive: a file, or a folder and all below it)
+    with Python's own tarfile + lzma. Windows 10's tar.exe can't read .tar.xz (it looks for an xz.exe
+    that Windows doesn't have: issue #8), Windows 11's can; this works on both, one pass, a few minutes.
+    The "data" filter refuses links and paths that would land outside tmp."""
+    import tarfile
+    size = max(1, os.path.getsize(arc))
+    got, last = [], 0.0
+    with open(arc, "rb") as raw:
+        f = _Counted(raw)
+        with tarfile.open(fileobj=f, mode="r|xz") as t:
+            for m in t:
+                if any(m.name == w or m.name.startswith(w + "/") for w in wanted):
+                    t.extract(m, tmp, filter="data")
+                    got.append(m.name)
+                now = time.time()
+                if now - last >= 2.0:
+                    last = now
+                    prog.say(f"unpacking {label} ({100 * f.n // size}% of the archive)", force=True)
+    return got
 
 
 # ---------------------------------------------------------------- CMake, Ninja, LLVM
@@ -168,9 +200,23 @@ def get_archive(key, prog):
             z.extractall(tmp)
     else:
         members = [a["top"] + "/" + m for m in LLVM_KEEP.split()]
-        r = subprocess.run([_tar(), "-xf", arc, "-C", tmp] + members, capture_output=True, text=True)
-        if r.returncode:
-            raise SystemExit(f"unpacking {a['label']} failed: {r.stderr.strip()[-500:]}")
+        tar, why = _tar(), "Windows' tar.exe is missing"
+        r = None
+        if tar:
+            r = subprocess.run([tar, "-xf", arc, "-C", tmp] + members, capture_output=True, text=True)
+            why = r.stderr.strip()[-300:]
+        if r is None or r.returncode:
+            # Windows 10's tar.exe can't open .tar.xz ("unable to run program xz -d -qq"): Python can.
+            print(f"  Windows' tar could not unpack {a['label']} ({why}); unpacking it with Python instead",
+                  flush=True)
+            _fresh(tmp)
+            try:
+                got = _untar_py(arc, tmp, members, a["label"], prog)
+            except Exception as e:      # tarfile/lzma/OS errors: report them like tar's
+                raise SystemExit(f"unpacking {a['label']} failed: {type(e).__name__}: {e}")
+            missing = [m for m in members if not any(g == m or g.startswith(m + "/") for g in got)]
+            if missing:
+                raise SystemExit(f"unpacking {a['label']} failed: not in the archive: {', '.join(missing)}")
     src = os.path.join(tmp, a["top"]) if a["top"] else tmp
     if os.path.isdir(dest):
         shutil.rmtree(dest)
