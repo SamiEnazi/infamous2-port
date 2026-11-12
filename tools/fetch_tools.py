@@ -147,8 +147,17 @@ def _ready(path, text):
 
 
 def _tar():
+    """Windows' tar.exe when it reads .xz by itself (liblzma in its --version: Windows 11), else None.
+    Windows 10's tar has no xz of its own: it runs an xz.exe from PATH, and when one is there (Git and other
+    tools bring one) it can hang for good at "unpacking LLVM" (GitHub #23); Python unpacks it instead."""
     t = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "tar.exe")
-    return t if os.path.isfile(t) else None
+    if not os.path.isfile(t):
+        return None
+    try:
+        v = subprocess.run([t, "--version"], capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return None
+    return t if "liblzma" in v else None
 
 
 class _Counted:
@@ -200,7 +209,7 @@ def get_archive(key, prog):
             z.extractall(tmp)
     else:
         members = [a["top"] + "/" + m for m in LLVM_KEEP.split()]
-        tar, why = _tar(), "Windows' tar.exe is missing"
+        tar, why = _tar(), "Windows' tar.exe cannot read .xz files by itself"
         r = None
         if tar:
             r = subprocess.run([tar, "-xf", arc, "-C", tmp] + members, capture_output=True, text=True)
