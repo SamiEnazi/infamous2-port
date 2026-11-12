@@ -9,8 +9,12 @@ setlocal
 set PY=%~dp0..\work\venv\Scripts\python.exe
 if not exist "%PY%" set PY=%~dp0..\tools-cache\python\python.exe
 if not exist "%PY%" set PY=python
-for /f "delims=" %%i in ('""%PY%" -I "%~dp0port_paths.py" cmake"') do set CMAKE=%%i
-for /f "delims=" %%i in ('""%PY%" -I "%~dp0port_paths.py" ninja"') do set NINJA=%%i
+rem The tool paths through a file, not "for /f": a ")" in the folder's path, as in "Program Files (x86)",
+rem ends a for /f command early (GitHub issue #19).
+set "PTMP=%TEMP%\inf2port-%RANDOM%%RANDOM%.txt"
+"%PY%" -I "%~dp0port_paths.py" cmake > "%PTMP%" && set /p CMAKE=<"%PTMP%"
+"%PY%" -I "%~dp0port_paths.py" ninja > "%PTMP%" && set /p NINJA=<"%PTMP%"
+del "%PTMP%" 2>nul
 if not defined CMAKE exit /b 1
 if not defined NINJA exit /b 1
 set RUN="%PY%" -I "%~dp0vsenv.py" run
