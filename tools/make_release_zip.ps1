@@ -107,8 +107,8 @@ $stamp = [DateTimeOffset]::Now.AddHours(-26)
 try {
     foreach ($f in Get-ChildItem -LiteralPath $stage -Recurse -File -Force) {
         $rel = $f.FullName.Substring($stage.Length + 1).Replace('\', '/')
-        $e = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($za, $f.FullName, $rel, [System.IO.Compression.CompressionLevel]::Optimal)
-        $e.LastWriteTime = $stamp
+        $f.LastWriteTime = $stamp.LocalDateTime     # the staged copy (an entry takes its file's time)
+        [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($za, $f.FullName, $rel, [System.IO.Compression.CompressionLevel]::Optimal)
     }
 } finally { $za.Dispose(); $fs.Dispose() }
 Remove-Item -LiteralPath $stage -Recurse -Force
