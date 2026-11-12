@@ -159,8 +159,18 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
 
     # --- the player's game
     $title = $null
+    # a game kept as an .iso (players' comments 2026-11-13): the port needs the files, not the image
+    $iso = $null
+    if ($Disc -and (Test-Path -LiteralPath $Disc -PathType Leaf) -and $Disc -match '\.iso$') { $iso = $Disc }
+    elseif ($Disc -and (Test-Path -LiteralPath $Disc -PathType Container) -and -not (Test-Path (Join-Path $Disc "PS3_GAME\PARAM.SFO"))) {
+        $iso = Get-ChildItem -LiteralPath $Disc -Filter *.iso -File -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+    }
     if (-not $Disc) { Add $false "Game disc folder" "choose the folder that holds PS3_GAME" }
-    elseif (-not (Test-Path (Join-Path $Disc "PS3_GAME\PARAM.SFO"))) { Add $false "Game disc folder" "no PS3_GAME\PARAM.SFO in $Disc" }
+    elseif ($iso) { Add $false "Game disc folder" "your game is an .iso file ($iso). Extract it into a folder first (7-Zip can open it: right-click > 7-Zip > Extract to), then choose that folder: the one with PS3_GAME in it" }
+    elseif (-not (Test-Path (Join-Path $Disc "PS3_GAME\PARAM.SFO"))) {
+        $deeper = Get-ChildItem -LiteralPath $Disc -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName "PS3_GAME\PARAM.SFO") } | Select-Object -First 1 -ExpandProperty FullName
+        Add $false "Game disc folder" $(if ($deeper) { "PS3_GAME is one folder deeper: choose $deeper" } else { "no PS3_GAME folder in ${Disc}: choose the folder that has PS3_GAME in it (with PARAM.SFO inside PS3_GAME)" })
+    }
     elseif ((Get-DriveProblem $Disc) -eq "a network drive") {
         # a junction cannot point at a network share
         Add $false "Game folder's drive" "your game folder ($Disc) is on a network drive, which the port's link cannot point to. Copy the game folder (the one with PS3_GAME) to a drive in this PC and choose it there"
