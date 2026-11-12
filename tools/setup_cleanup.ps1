@@ -8,7 +8,12 @@
 #          config.local.json, eboot\, the desktop shortcut
 # A later update just downloads the tools again. Never runs in the development folder (it has
 # PLAN.md) unless -Force. Prints "freed: <GB>" for Setup.
-param([switch]$Force)
+#   tools\setup_cleanup.ps1 -KeepBuildCache   (what Setup does after a build, unless told otherwise)
+# keeps the build tools and the build files for the next update instead: tools-cache\, deps\, work\venv\,
+# work\port\ (the translated game and its object files) and build\, about 2.6 GB. The next update then
+# downloads no tools, skips every translation step whose inputs did not change and compiles only what
+# changed: minutes instead of 20-60. Only logs and leftovers go. Running it without the switch frees them.
+param([switch]$Force, [switch]$KeepBuildCache)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 if ((Test-Path (Join-Path $root "PLAN.md")) -and -not $Force) { "  not cleaning up: this is the development folder (it has PLAN.md)"; exit 0 }
@@ -40,6 +45,24 @@ function Remove-Tree([string]$Path) {
 }
 
 $before = Get-TreeSize $root
+if ($KeepBuildCache) {
+    "  cleaning up: logs and leftovers; the build tools and build files stay for quick updates"
+    foreach ($d in "tools-cache\downloads", "tools-cache\msvc.unpack", "tools-cache\sdk.unpack", "deps\sdl2-dl", "deps\glslang-build", "work\port-keep") {
+        Remove-Tree (Join-Path $root $d)
+    }
+    foreach ($l in Get-ChildItem (Join-Path $root "work\logs") -Filter "compile*.log" -ErrorAction SilentlyContinue) {
+        try { Remove-Item -LiteralPath $l.FullName -Force -ErrorAction Stop } catch { "  could not delete $($l.Name)" }
+    }
+    $kept = 0L
+    foreach ($d in "tools-cache", "deps", "work\venv", "work\port", "build") { $kept += Get-TreeSize (Join-Path $root $d) }
+    foreach ($f in "Infamous2Recomp.exe", "SDL2.dll", "Infamous2Recomp.pdb") {   # the game itself, not a build file
+        $p = Join-Path $root "work\port\build\$f"
+        if (Test-Path -LiteralPath $p) { $kept -= (Get-Item -LiteralPath $p).Length }
+    }
+    $after = Get-TreeSize $root
+    "  freed: {0:N1} GB; kept for quick updates: {1:N1} GB of build tools and build files (tools\setup_cleanup.ps1 deletes them); the game folder uses {2:N1} GB" -f (($before - $after) / 1GB), ($kept / 1GB), ($after / 1GB)
+    exit 0
+}
 "  cleaning up: the build tools and what only the build needed"
 foreach ($d in "tools-cache", "deps", "work\venv", "build") { Remove-Tree (Join-Path $root $d) }
 foreach ($l in Get-ChildItem (Join-Path $root "work\logs") -Filter "compile*.log" -ErrorAction SilentlyContinue) {

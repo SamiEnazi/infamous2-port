@@ -1,0 +1,213 @@
+# Setup.exe, built on GitHub's own Windows machine exactly as on a PC: this runs tools\setup_exe\build.cmd
+# (the C# compiler that ships with Windows, the same flags, the same Setup.exe). No caches, no other inputs.
+#
+# - A change to Setup's files, a pull request, or "Run workflow" on a branch: build only. The exe is this
+#   run's artifact "Setup.exe-unsigned" (Actions > the run > Artifacts).
+# - A published release, or "Run workflow" on a release tag: the same build, then, once SignPath is set up,
+#   the exe goes to SignPath Foundation (free code signing for open source). The maintainer approves the
+#   request on app.signpath.io, and the signed Setup.exe is checked and attached to the release (it replaces
+#   a Setup.exe uploaded by hand). Until SignPath is set up, or with a certificate Windows does not trust
+#   (SignPath's test-signing), nothing is attached and the release stays as it was.
+#
+# SignPath settings (GitHub: Settings > Secrets and variables > Actions):
+#   secret    SIGNPATH_API_TOKEN                     API token of the SignPath user that submits requests
+#   variable  SIGNPATH_ORGANIZATION_ID               the SignPath organization's id
+#   variable  SIGNPATH_PROJECT_SLUG                  the SignPath project's slug
+#   variable  SIGNPATH_SIGNING_POLICY_SLUG           test-signing first, then release-signing
+#   variable  SIGNPATH_ARTIFACT_CONFIGURATION_SLUG   optional: the project's default one otherwise
+# The artifact configuration for SignPath is .github/signpath/artifact-configuration.xml.
+name: Setup.exe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - tools/setup_exe/**
+      - tools/setup.ico
+      - .github/workflows/setup-exe.yml
+      - .github/signpath/**
+  pull_request:
+    paths:
+      - tools/setup_exe/**
+      - tools/setup.ico
+      - .github/workflows/setup-exe.yml
+      - .github/signpath/**
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: Build Setup.exe
+    runs-on: windows-latest
+    timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      # Setup.exe needs only tools\setup_exe\ and tools\setup.ico (nothing from engine\ or base\)
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build with tools\setup_exe\build.cmd
+        shell: cmd
+        run: call tools\setup_exe\build.cmd
+
+      - name: Check its version information
+        id: check
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          $exe = Get-Item -LiteralPath Setup.exe
+          $vi = $exe.VersionInfo
+          $version = $vi.ProductVersion
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            "::error::Setup.exe's product version is '$version': set AssemblyInformationalVersion at the top of tools/setup_exe/SetupWizard.cs"
+            exit 1
+          }
+          # SignPath refuses a Setup.exe whose product name is not the one in its artifact configuration
+          [xml]$ac = Get-Content -LiteralPath .github/signpath/artifact-configuration.xml -Raw
+          $name = $ac.'artifact-configuration'.'zip-file'.'pe-file'.'product-name'
+          if ($vi.ProductName -ne $name) {
+            $level = if ($env:TAG) { 'error' } else { 'warning' }
+            "::${level}::Setup.exe's product name is '$($vi.ProductName)', .github/signpath/artifact-configuration.xml (and SignPath) say '$name'"
+            if ($env:TAG) { exit 1 }
+          }
+          if ($env:TAG -and $env:TAG.TrimStart('v') -ne $version) {
+            "::warning::Setup.exe says version $version, the release is $($env:TAG): set the version at the top of tools/setup_exe/SetupWizard.cs and in setup.manifest"
+          }
+          $sha = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value @(
+            "### Setup.exe $version (unsigned)", "",
+            "- product: $($vi.ProductName), file version $($vi.FileVersion)",
+            "- $($exe.Length) bytes, sha256 ``$sha``",
+            "- built by tools\setup_exe\build.cmd from $($env:GITHUB_SHA)")
+          "Setup.exe $version, $($exe.Length) bytes, sha256 $sha"
+
+      # GitHub keeps it as a ZIP file holding Setup.exe: the artifact configuration's <zip-file>
+      - name: Keep it as the run's artifact
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Setup.exe-unsigned
+          path: Setup.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  sign:
+    name: Sign it and attach it to the release
+    needs: build
+    if: github.ref_type == 'tag' && github.event_name != 'pull_request'
+    runs-on: windows-latest
+    # the signing request waits for the maintainer's approval on SignPath (up to an hour)
+    timeout-minutes: 75
+    permissions:
+      contents: write   # attach Setup.exe to the release
+      actions: read     # SignPath's action reads this run and downloads the artifact
+    concurrency:
+      group: sign-${{ github.ref_name }}
+      cancel-in-progress: false
+    env:
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SIGNPATH_READY: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' && vars.SIGNPATH_PROJECT_SLUG != '' && vars.SIGNPATH_SIGNING_POLICY_SLUG != '' }}
+    steps:
+      - name: SignPath is not set up
+        if: env.SIGNPATH_READY != 'true'
+        run: |
+          "::notice::No SignPath settings in this repository: Setup.exe was built but not signed, and the release was left as it was. The build is this run's artifact Setup.exe-unsigned."
+
+      - name: Look at the release
+        id: release
+        if: env.SIGNPATH_READY == 'true'
+        run: |
+          $have = 'false'; $skip = 'false'
+          $json = gh release view $env:TAG --json 'tagName,isDraft,assets' 2>$null
+          if ($LASTEXITCODE -eq 0 -and $json) {
+            $have = 'true'
+            $r = $json | ConvertFrom-Json
+            if (@($r.assets | Where-Object { $_.name -eq 'Setup.exe' }).Count) {
+              gh release download $env:TAG --pattern Setup.exe --dir existing
+              $s = Get-AuthenticodeSignature -LiteralPath existing\Setup.exe
+              # publishing a draft that was signed already: no second signing request
+              if ($s.Status -eq 'Valid') { $skip = 'true'; "::notice::$($env:TAG) already has a signed Setup.exe ($($s.SignerCertificate.Subject)): nothing to do" }
+            }
+          } else {
+            "::warning::There is no GitHub release $($env:TAG): a signed Setup.exe stays this run's artifact Setup.exe-signed"
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "release=$have", "skip=$skip"
+          exit 0
+
+      - name: Submit to SignPath (approve it on app.signpath.io)
+        id: signpath
+        if: env.SIGNPATH_READY == 'true' && steps.release.outputs.skip != 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed
+          parameters: |
+            version: ${{ toJSON(needs.build.outputs.version) }}
+
+      - name: Check the signature
+        id: check
+        if: steps.signpath.outcome == 'success'
+        env:
+          HAVE_RELEASE: ${{ steps.release.outputs.release }}
+          REQUEST_URL: ${{ steps.signpath.outputs.signing-request-web-url }}
+        run: |
+          $f = Get-ChildItem -LiteralPath signed -Recurse -File -Filter Setup.exe | Select-Object -First 1
+          if (-not $f) { "::error::SignPath's signed artifact holds no Setup.exe"; exit 1 }
+          if ($f.VersionInfo.ProductVersion -ne $env:VERSION) { "::error::the signed Setup.exe says version $($f.VersionInfo.ProductVersion), the build was $($env:VERSION)"; exit 1 }
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item -LiteralPath $f.FullName out\Setup.exe
+          $s = Get-AuthenticodeSignature -LiteralPath out\Setup.exe
+          $attach = 'false'
+          if ($s.Status -eq 'Valid') {
+            if ($env:HAVE_RELEASE -eq 'true') { $attach = 'true' }
+          } else {
+            "::warning::The signature is $($s.Status) ($($s.StatusMessage)): Windows does not trust it (SignPath's test-signing policy?), so it is not attached. It is this run's artifact Setup.exe-signed."
+          }
+          $sha = (Get-FileHash -LiteralPath out\Setup.exe -Algorithm SHA256).Hash.ToLower()
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "attach=$attach"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value @(
+            "### Setup.exe $($env:VERSION), signed", "",
+            "- signature: $($s.Status), $($s.SignerCertificate.Subject)",
+            "- timestamp: $($s.TimeStamperCertificate.Subject)",
+            "- sha256 ``$sha``",
+            "- signing request: $($env:REQUEST_URL)")
+          "$($s.Status): $($s.SignerCertificate.Subject), sha256 $sha"
+
+      - name: Keep the signed exe as the run's artifact
+        if: steps.check.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Setup.exe-signed
+          path: out/Setup.exe
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attach it to the release
+        if: steps.check.outputs.attach == 'true'
+        run: |
+          gh release upload $env:TAG out\Setup.exe --clobber
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "", "Attached to release $($env:TAG)."

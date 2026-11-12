@@ -9,9 +9,12 @@
 #   7. the exe's icon from the player's own ICON0.PNG                -> work\icon\app.ico
 #   8. translate and compile the game                                -> work\port\build\Infamous2Recomp.exe
 #   9. a desktop shortcut
-#  10. with -Cleanup: delete the build tools and everything only the build needed (tools\setup_cleanup.ps1)
+#  10. with -Cleanup: delete what only this build needed (tools\setup_cleanup.ps1). The build tools and the
+#      build files stay for the next update (about 2.6 GB): an update that changes a few files then downloads
+#      no tools and rebuilds only what changed, in minutes. -NoBuildCache (or PORT_BUILD_CACHE=0: Setup.exe
+#      --prepare, for RecompLauncher) deletes them too, as before.
 #   tools\setup_build.ps1 -Disc <folder holding PS3_GAME> -Rpcs3 <RPCS3 folder> [-NoShortcut]
-#                         [-AcceptMsvcLicense] [-Cleanup]
+#                         [-AcceptMsvcLicense] [-Cleanup] [-NoBuildCache]
 # -AcceptMsvcLicense: Microsoft's MSVC + Windows SDK files are under the Visual Studio Build Tools
 # license (https://go.microsoft.com/fwlink/?LinkId=2179911); Setup asks first.
 param(
@@ -19,9 +22,12 @@ param(
     [Parameter(Mandatory = $true)][string]$Rpcs3,
     [switch]$NoShortcut,
     [switch]$AcceptMsvcLicense,
-    [switch]$Cleanup
+    [switch]$Cleanup,
+    [switch]$NoBuildCache
 )
 $ErrorActionPreference = "Stop"
+# Setup.exe reads these lines through a pipe, in UTF-8 (a console keeps its own code page)
+if ([Console]::IsOutputRedirected) { [Console]::OutputEncoding = [Text.Encoding]::UTF8 }
 trap { "== FAILED: $_"; exit 1 }   # the reason lands in the log Setup shows
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "setup_common.ps1")
@@ -50,24 +56,42 @@ $di = Get-Item -LiteralPath $Disc -Force
 if ($di.LinkType -eq "Junction" -and @($di.Target)[0]) { $Disc = ([string]@($di.Target)[0]).TrimEnd('\') }
 
 Step 1 "checking"
-# The toolkit and the port base: plain folders when the port came as ZIP files (Setup.exe), or git
-# submodules in a git clone. A git clone's submodules are checked out with LF line ends: our patches
-# are LF, and Git for Windows' default (core.autocrlf=true) would check them out as CRLF. GitHub's
-# ZIP files already have the repos' own LF line ends.
-foreach ($sub in @(@("toolkit", "CMakeLists.txt"), @("community\erikomis-infamous2-recomp", "infamous2-lle\CMakeLists.txt"))) {
-    $p = Join-Path $root $sub[0]
-    $isGit = Test-Path (Join-Path $p ".git")
-    if (-not $isGit -and (Test-Path (Join-Path $p $sub[1]))) { "  $($sub[0]): ok"; continue }
-    if (-not $isGit) {
-        if (-not (Test-Path (Join-Path $root ".git"))) { throw "$($sub[0]) is missing: download the port again with Setup.exe (or 'git clone --recursive')" }
-        Invoke-Native { git -C $root submodule update --init -- ($sub[0] -replace '\\', '/') }
-        if ($LASTEXITCODE) { throw "git submodule update --init $($sub[0]) failed" }
+# The engine (engine\) and the port base (base\) are folders of this repository since v0.5.0 (no
+# submodules any more). A git clone has them with LF line ends too (.gitattributes: the patches in
+# patches\port are LF, as base\'s files are).
+foreach ($sub in @(@("engine", "CMakeLists.txt"), @("base", "infamous2-lle\CMakeLists.txt"))) {
+    if (-not (Test-Path (Join-Path (Join-Path $root $sub[0]) $sub[1]))) {
+        throw "$($sub[0])\$($sub[1]) is missing: download the port again with Setup.exe (or 'git clone')"
     }
-    if ((Invoke-Native { git -C $p config --get core.autocrlf }) -notmatch 'false') {
-        Invoke-Native { git -C $p config core.autocrlf false }
-        Invoke-Native { git -C $p rm -rq --cached . } | Out-Null
-        Invoke-Native { git -C $p reset -q --hard }
-        "  $($sub[0]) checked out with LF line ends"
+    "  $($sub[0]): ok"
+}
+# A Setup.exe of v0.4.2 or older updates by copying the new version over the old one, never deleting, and
+# it still downloads toolkit\ and community\ (the engine and the port base before v0.5.0: nothing builds them
+# now). A file the new engine\ or base\ no longer has would still be built (the engine's CMake builds every
+# file it finds), so what they hold beyond the version's own list (.port-files, from the public repository)
+# is deleted here. Not in a git clone (git keeps them), never through a link.
+$portFiles = Join-Path $root ".port-files"
+if ((Test-Path -LiteralPath $portFiles) -and -not (Test-Path -LiteralPath (Join-Path $root ".git"))) {
+    $want = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($l in [IO.File]::ReadAllLines($portFiles)) { if ($l.Trim()) { [void]$want.Add($l.Trim().Replace('/', '\')) } }
+    $stale = New-Object System.Collections.Generic.List[string]
+    foreach ($top in "engine", "base") {
+        $stack = New-Object System.Collections.Stack
+        $stack.Push((Get-Item -LiteralPath (Join-Path $root $top) -Force))
+        while ($stack.Count) {
+            $d = $stack.Pop()
+            foreach ($e in $d.GetFileSystemInfos()) {
+                if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                if ($e -is [IO.DirectoryInfo]) { if ($e.Name -ne "__pycache__") { $stack.Push($e) }; continue }   # (Python's own cache)
+                $rel = $e.FullName.Substring($root.Length + 1)
+                if (-not $want.Contains($rel)) { $stale.Add($e.FullName) }
+            }
+        }
+    }
+    if ($want.Count -lt 100) { "  note: .port-files lists only $($want.Count) files: nothing deleted" }
+    elseif ($stale.Count) {
+        foreach ($f in $stale) { Remove-Item -LiteralPath $f -Force }
+        "  engine\ and base\: $($stale.Count) file(s) from an earlier version deleted (this version has no such files)"
     }
 }
 $rows = Get-SetupChecks -Disc $Disc -Rpcs3 $Rpcs3
@@ -128,29 +152,43 @@ if (-not (Test-Path $elf)) {
 Step 5 "Python tools (work\venv)"
 $venvPy = Join-Path $root "work\venv\Scripts\python.exe"
 if (Test-Path $venvPy) {
-    # a venv whose base Python was deleted (an earlier cleanup) does not start: make it again
+    # a venv whose base Python was deleted (an earlier cleanup) does not start, and one a kept build made with
+    # another Python version has its packages in the wrong place: make it again
+    $pyMm = "$(Invoke-Native { & $py -c "import sys; print('%d.%d' % sys.version_info[:2])" } | Select-Object -Last 1)".Trim()
+    $cfgLine = Select-String -LiteralPath (Join-Path $root "work\venv\pyvenv.cfg") -Pattern '^\s*version\s*=\s*(\d+\.\d+)' -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+    $venvMm = if ($cfgLine) { $cfgLine.Matches[0].Groups[1].Value } else { "" }
     Invoke-Native { & $venvPy -c "import sys" } | Out-Null
-    if ($LASTEXITCODE) { cmd /c rd /s /q (Join-Path $root "work\venv") | Out-Null }
+    if ($LASTEXITCODE -or ($pyMm -match '^\d+\.\d+$' -and $venvMm -and $venvMm -ne $pyMm)) { cmd /c rd /s /q (Join-Path $root "work\venv") | Out-Null }
 }
 if (-not (Test-Path $venvPy)) {
     Invoke-Native { & $py -m venv (Join-Path $root "work\venv") }
     if ($LASTEXITCODE) { throw "python -m venv failed" }
 }
-Invoke-Native { & $venvPy -m pip install --disable-pip-version-check -q -r (Join-Path $root "toolkit\requirements.txt") }
+Invoke-Native { & $venvPy -m pip install --disable-pip-version-check -q -r (Join-Path $root "engine\requirements.txt") }
 if ($LASTEXITCODE) { throw "pip install failed" }
 
 Step 6 "SDL2, Vulkan headers and glslang (download, then build glslang: a few minutes)"
 & (Join-Path $PSScriptRoot "fetch_deps.ps1")
 if (-not (Test-Path (Join-Path $root "deps\SDL2-2.30.10\cmake"))) { throw "fetching the libraries failed (see above)" }
-if (-not (Test-Path (Join-Path $root "deps\glslang-install\lib\cmake\glslang"))) {
+# built again when its sources are another version than the kept build (deps\glslang-install\.source)
+$gSrc = Join-Path $root "deps\glslang-src\.source"
+$gMark = Join-Path $root "deps\glslang-install\.source"
+$gWant = if (Test-Path $gSrc) { (Get-Content $gSrc -Raw).Trim() } else { "" }
+$gHave = if (Test-Path $gMark) { (Get-Content $gMark -Raw).Trim() } else { "" }
+if (-not (Test-Path (Join-Path $root "deps\glslang-install\lib\cmake\glslang")) -or ($gWant -and $gHave -and $gWant -ne $gHave)) {
     Invoke-Native { cmd /c "`"$(Join-Path $PSScriptRoot 'build_deps.cmd')`"" }
     if ($LASTEXITCODE) { throw "building glslang failed" }
+    if ($gWant) { Set-Content -Path $gMark -Value $gWant }
 }
 
 Step 7 "the exe's icon (from your copy's ICON0.PNG)"
 try { & (Join-Path $PSScriptRoot "make_icon.ps1") -Icon0 (Join-Path $Disc "PS3_GAME\ICON0.PNG") } catch { "  no icon: $_ (the game still builds)" }
 
 Step 8 "translating and compiling the game (the long part: 15-40 minutes)"
+# With the build files of an earlier build (an update): a translation step whose inputs did not change is
+# skipped, and only what changed is compiled again (tools\rebuild_win.py, PORT_LIFT_REUSE)
+$env:PORT_LIFT_REUSE = "1"
 Invoke-Native { & $venvPy -I (Join-Path $PSScriptRoot "rebuild_win.py") }
 if ($LASTEXITCODE) { throw "the build failed: see work\logs\ (python -I tools\build_errors.py work\logs\compile.log)" }
 $exe = Join-Path $root "work\port\build\Infamous2Recomp.exe"
@@ -172,7 +210,7 @@ if (-not $NoShortcut) {
 } else { "  skipped (-NoShortcut)" }
 
 Step 10 "cleaning up"
-if ($Cleanup) { & (Join-Path $PSScriptRoot "setup_cleanup.ps1") }
+if ($Cleanup) { & (Join-Path $PSScriptRoot "setup_cleanup.ps1") -KeepBuildCache:(-not $NoBuildCache -and $env:PORT_BUILD_CACHE -ne "0") }
 else { "  kept the build tools and files (no -Cleanup): tools\setup_cleanup.ps1 deletes them" }
-"== done in $([int]$sw.Elapsed.TotalMinutes) min: play with the desktop shortcut or 'Play inFAMOUS 2.cmd'. RPCS3 is no longer needed."
+"== done in $([int]$sw.Elapsed.TotalMinutes) min: play with the desktop shortcut or 'Play inFAMOUS 2.cmd'. RPCS3 is not needed to play (an update reads the game's update and firmware from it again: keep it)."
 exit 0

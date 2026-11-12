@@ -104,10 +104,11 @@ def build_id():
             return subprocess.run(["git", *a], capture_output=True, text=True, timeout=20).stdout.strip()
         except Exception:
             return "?"
-    tk = os.path.join(ROOT, "toolkit")
+    # the engine is engine/ in this repository (since v0.5.0); PORT_TK: another engine tree (its own git)
+    tk = os.environ.get("PORT_TK") or os.path.join(ROOT, "engine")
     proj = git("-C", ROOT, "rev-parse", "--short", "HEAD")
     tkh = git("-C", tk, "rev-parse", "--short", "HEAD")
-    dirty = "+dirty" if git("-C", tk, "status", "--porcelain", "--untracked-files=no") else ""
+    dirty = "+dirty" if git("-C", tk, "status", "--porcelain", "--untracked-files=no", "--", ".") else ""
     return f"{proj}/tk {tkh}{dirty}"
 
 

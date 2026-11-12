@@ -23,21 +23,31 @@
     {
       "id": "main",
       "format": "ini",
-      "file": [{ "path": "{config}/inFAMOUS2-port/settings.ini" }]
+      "file": [
+        { "path": "{install}/settings.ini", "if": "{install}/portable.txt" },
+        { "path": "{config}/inFAMOUS2-port/settings.ini" }
+      ]
     }
   ],
-  "saves": ["{install}/game/gamedata/dev_hdd0/home/00000001/savedata"],
+  "saves": [
+    "{install}/game/gamedata/dev_hdd0/home/00000001/savedata",
+    "{install}/input.toml",
+    "{install}/spots.ini",
+    "{config}/inFAMOUS2-port/spots.ini"
+  ],
   "folders": {
     "saves": [{ "path": "{install}/game/gamedata/dev_hdd0/home/00000001/savedata" }],
     "logs": [{ "path": "{install}/play" }],
     "mods": [{ "path": "{install}/mods" }],
-    "settings": [{ "path": "{config}/inFAMOUS2-port" }]
+    "settings": [{ "path": "{install}", "if": "{install}/portable.txt" }, { "path": "{config}/inFAMOUS2-port" }],
+    "trophies": [{ "path": "{install}/game/gamedata/dev_hdd0/home/00000001/trophy" }]
   },
   "actions": [
     { "id": "saves", "label": "Saves", "help": "Your save slots. The game also copies them to saves-backup in its folder before every session.", "open": "saves" },
     { "id": "logs", "label": "Logs", "help": "One folder per session (frame times, F9 marks, freezes), launcher.log and setup.log. Attach them to a bug report.", "open": "logs" },
     { "id": "mods", "label": "Mods", "help": "Mods made for the inFAMOUS Mod Manager, one folder each. F2 > Mods in the game turns them on and off.", "open": "mods" },
-    { "id": "settings", "label": "Settings file", "help": "settings.ini: these settings and the rest of the game's F2 menu.", "open": "settings" }
+    { "id": "settings", "label": "Settings file", "help": "settings.ini: these settings and the rest of the game's F2 menu.", "open": "settings" },
+    { "id": "trophies", "label": "Trophies", "help": "The game's trophies in RPCS3's layout (one folder per trophy set, made at the first start), for Playnite's achievement plugins. The README says how to set them up.", "open": "trophies" }
   ],
   "exit_codes": {
     "69": "Setup is already running for this game (in its own window, or another setup). Let it finish, then try again.",
@@ -52,7 +62,8 @@
     "78": "The game's folder or your game folder is on a drive that can't hold the link setup makes (a USB stick, an exFAT or FAT32 disk, or a network drive). Use an internal NTFS drive for both.",
     "79": "The build stopped. Open Logs, attach setup.log to an issue at github.com/SamiEnazi/infamous2-port, then pick your copy again to retry.",
     "80": "The game isn't built yet. Pick your copy on the game's page to set it up.",
-    "82": "The game couldn't be started. Open Logs and attach launcher.log to an issue at github.com/SamiEnazi/infamous2-port."
+    "82": "The game couldn't be started. Open Logs and attach launcher.log to an issue at github.com/SamiEnazi/infamous2-port.",
+    "83": "Windows marked the port's files as downloaded from the internet, so its setup scripts won't run. Please open Logs and attach setup.log to an issue at github.com/SamiEnazi/infamous2-port."
   },
   "looks": {
     "allowed": false,
@@ -111,6 +122,15 @@
         { "label": "Infamous (red)", "set": { "PS3_OVERLAY_THEME": "infamous" } }
       ],
       "defaults": { "PS3_OVERLAY_THEME": "hero" }
+    },
+    {
+      "id": "hud", "label": "FPS counter", "group": "Display",
+      "help": "The frame rate and frame times in a corner of the screen. F1 shows or hides it while you play.",
+      "choices": [
+        { "label": "On", "set": { "PS3_OVERLAY_HUD": "1" } },
+        { "label": "Off", "set": { "PS3_OVERLAY_HUD": "0" } }
+      ],
+      "defaults": { "PS3_OVERLAY_HUD": "1" }
     },
     {
       "id": "resolution", "label": "Internal resolution", "group": "Graphics",
@@ -247,10 +267,63 @@
       "defaults": { "PS3_BUTTON_ICONS": "auto" }
     },
     {
+      "id": "input_mode", "label": "Play with", "group": "Controls",
+      "help": "Controller only ignores the keyboard and mouse, for a couch PC. Keyboard and mouse only ignores the controllers.",
+      "choices": [
+        { "label": "Controller, keyboard and mouse", "set": { "PS3_INPUT_MODE": "both" } },
+        { "label": "Controller only", "set": { "PS3_INPUT_MODE": "controller" } },
+        { "label": "Keyboard and mouse only", "set": { "PS3_INPUT_MODE": "keyboard" } }
+      ],
+      "defaults": { "PS3_INPUT_MODE": "both" }
+    },
+    {
+      "id": "rumble", "label": "Vibration", "group": "Controls",
+      "help": "The controller's rumble, as on the PS3.",
+      "choices": [
+        { "label": "On", "set": { "PS3_RUMBLE": "1" } },
+        { "label": "Off", "set": { "PS3_RUMBLE": "0" } }
+      ],
+      "defaults": { "PS3_RUMBLE": "1" }
+    },
+    {
+      "id": "rumble_strength", "label": "Vibration strength", "group": "Controls",
+      "help": "100 is the PS3's own. Up to 200 for controllers with weak motors.",
+      "slider": { "key": "PS3_RUMBLE_STRENGTH", "min": 10, "max": 200, "step": 10, "format": "%d" },
+      "defaults": { "PS3_RUMBLE_STRENGTH": "100", "PS3_RUMBLE": "1" },
+      "when": { "PS3_RUMBLE": "1" }
+    },
+    {
+      "id": "background_input", "label": "Controller in the background", "group": "Controls", "advanced": true,
+      "help": "On, the game reads the controller even when its window isn't in front, so it answers the pad however it was started. Off leaves the controller to the launcher's overlay and other apps while the game is behind them.",
+      "choices": [
+        { "label": "On", "set": { "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS": "1" } },
+        { "label": "Off", "set": { "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS": "0" } }
+      ],
+      "defaults": { "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS": "1" }
+    },
+    {
       "id": "volume", "label": "Volume", "group": "Sound",
       "help": "What the PC plays. The game's own sound options are untouched.",
       "slider": { "key": "PS3_AUDIO_VOLUME", "min": 0, "max": 100, "step": 5, "format": "%d" },
       "defaults": { "PS3_AUDIO_VOLUME": "100" }
+    },
+    {
+      "id": "language", "label": "Game language", "group": "Sound",
+      "help": "Menus, subtitles and the dub. Automatic follows Windows' display language, or English when your copy doesn't have it. In the game, F2 > Audio > Language lists every language your copy has, with the voice and the text apart.",
+      "choices": [
+        { "label": "Automatic (Windows' language)", "set": { "PS3_LANG": "auto" } },
+        { "label": "English", "set": { "PS3_LANG": "en" } }
+      ],
+      "defaults": { "PS3_LANG": "auto" }
+    },
+    {
+      "id": "use_mods", "label": "Use mods", "group": "Mods",
+      "help": "Off starts the game without any mod and keeps which ones are on. Open Mods to add one; F2 > Mods in the game turns each one on or off.",
+      "choices": [
+        { "label": "On", "set": { "PS3_GAME_MODS": "1" } },
+        { "label": "Off", "set": { "PS3_GAME_MODS": "0" } }
+      ],
+      "defaults": { "PS3_GAME_MODS": "1" }
     }
   ]
 }

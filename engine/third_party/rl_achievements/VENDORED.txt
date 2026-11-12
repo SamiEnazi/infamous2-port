@@ -1,0 +1,18 @@
+Recomp Achievements (rl-achievements, SDK format version 1), for RecompLauncher.
+Source: https://github.com/elripalda/RecompAchievements at commit
+faf094acdf1efb57d8db7c8187b4b47aa1501805 (2026-11-11), unmodified.
+
+NOT under this repository's MIT licence: the Recomp Achievements License 1.0
+(LICENSE here) -- free to use, change and ship in or with a game, as long as that
+licence, its copyright notice and the third-party notices stay with the source;
+launchers and front-ends need the authors' written permission (its section 3).
+third_party/rcheevos (rcheevos, MIT, its VERSION file) and third_party/cjson
+(cJSON 1.7, MIT) keep their own licences, in their folders.
+
+Vendored from the repository's sdk/: include/, src/, third_party/ (rcheevos and
+cJSON), plus its LICENSE, README.md and docs/SPEC.md + docs/adding-it.md. Not
+vendored: sdk/tests, sdk/bridges, sdk/CMakeLists.txt, examples/ (CMakeLists.txt
+at the toolkit's root builds it as the rl_achievements target instead).
+
+Used by libs/misc/ps3_recomp_achievements.c. Every call does nothing unless the
+game was started by RecompLauncher (RL_SESSION in the environment).

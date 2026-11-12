@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for Setup.exe: paste it into SignPath (Project > Artifact configurations >
+  the default one > Edit). .github/workflows/setup-exe.yml uploads Setup.exe as a GitHub artifact, which GitHub
+  stores as a ZIP file holding Setup.exe, and passes the exe's own product version as "version".
+
+  The restrictions are SignPath Foundation's rule for signed files: the product name is the project's name and
+  the product version is the one of this build. Setup.exe takes both from the [assembly: ...] lines at the top of
+  tools/setup_exe/SetupWizard.cs (AssemblyProduct and AssemblyInformationalVersion); a Setup.exe whose product
+  name is not this one is refused. If AssemblyProduct ever changes, change it here and in SignPath too.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="Setup.exe" product-name="inFAMOUS 2 Native PC Port (unofficial fan project)" product-version="${version}">
+      <authenticode-sign description="inFAMOUS 2 Native PC Port Setup" description-url="https://github.com/SamiEnazi/infamous2-port" />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

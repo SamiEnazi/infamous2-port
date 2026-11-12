@@ -1,0 +1,183 @@
+#!/bin/sh
+# Boot the recompiled inFAMOUS 2 (NPUA80638) against the cloned game data.
+#
+#   ./run.sh              window on Metal
+#   HEADLESS=1 ./run.sh   no window (log-only bring-up runs)
+#
+# The VFS is ../infamous2/vfs, a copy-on-write clone of RPCS3's
+# dev_hdd0/game/NPUA80638, so nothing the port writes touches the emulator's
+# install. Firmware files (/dev_flash) are read from RPCS3's own dev_flash.
+here=$(cd "$(dirname "$0")" && pwd)
+vfs="${INFAMOUS2_VFS:-$here/../infamous2/vfs}"
+
+export PS3_VFS_ROOT="$vfs"
+export PS3_HDD0_ROOT="$vfs/dev_hdd0"
+export PS3_DEV_FLASH="${PS3_DEV_FLASH:-$HOME/Library/Application Support/rpcs3/dev_flash}"
+export PS3_TITLE="inFAMOUS 2"
+[ -n "$HEADLESS" ] && export PS3RECOMP_METAL_HEADLESS=1
+# Saves and trophies live in one fixed place for windowed play, so opening the
+# game from another directory no longer starts without a save. The first run
+# copies the old cwd-relative infamous2-lle/gamedata there (the original stays
+# as a backup). Headless runs keep the toolkit's ./gamedata: the tools run each
+# one in its own out/<name>.cwd/ and must never touch the player's save.
+# PS3_GAMEDATA_ROOT=<dir> picks another place (=gamedata restores the old way).
+if [ -z "$HEADLESS" ] && [ -z "$PS3_GAMEDATA_ROOT" ]; then
+    case $(uname) in
+        Darwin) data="$HOME/Library/Application Support/infamous2-recomp" ;;
+        *)      data="${XDG_DATA_HOME:-$HOME/.local/share}/infamous2-recomp" ;;
+    esac
+    if [ ! -d "$data/gamedata" ] && [ -d "$here/gamedata/dev_hdd0" ]; then
+        mkdir -p "$data" && cp -Rp "$here/gamedata" "$data/gamedata" &&
+            echo "run.sh: saves copied from $here/gamedata to $data/gamedata" >&2
+    fi
+    export PS3_GAMEDATA_ROOT="$data/gamedata"
+fi
+# Controls (keyboard, mouse buttons, controller; format in the toolkit's
+# libs/input/pad_input_map.h, README "Playing"): input.toml in the same folder
+# (or input.ini), as the launcher's Controls screen writes it. Windowed runs
+# only; PS3_INPUT_MAP=<file> picks another one, PS3_INPUT_MAP= (empty) none.
+if [ -z "$HEADLESS" ] && [ -z "${PS3_INPUT_MAP+set}" ]; then
+    case $(uname) in
+        Darwin) cfg="$HOME/Library/Application Support/infamous2-recomp" ;;
+        *)      cfg="${XDG_DATA_HOME:-$HOME/.local/share}/infamous2-recomp" ;;
+    esac
+    for f in "$cfg/input.toml" "$cfg/input.ini"; do
+        [ -f "$f" ] && { export PS3_INPUT_MAP="$f"; break; }
+    done
+fi
+# The in-game menu (F1 / Cmd+, / L3+R3; the toolkit's libs/video/ps3_overlay.h)
+# saves what it changes to overlay.ini in the same folder; a variable set here
+# or by the launcher wins over the file's line. Windowed runs only (a headless
+# run never reads it); PS3_OVERLAY_INI= (empty) keeps the menu's changes to
+# the session, PS3_OVERLAY=0 turns the menu off.
+if [ -z "$HEADLESS" ] && [ -z "${PS3_OVERLAY_INI+set}" ]; then
+    case $(uname) in
+        Darwin) cfg="$HOME/Library/Application Support/infamous2-recomp" ;;
+        *)      cfg="${XDG_DATA_HOME:-$HOME/.local/share}/infamous2-recomp" ;;
+    esac
+    export PS3_OVERLAY_INI="$cfg/overlay.ini"
+fi
+# Dub, subtitles and menus in Brazilian Portuguese (cache/psarc/brazilian*.psarc).
+# This Americas release answers only en, fr, es and pt with their own files
+# (english, french, latino, brazilian) and plays every other system language
+# in English (func_0009D9DC); plain "Portuguese" (7) is what selects the
+# Brazilian files. PS3_LANG=en (or es, fr, ...) to change; the toolkit serves
+# the files of the other languages the copy has (ru, ja, de, en-gb, pt-pt,
+# es-es...: runtime/ppu/ppu_fs_lang.h). PS3_VOICE_LANG=<name> and
+# PS3_TEXT_LANG=<name> (english, brazilian, latino, ...: the file names) split
+# the dub from the menus and subtitles. A PS3_LANG line in overlay.ini (the
+# in-game menu's Game tab) takes the place of this default.
+if [ -z "$PS3_LANG" ] && ! { [ -n "$PS3_OVERLAY_INI" ] && grep -q '^PS3_LANG=' "$PS3_OVERLAY_INI" 2>/dev/null; }; then
+    export PS3_LANG=pt
+fi
+# Shader cache (the toolkit's rsx_metal_backend.m, PS3_SHADER_CACHE): a guest
+# shader's first use translates its HLSL to MSL on the RSX thread, which made
+# frames of up to ~370 ms whenever something new came on screen (2026-10-22:
+# 1.8 s of such hitches in the first two New Marais minutes, 83 ms with the
+# cache warm). The translations are kept in shader-cache/ next to the saves,
+# so each is paid once instead of once a session; a rebuild of the port starts
+# a fresh one. Windowed runs only (a headless A/B must not depend on what an
+# earlier run left behind); PS3_SHADER_CACHE= (empty) turns it off.
+# PS3_SHADER_ASYNC=1 (opt-in) also builds new pipelines in the background:
+# no hitch on a first sight, but those draws are skipped until ready.
+if [ -z "$HEADLESS" ] && [ -z "${PS3_SHADER_CACHE+set}" ]; then
+    case $(uname) in
+        Darwin) cfg="$HOME/Library/Application Support/infamous2-recomp" ;;
+        *)      cfg="${XDG_DATA_HOME:-$HOME/.local/share}/infamous2-recomp" ;;
+    esac
+    export PS3_SHADER_CACHE="$cfg/shader-cache"
+fi
+# Texture packs (the toolkit's rsx_draw_engine.c): folders of PNGs in mods/
+# next to the saves, each file named by the key of the texture it replaces.
+# PS3_MODS=<pack>,<pack> turns them on, the first winning when two replace the
+# same texture (the launcher's Mods card writes it); unset, nothing is loaded.
+# PS3_MODS_DUMP=<dir> writes every colour texture the game uploads as
+# <dir>/<key>.png, the name a pack uses. Windowed runs only, like the rest.
+if [ -z "$HEADLESS" ] && [ -z "${PS3_MODS_DIR+set}" ]; then
+    case $(uname) in
+        Darwin) cfg="$HOME/Library/Application Support/infamous2-recomp" ;;
+        *)      cfg="${XDG_DATA_HOME:-$HOME/.local/share}/infamous2-recomp" ;;
+    esac
+    export PS3_MODS_DIR="$cfg/mods"
+fi
+# The RSX must block on its semaphore ACQUIREs: each frame the FIFO acquires
+# the label the SPU light task writes when it has turned the normals/depth
+# copies in XDR into the light buffers, and only then composites. With the
+# toolkit default (acquires fall through) the composite sampled the normals
+# copy instead: glossy props blew out white, lighting came out in normal
+# colours with per-target MRT masks, and the SPU's 32x40 tiles showed. The
+# bound keeps a label nobody services from wedging the FIFO (none did here).
+export GCM_SEMA_ACQUIRE="${GCM_SEMA_ACQUIRE:-1}"
+export GCM_SEMA_ACQUIRE_MS="${GCM_SEMA_ACQUIRE_MS:-200}"
+# A self-JUMP "park" at the end of a command block is patched by the PPU some
+# time after it moves put. Once the SPUs became the bottleneck that gap can pass
+# the toolkit's 50 ms (the PPU waits on its light tasks in between), the FIFO
+# resyncs past the frame's fence and the game hangs at the New Marais load.
+# The hardware waits for ever; 1 s keeps a truly abandoned park to a hitch.
+export GCM_PARK_GRACE_MS="${GCM_PARK_GRACE_MS:-1000}"
+# The SPU light pass runs on the GPU: the light job's formula as a Metal pass,
+# the job itself reduced to its completion bookkeeping (gpu_light.c). New Marais
+# walk ~12 -> ~15 fps. PS3RECOMP_ENG_GPU_LIGHT= (empty) turns it off.
+export PS3RECOMP_ENG_GPU_LIGHT="${PS3RECOMP_ENG_GPU_LIGHT-07000B80:07384B80}"
+# PS3_ASPECT=21:9 (or 32:9) widens the picture hor+ (game_patches.cpp: the
+# cameras' aspect; the toolkit's Metal backend: wide targets, no pillarbox).
+# The HUD keeps 16:9 in the middle: it is every draw after this game's final
+# composite pass (fragment program 136d0d1989147bd8) in a frame, and every
+# draw of a frame without one (menus, comics, movies, which get black bars).
+# Read only while PS3_ASPECT asks for a wide picture; empty stretches the HUD.
+export PS3_ASPECT_HUD_AFTER="${PS3_ASPECT_HUD_AFTER-136d0d1989147bd8}"
+# The SSAO job runs on the GPU too (gpu_ssao.c, the job's five passes as Metal
+# passes; needs the light pass on): walk ~21 -> 26-28 fps. Its opt-in period
+# ended once the flip-status races were fixed (6/6 runs clean, 2026-10-17).
+# PS3RECOMP_ENG_GPU_SSAO= (empty) puts it back on the SPUs.
+export PS3RECOMP_ENG_GPU_SSAO="${PS3RECOMP_ENG_GPU_SSAO-0F800000}"
+# The occlusion-volume passes (props/buildings FP 5f740845528b0e62 with the
+# 8x8x8 cone LUT, characters FP 7875289ea6b856a6) were skipped from
+# 2026-10-17 because facades and Cole went black at dusk. That was the sun
+# shadow maps reading an empty colour target (fixed in v0.2.5, DEPTH_TEX_FIRST);
+# with the volumes drawn the dusk walk renders like the console (2026-10-22),
+# so they are on again.
+# PS3RECOMP_ENG_SKIP_FP=5f740845528b0e62,7875289ea6b856a6 skips them.
+
+# Priority (macos_host.m, the toolkit's host_qos.h): the game keeps macOS from
+# App-Napping or timer-throttling it. PS3_QOS=1 also runs its PPU, SPU and RSX
+# threads at USER_INTERACTIVE QoS; off by default (no frame-time gain in a
+# headless A/B, and two of three runs with it hung on the frame fence).
+# The window (Metal backend; rsx_metal_backend.h has the details):
+#   PS3_WINDOW_MODE=windowed|fullscreen|borderless   how it opens (windowed)
+#   PS3_WINDOW_SIZE=1920x1080   windowed size in points (1280x720 by default)
+#   PS3_MOUSE_CAPTURE=0         the mouse camera without capturing the cursor
+#   PS3_DISPLAY=2|<name>        the screen it opens on (1 = the menu bar's)
+#   PS3_VSYNC=0                 present without waiting for the refresh
+# Picture options (all off by default; the backend reads them once):
+#   PS3_ANISO=2|4|8|16          anisotropic filtering (mipmapped textures)
+#   PS3_AA=fxaa                 FXAA on the 1280x720 image
+#   PS3_SHARPEN=0..1            contrast-adaptive sharpening (AMD CAS)
+#   PS3_UPSCALE=metalfx         MetalFX spatial upscaling to the window (macOS 13+)
+#   PS3_CLARITY=-1..1           local contrast; PS3_SHADOWS / PS3_MIDTONES /
+#                               PS3_HIGHLIGHTS=-1..1 a tone curve
+#   PS3_LUT_PRESET=warm|cool|film|vivid  a built-in colour grade
+#   PS3_RES_SCALE=1.5|2|3       internal resolution: the game renders at 1080p,
+#                               1440p or 4K instead of 720p (restart to change)
+#   PS3_ASPECT=21:9|32:9        ultrawide: a wider view (hor+), the HUD kept 16:9
+#                               in the middle (restart to change)
+# Sound and controller (README "Playing"): PS3_AUDIO_VOLUME=0..100,
+# PS3_AUDIO_DEVICE=<output name>, PS3_RUMBLE=0, PS3_RUMBLE_STRENGTH=0..200.
+# It resizes freely and the image stays 16:9, letterboxed. Cmd+F or
+# Option+Return toggles fullscreen, Cmd+Ctrl+F macOS fullscreen; a click in
+# the game captures the mouse, Esc or Cmd releases it.
+# The Dock icon is the launcher's original placeholder (no Sony art);
+# PS3_WINDOW_ICON=game uses the player's own PS3_GAME/ICON0.PNG instead,
+# =<file> any image, =none the system's generic icon.
+export PS3_WINDOW_ICON="${PS3_WINDOW_ICON-$here/window_icon.png}"
+
+# macOS builds an app bundle (CMakeLists.txt): run the executable inside it,
+# directly, so the process has the bundle's identity -- that is what makes
+# Game Mode turn on once the window is fullscreen -- and still gets this
+# environment and this stdout/stderr. build/Infamous2Recomp is a symlink to it
+# (or, in a build from before the bundle, the executable itself).
+# INFAMOUS2_EXE=<file> runs another build.
+exe="$here/build/Infamous2Recomp.app/Contents/MacOS/Infamous2Recomp"
+[ -x "$exe" ] || exe="$here/build/Infamous2Recomp"
+exe="${INFAMOUS2_EXE:-$exe}"
+exec "$exe" "$vfs/PS3_GAME/USRDIR/EBOOT.elf" "$@"

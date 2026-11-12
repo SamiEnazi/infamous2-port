@@ -106,6 +106,21 @@ function Get-DriveProblem([string]$Path) {
     } catch { return "a drive Setup could not read" }
 }
 
+# A digital (PSN) copy runs from a PS3_GAME folder the player makes by hand (README): PARAM.SFO,
+# ICON0.PNG and USRDIR copied from RPCS3's dev_hdd0\game\<ID>. The game files of RPCS3's USRDIR
+# (archives, movies, images: what the game ships, not what it writes there itself) missing from that
+# folder, as USRDIR-relative paths; none = the copy is whole.
+function Get-DigitalCopyGaps([string]$Disc, [string]$GameDir) {
+    $src = Join-Path $GameDir "USRDIR"; $dst = Join-Path $Disc "PS3_GAME\USRDIR"
+    if (-not (Test-Path -LiteralPath $src)) { return }
+    $ship = @(".psarc", ".psarc_s", ".bik", ".png")
+    foreach ($f in Get-ChildItem -LiteralPath $src -Recurse -File -ErrorAction SilentlyContinue) {
+        if ($ship -notcontains $f.Extension.ToLowerInvariant()) { continue }
+        $rel = $f.FullName.Substring($src.Length).TrimStart('\')
+        if (-not (Test-Path -LiteralPath (Join-Path $dst $rel))) { $rel }
+    }
+}
+
 # One row per check: Ok (true/false/$null = a note, never blocking), Name, Detail
 function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     $root = Split-Path -Parent $PSScriptRoot
@@ -120,7 +135,7 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     Add $(if ($ram -ge 16) { $true } else { $null }) "Memory" "$ram GB$(if ($ram -lt 16) { ' (16 GB or more recommended: the build is large)' })"
     $drive = (Get-Item $root).PSDrive
     $free = [math]::Round($drive.Free / 1GB)
-    Add $(if ($free -ge 30) { $true } else { $null }) "Free disk space on $($drive.Name):" "$free GB (the build needs about 15 GB while it runs, 4 GB after)"
+    Add $(if ($free -ge 30) { $true } else { $null }) "Free disk space on $($drive.Name):" "$free GB (the build needs about 15 GB while it runs, about 7 GB after: 4 GB of game files, 3 GB of build files kept for quick updates)"
     # The port's folder must hold a junction (game\disc -> your game folder): a local NTFS or ReFS
     # drive. FAT32/exFAT (USB sticks, many external disks) and network drives fail with "Incorrect
     # function" when step 3 makes the link (GitHub issue #2) -- say so before 1.3 GB of downloads.
@@ -130,8 +145,9 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     Add $vk "Vulkan graphics driver" $(if ($vk) { "found" } else { "update your graphics driver (NVIDIA, AMD or Intel)" })
 
     # --- the build tools: downloaded into tools-cache\ during the build (tools\fetch_tools.ps1) and
-    # deleted after it, so a missing one is a note, never a blocker. Nothing is installed.
-    $later = "downloaded during the build, deleted after it"
+    # kept for quick updates (tools\setup_cleanup.ps1 -KeepBuildCache), so a missing one is a note, never a
+    # blocker. Nothing is installed.
+    $later = "downloaded during the build, kept for quick updates"
     foreach ($t in @(@("python", "Python", "CPython 3.12, ~47 MB"), @("cmake", "CMake", "CMake 3.31, ~47 MB"),
                      @("ninja", "Ninja", "Ninja 1.11, under 1 MB"), @("llvm", "LLVM (clang-cl)", "LLVM 22.1.8, ~862 MB"))) {
         $p = Get-PortTool $t[0]
@@ -172,6 +188,18 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
             $ok = ($ver -eq "01.04" -or ($digital -and $ver -eq "01.03")) -and (Test-Path (Join-Path $upd "USRDIR\EBOOT.BIN"))
             if ($digital) {
                 Add $ok "Digital game in RPCS3" $(if ($ok) { $upd } elseif ($ver) { "found version $ver in $upd; this port needs 01.03" } else { "not installed: install the game's package and its license in RPCS3 (File > Install Packages/Raps/Edats)" })
+                if ($ok -and $Disc) {
+                    $gaps = @(Get-DigitalCopyGaps -Disc $Disc -GameDir $upd)
+                    if ($gaps.Count -eq 0) { Add $true "Digital copy's PS3_GAME folder" "has all of the game's files from RPCS3's copy" }
+                    else {
+                        # A note, never a blocker: the port reads the game from this hand-made folder.
+                        # The save icon is the one that hurt: without it every save failed in builds
+                        # before 2026-11-12 ("There was an error saving." again and again).
+                        $icon = if ($gaps -contains "ui\xmb\savedata\icon.png") { " -- among them the save icon (ui\xmb\savedata\icon.png)" } else { "" }
+                        Add $null "Digital copy's PS3_GAME folder" ("$($gaps.Count) of the game's files in $upd\USRDIR are missing from $Disc\PS3_GAME\USRDIR$icon (e.g. " +
+                            (($gaps | Select-Object -First 3) -join ", ") + "): copy the whole USRDIR folder from RPCS3 into $Disc\PS3_GAME again")
+                    }
+                }
             } else {
                 Add $ok "Game update 1.04 in RPCS3" $(if ($ok) { $upd } elseif ($ver) { "found version $ver; install the 1.04 update in RPCS3 (File > Install Packages)" } else { "not installed: install the 1.04 update in RPCS3 (File > Install Packages)" })
             }

@@ -113,8 +113,8 @@ $btnTools.Add_Click({
 })
 $btnBuild.Add_Click({
     if (Get-Process rpcs3 -ErrorAction SilentlyContinue) { [System.Windows.Forms.MessageBox]::Show("Close RPCS3 first: Setup uses it to decrypt your game.", "Setup") | Out-Null; return }
-    # The build downloads its tools (deleted afterwards); Microsoft's C++ files need their license.
-    $lic = "Setup downloads the build tools into this folder (about 1.3 GB, deleted after the build; nothing is installed).`n`n" +
+    # The build downloads its tools (kept for quick updates); Microsoft's C++ files need their license.
+    $lic = "Setup downloads the build tools into this folder (about 1.3 GB, kept for quick updates; nothing is installed).`n`n" +
            "Microsoft's C++ files (MSVC and the Windows SDK) come under the Visual Studio Build Tools license:`n" +
            "https://go.microsoft.com/fwlink/?LinkId=2179911`n`nDo you accept Microsoft's license terms?"
     if ([System.Windows.Forms.MessageBox]::Show($lic, "Microsoft's license", "YesNo", "Question") -ne "Yes") { return }

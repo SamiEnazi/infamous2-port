@@ -18,7 +18,7 @@ first = {}
 for ln in log:
     m = err.match(ln)
     if m:
-        f = re.sub(r"^.*?toolkit[\\/]", "", m["file"])
+        f = re.sub(r"^.*?(?:toolkit|engine)[\\/]", "", m["file"])
         key = (f, m["msg"])
         errors[key] += 1
         first.setdefault(key, m["line"])

@@ -1,0 +1,203 @@
+/*
+ * ps3recomp - cellSysutil HLE
+ *
+ * Core system utility functions: callbacks, system parameters,
+ * BGM playback control, disc check, system cache, and overlay.
+ */
+
+#ifndef PS3RECOMP_CELL_SYSUTIL_H
+#define PS3RECOMP_CELL_SYSUTIL_H
+
+#include "ps3emu/ps3types.h"
+#include "ps3emu/error_codes.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---------------------------------------------------------------------------
+ * Constants
+ * -----------------------------------------------------------------------*/
+
+/* System parameter IDs (cellSysutilGetSystemParamInt) */
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_LANG                 0x0111
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_ENTER_BUTTON_ASSIGN  0x0112
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_DATE_FORMAT          0x0114
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_TIME_FORMAT          0x0115
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_TIMEZONE             0x0116
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_SUMMERTIME           0x0117
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_GAME_PARENTAL_LEVEL  0x0121
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_GAME_PARENTAL_LEVEL0_RESTRICT  0x0123
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_CURRENT_USER_HAS_NP_ACCOUNT    0x0141
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_CAMERA_PLFREQ        0x0151
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_PAD_RUMBLE           0x0152
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_KEYBOARD_TYPE        0x0153
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_JAPANESE_KEYBOARD_ENTRY_METHOD  0x0154
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_CHINESE_KEYBOARD_ENTRY_METHOD  0x0155
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_PAD_AUTOOFF          0x0156
+
+/* System parameter string IDs (cellSysutilGetSystemParamString) */
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_NICKNAME             0x0113
+#define CELL_SYSUTIL_SYSTEMPARAM_ID_CURRENT_USERNAME     0x0131
+
+/* Language constants */
+#define CELL_SYSUTIL_LANG_JAPANESE           0
+#define CELL_SYSUTIL_LANG_ENGLISH_US         1
+#define CELL_SYSUTIL_LANG_FRENCH             2
+#define CELL_SYSUTIL_LANG_SPANISH            3
+#define CELL_SYSUTIL_LANG_GERMAN             4
+#define CELL_SYSUTIL_LANG_ITALIAN            5
+#define CELL_SYSUTIL_LANG_DUTCH              6
+#define CELL_SYSUTIL_LANG_PORTUGUESE_PT      7
+#define CELL_SYSUTIL_LANG_RUSSIAN            8
+#define CELL_SYSUTIL_LANG_KOREAN             9
+#define CELL_SYSUTIL_LANG_CHINESE_T          10
+#define CELL_SYSUTIL_LANG_CHINESE_S          11
+#define CELL_SYSUTIL_LANG_FINNISH            12
+#define CELL_SYSUTIL_LANG_SWEDISH            13
+#define CELL_SYSUTIL_LANG_DANISH             14
+#define CELL_SYSUTIL_LANG_NORWEGIAN          15
+#define CELL_SYSUTIL_LANG_POLISH             16
+#define CELL_SYSUTIL_LANG_PORTUGUESE_BR      17
+#define CELL_SYSUTIL_LANG_ENGLISH_GB         18
+#define CELL_SYSUTIL_LANG_TURKISH            19
+
+/* Enter button assign */
+#define CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CIRCLE  0
+#define CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CROSS   1
+
+/* Callback status codes */
+#define CELL_SYSUTIL_REQUEST_EXITGAME         0x0101
+#define CELL_SYSUTIL_DRAWING_BEGIN            0x0121
+#define CELL_SYSUTIL_DRAWING_END              0x0122
+#define CELL_SYSUTIL_SYSTEM_MENU_OPEN         0x0131
+#define CELL_SYSUTIL_SYSTEM_MENU_CLOSE        0x0132
+#define CELL_SYSUTIL_BGMPLAYBACK_PLAY         0x0141
+#define CELL_SYSUTIL_BGMPLAYBACK_STOP         0x0142
+#define CELL_SYSUTIL_NP_INVITATION_SELECTED   0x0151
+
+/* Maximum callback slots */
+#define CELL_SYSUTIL_MAX_CALLBACKS  4
+
+/* BGM playback */
+#define CELL_SYSUTIL_BGMPLAYBACK_STATUS_STOP     0
+#define CELL_SYSUTIL_BGMPLAYBACK_STATUS_PLAY     1
+#define CELL_SYSUTIL_BGMPLAYBACK_STATUS_PAUSE    2
+
+/* System cache path size */
+#define CELL_SYSCACHE_PATH_MAX  1055
+
+/* Disc game types */
+#define CELL_DISCGAME_TYPE_DISC    1
+#define CELL_DISCGAME_TYPE_HDD     2
+#define CELL_DISCGAME_SYSP_TITLEID_SIZE   10
+#define CELL_DISCGAME_ERROR_NOT_DISCBOOT  0x8002BD02
+
+/* Callback function type */
+typedef void (*CellSysutilCallback)(u64 status, u64 param, void* userdata);
+
+/* ---------------------------------------------------------------------------
+ * Core callbacks & params
+ * -----------------------------------------------------------------------*/
+
+s32 cellSysutilRegisterCallback(s32 slot, CellSysutilCallback func, void* userdata);
+s32 cellSysutilUnregisterCallback(s32 slot);
+s32 cellSysutilCheckCallback(void);
+s32 cellSysutilQueueGuestCallbackArgs(u32 opd, const u64 args[8]);
+s32 cellSysutilQueueGuestCallback(u32 opd, u64 arg0, u64 arg1);
+
+/* Internal HLE completion queue, delivered by the guest's next callback poll. */
+s32 cellSysutilQueueGuestCallback(u32 opd, u64 arg0, u64 arg1);
+/* Copy eight guest register arguments into the deferred completion queue. */
+s32 cellSysutilQueueGuestCallbackArgs(u32 opd, const u64 args[8]);
+
+/* Host-side helper: queue a sysutil event to be delivered to the game's
+ * registered callback at the next cellSysutilCheckCallback poll. status
+ * is one of the CELL_SYSUTIL_* event codes (REQUEST_EXITGAME,
+ * SYSTEM_MENU_OPEN, DRAWING_BEGIN/END, etc.). param is event-specific.
+ *
+ * The slot must match the slot the game registered against; flOw and most
+ * games use slot 0. */
+void cellSysutilQueueEvent(int slot, u32 status, u32 param);
+
+/* Quit the game from the host (the in-game menu, Cmd+Q, PS3_QUIT): sends
+ * REQUEST_EXITGAME, then ends the process with status 0 if the title has not
+ * within PS3_QUIT_GRACE_MS, never while a save is being written. Returns at
+ * once; a second call does nothing. ps3_host_quitting(): 1 once asked. */
+void ps3_host_quit(const char* why);
+int  ps3_host_quitting(void);
+
+/* Restart the game (the Mods page's "Restart to apply"): quit as above, then
+ * the launcher (PS3_LAUNCHER_RESTART=1: exit status PS3_EXIT_RESTART) or the
+ * registered relauncher starts it again. ps3_host_exit_status(code) is the
+ * status the process ends with (code, or PS3_EXIT_RESTART); every host exit
+ * of a quit goes through it. ps3_host_can_restart(): one of the two exists. */
+#define PS3_EXIT_RESTART 0x52455354   /* "REST" */
+void ps3_host_restart(const char* why);
+int  ps3_host_can_restart(void);
+int  ps3_host_exit_status(int code);
+void ps3_host_set_relauncher(int (*fn)(void));   /* 1 = started */
+
+/* [update] Update the port (F2 > Update, libs/video/vk_overlay_update.inc): the
+ * launcher (tools/play.ps1 sets PS3_LAUNCHER_UPDATE=1) installs the newest
+ * version after the game ends with PS3_EXIT_UPDATE. ps3_host_set_update(1)
+ * asks for it at the next quit, whichever way the game ends (the menu, the
+ * window, the title's own exit; it wins over a restart), (0) takes it back;
+ * ps3_host_update_now() = that and a quit. ps3_host_can_update(): a launcher
+ * that answers it. Without one nothing changes (the exit status stays). */
+#define PS3_EXIT_UPDATE 0x55504454    /* "UPDT" */
+int  ps3_host_can_update(void);
+void ps3_host_set_update(int on);
+int  ps3_host_update_pending(void);
+void ps3_host_update_now(const char* why);
+
+/* For the in-game menu's Language section: the PS3_LANG code that unset /
+ * PS3_LANG=auto gives the title (the host's UI language; "" = none of the
+ * PS3's, so English), and the CELL_SYSUTIL_LANG_* it was told (-1 until it asked). */
+void ps3_sysutil_host_language(char* out, size_t n);
+s32  ps3_sysutil_language_in_use(void);
+
+/* value_ea / buf_ea are GUEST addresses, not host pointers: both write into
+ * the title's own memory through vm_write*. Spelt u32 so a caller cannot
+ * translate the argument first and hand over a host address. */
+s32 cellSysutilGetSystemParamInt(s32 id, u32 value_ea);
+s32 cellSysutilGetSystemParamString(s32 id, u32 buf_ea, u32 bufsize);
+
+/* ---------------------------------------------------------------------------
+ * BGM playback control
+ * -----------------------------------------------------------------------*/
+
+s32 cellSysutilEnableBgmPlayback(void);
+s32 cellSysutilDisableBgmPlayback(void);
+s32 cellSysutilGetBgmPlaybackStatus(s32* status);
+s32 cellSysutilSetBgmPlaybackExtraParam(void* param);
+s32 cellSysutilEnableBgmPlaybackEx(s32 param);
+s32 cellSysutilDisableBgmPlaybackEx(void);
+
+/* ---------------------------------------------------------------------------
+ * System cache
+ * -----------------------------------------------------------------------*/
+
+s32 cellSysCacheMount(char* cachePath);
+s32 cellSysCacheClear(void);
+
+/* ---------------------------------------------------------------------------
+ * Disc game check
+ * -----------------------------------------------------------------------*/
+
+s32 cellDiscGameGetBootDiscInfo(void* getParam);
+s32 cellDiscGameRegisterDiscChangeCallback(void (*callback)(void*), void* arg);
+s32 cellDiscGameUnregisterDiscChangeCallback(void);
+
+/* ---------------------------------------------------------------------------
+ * Misc utilities
+ * -----------------------------------------------------------------------*/
+
+s32 cellSysutilGetLicenseArea(void);
+s32 cellSysutilIsMeetingApp(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* PS3RECOMP_CELL_SYSUTIL_H */

@@ -30,6 +30,9 @@ function Mirror([string]$src, [string]$dst, [string[]]$descend) {
     }
 }
 Mirror (Join-Path $game "disc") (Join-Path $out "disc") @("PS3_GAME", "USRDIR", "movies", "cutscene")
-Mirror (Join-Path $game "dev_hdd0") (Join-Path $out "dev_hdd0") @("game", "BCES01143_INSTALL", "USRDIR", "movies", "cutscene")
-$n = (Get-ChildItem "$out\disc\PS3_GAME\USRDIR\movies\cutscene\*.bik").Count + (Get-ChildItem "$out\dev_hdd0\game\BCES01143_INSTALL\USRDIR\movies\cutscene\*.bik" -ErrorAction SilentlyContinue).Count
+# the HDD install by its own title (BCES01143_INSTALL on the EU disc; another name on other copies)
+$inst = @(Get-ChildItem (Join-Path $game "dev_hdd0\game") -Directory -Filter "*_INSTALL" -ErrorAction SilentlyContinue | Sort-Object Name)
+$instName = if ($inst.Count) { $inst[0].Name } else { "BCES01143_INSTALL" }
+Mirror (Join-Path $game "dev_hdd0") (Join-Path $out "dev_hdd0") @("game", $instName, "USRDIR", "movies", "cutscene")
+$n = (Get-ChildItem "$out\disc\PS3_GAME\USRDIR\movies\cutscene\*.bik").Count + (Get-ChildItem "$out\dev_hdd0\game\$instName\USRDIR\movies\cutscene\*.bik" -ErrorAction SilentlyContinue).Count
 "fast-movie views in ${out}: $n cutscene movies -> the 4 s placeholder"

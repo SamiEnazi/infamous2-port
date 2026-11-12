@@ -62,6 +62,9 @@
 #include "ppu_recomp.h"
 #include "ps3emu/ppu_hooks.h"
 #include "ps3emu/ps3_cheats.h"
+#ifndef PS3_CHEATS_HAVE_NO_CASUAL   /* a toolkit without it: every cheat counts for RecompLauncher */
+#define PS3_CHEAT_NO_CASUAL 0
+#endif
 #include "ps3emu/ps3_mouse_camera.h"   /* [mouse] the mouse camera's direct mode (cellPad) */
 
 #include <atomic>
@@ -1446,13 +1449,15 @@ int apply_spot_save(ps3_cheat*)
     return 1;
 }
 
+/* Picking a spot or saving one changes neither play nor progress (PS3_CHEAT_NO_CASUAL: RecompLauncher's
+ * unlocks stay Ranked); going there (spotgo, F7) does. */
 ps3_cheat s_spot = { "spot", "Spot", s_spot_help, "Saved spots", PS3_CHEAT_CHOICE, apply_spot,
-    0, 0, 0, NULL, s_spot_names, 0, NULL, PS3_CHEAT_NO_REMEMBER };
+    0, 0, 0, NULL, s_spot_names, 0, NULL, PS3_CHEAT_NO_REMEMBER | PS3_CHEAT_NO_CASUAL };
 ps3_cheat s_spotgo = { "spotgo", "Go to saved spot (F7)", s_go_help, "Saved spots", PS3_CHEAT_ACTION, apply_spot_go,
     0, 0, 0, NULL, NULL, 0, NULL, PS3_CHEAT_HOTKEY };
 ps3_cheat s_spotsave = { "spotsave", "Save this spot",
     "Adds where Cole stands now, the way he faces and the camera's angles as a new spot (Spot 1, Spot 2, ...) "
-    "and picks it.", "Saved spots", PS3_CHEAT_ACTION, apply_spot_save };
+    "and picks it.", "Saved spots", PS3_CHEAT_ACTION, apply_spot_save, 0, 0, 0, NULL, NULL, 0, NULL, PS3_CHEAT_NO_CASUAL };
 
 /* The page's texts and the combo (menu thread; also at start). spots.ini changed on disk: read again. */
 void spots_texts_locked()
@@ -1655,8 +1660,9 @@ ps3_cheat s_krank = { "karmarank", "Karma rank", s_krank_help, "Karma", PS3_CHEA
 const char* const kFlyChoices[] = { "Off", "On (climb 600, dive 1200: L_'s)", "Faster (climb 1200, dive 2400)" };
 const char* const kFastChoices[] = { "Off (the game's own)", "2000 (L_'s)", "3000" };
 char s_black_help[700], s_fly_help[900], s_fast_help[700];
+/* Black lightning only changes how the arcs look (PS3_CHEAT_NO_CASUAL) */
 ps3_cheat s_black = { "blacklight", "Black lightning", s_black_help, "Lightning and Static Thrusters (patches by L_)",
-    PS3_CHEAT_TOGGLE, apply_black };
+    PS3_CHEAT_TOGGLE, apply_black, 0, 0, 0, NULL, NULL, 0, NULL, PS3_CHEAT_NO_CASUAL };
 ps3_cheat s_tfly = { "thrustfly", "Static Thrusters flight", s_fly_help, "Lightning and Static Thrusters (patches by L_)",
     PS3_CHEAT_CHOICE, apply_tfly, 0, 0, 0, NULL, kFlyChoices, 3 };
 ps3_cheat s_tfast = { "thrustfast", "Static Thrusters speed", s_fast_help, "Lightning and Static Thrusters (patches by L_)",

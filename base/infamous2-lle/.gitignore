@@ -1,0 +1,17 @@
+# Game, firmware and everything generated from them stay local.
+/game/
+/fw/
+/vfs/
+/recompiled/
+/prx/
+/lle/
+/lle_spu/
+/spu/
+/spu_miss/
+/out/
+/build/
+
+# Saves (game data, Erik's own progress): never committed.
+/gamedata/
+/save-backup-*/
+/recomp_spu_ls.bin

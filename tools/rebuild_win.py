@@ -1,14 +1,22 @@
-"""Windows driver for the inFAMOUS 2 lift (replaces the Mac port's rebuild.py).
+"""Windows (and Linux) driver for the inFAMOUS 2 lift (replaces the Mac port's rebuild.py).
 
-Same translation steps and arguments as
-community/erikomis-infamous2-recomp/infamous2-lle/tools/rebuild.py, without its
+Same translation steps and arguments as base/infamous2-lle/tools/rebuild.py (the
+port base, Erik Martins' infamous2-recomp), without its
 macOS host check, NPUA80638 title-ID check and .rap requirement (our copy is the
 EU disc BCES01143 + v1.04 update, whose code is identical: PPU-41a7d047...).
 
     python -I tools/rebuild_win.py [--only step,step] [--from step]
+    python -I tools/rebuild.py ...        (the same driver, a host-neutral name)
 
 Steps: inputs port firmware ppu spu jobs compile
 Logs:  work/logs/<step>.log    Output: work/port/
+
+Host: on Windows clang-cl + lld-link in the Visual Studio / portable MSVC environment.
+On Linux (step_compile_linux) clang/clang++ + lld with the same flags in GNU spelling
+(PORT_LIFT_OPT / PORT_SPU_ARCH then take GNU flags), the same PORT_PGO / PORT_LIFT_LTO;
+no vsenv, no resource compiler, no SDL2.dll. Linux-only inputs: PORT_SDL2_DIR (an SDL2
+CMake config folder; unset = the system's), PORT_GLSLANG_DIR (glslang's
+lib/cmake/glslang; unset = deps/glslang-install-linux when present, else the system's).
 """
 import argparse
 import hashlib
@@ -20,15 +28,19 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TK = os.environ.get("PORT_TK") or os.path.join(ROOT, "toolkit")   # PORT_TK: another toolkit tree (an agent worktree)
-PORT_SRC = os.path.join(ROOT, "community", "erikomis-infamous2-recomp", "infamous2-lle")
+# The engine (engine/, our ps3recomp fork; "the toolkit" in older notes) and the port base (base/, Erik
+# Martins' infamous2-recomp) are folders of this repository. PORT_TK: another engine tree (an agent
+# worktree of the old toolkit repository, or another checkout's engine/); PORT_BASE: another port base.
+TK = os.environ.get("PORT_TK") or os.path.join(ROOT, "engine")
+PORT_SRC = os.path.join(os.environ.get("PORT_BASE") or os.path.join(ROOT, "base"), "infamous2-lle")
 WORK = os.path.join(ROOT, "work")
 PORT = os.environ.get("PORT_DIR") or os.path.join(WORK, "port")   # PORT_DIR: a separate port tree (lifter A/B)
 FW = os.path.join(WORK, "fw")
 LOGS = os.path.join(WORK, "logs")
 ELF_SRC = os.path.join(ROOT, "eboot", "EBOOT_upd104.elf")
 ELF = os.path.join(WORK, "EBOOT.elf")
-PY = os.path.join(WORK, "venv", "Scripts", "python.exe")
+IS_WIN = os.name == "nt"   # else Linux: step_compile_linux
+PY = os.path.join(WORK, "venv", "Scripts", "python.exe") if IS_WIN else os.path.join(WORK, "venv", "bin", "python")
 DEPS = os.path.join(ROOT, "deps")
 # PORT_SPU_REWRITES: another native SPU rewrite directory (an agent's own copy; holds natives.txt + *.c),
 # PORT_SPU_NATIVES_FILE: another natives.txt. Defaults: work/rewrites/spu and its natives.txt.
@@ -87,6 +99,20 @@ class StepError(Exception):
     pass
 
 
+def rpcs3_firmware(rpcs3):
+    """(the installed firmware's dev_flash, the RPCS3 program). Windows: both in the RPCS3 folder.
+    Linux: `rpcs3` is the AppImage or a folder holding rpcs3; dev_flash is beside it when there,
+    else in RPCS3's config folder ($XDG_CONFIG_HOME/rpcs3, ~/.config/rpcs3)."""
+    if IS_WIN:
+        return os.path.join(rpcs3, "dev_flash"), os.path.join(rpcs3, "rpcs3.exe")
+    exe = rpcs3 if os.path.isfile(rpcs3) else os.path.join(rpcs3, "rpcs3")
+    flash = os.path.join(os.path.dirname(exe), "dev_flash")
+    if not os.path.isdir(flash):
+        cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+        flash = os.path.join(cfg, "rpcs3", "dev_flash")
+    return flash, exe
+
+
 def run(step, cmd, cwd=PORT, env_defaults=None):
     os.makedirs(LOGS, exist_ok=True)
     with open(os.path.join(LOGS, step + ".log"), "a", encoding="utf-8", errors="replace") as lf:
@@ -132,6 +158,189 @@ def fresh(*dirs):
             shutil.rmtree(p)
 
 
+# ---- updates: lift steps kept, byte-identical lifts keep their times (updater, 2026-11-12) ----------
+# PORT_LIFT_REUSE=1 (tools/setup_build.ps1 sets it; Setup keeps work/port between updates,
+# tools/setup_cleanup.ps1 -KeepBuildCache): a lift step whose inputs (the game's code or firmware, the
+# toolkit's tools, this script, the lift switches in the environment, the cheats' hook lists, the SPU
+# patch list, ...) are those of its last good run is skipped; a step that does run gives every file that
+# comes out byte-identical its old time back, so ninja compiles only what really changed. The lifts are
+# deterministic: two separate lifts of the same inputs are byte-identical, and three new cheat hooks
+# changed 3 of the 37 PPU chunks (work/port-m23 vs work/port-bl). Unset = the old way: every step
+# lifts again and every lifted file is new.
+REUSE = os.environ.get("PORT_LIFT_REUSE") == "1"
+LIFT = os.path.join(PORT, ".lift")        # <step>.fp: the inputs of the step's last good run
+HELD = os.path.join(LIFT, "prev")         # this run's lift steps' previous outputs (for their times)
+LIFT_DIRS = {"firmware": ("lle", "lle_spu"), "ppu": ("recompiled",), "spu": ("spu",)}
+JOB_OUTPUTS = ("jobmods_register.c", "datamods_register.c", "relocmods_register.c", "jobmods_manifest.json")
+# switches that change the compile, a tool's place or this logic, not what a lift writes
+LIFT_ENV_SKIP = {"PORT_JOBS", "PORT_BUILD", "PORT_PGO", "PORT_PGO_NAMES", "PORT_LIFT_OPT", "PORT_SPU_ARCH",
+                 "PORT_LIFT_LTO", "PORT_LIFT_REUSE", "PORT_BUILD_CACHE", "PORT_ONLY_CACHE", "PORT_RPCS3",
+                 "PORT_VCVARS", "PORT_NINJA", "PORT_LLVM", "PORT_CMAKE", "PORT_PYTHON", "PORT_MSVC", "PORT_SDK",
+                 "PORT_SETUP_API", "PORT_SETUP_CODELOAD"}   # (the last two: Setup.exe's test stand-in for GitHub)
+_lifted = set()                           # the lift steps that ran in this invocation
+
+
+def _hash_file(h, label, path):
+    h.update(label.encode() + b"\0")
+    h.update(sha256(path).encode() if path and os.path.isfile(path) else b"-")
+
+
+def _hash_tree(h, top):
+    if not os.path.isdir(top):
+        h.update(b"no " + top.encode())
+        return
+    for dp, dn, fn in os.walk(top):
+        dn[:] = sorted(d for d in dn if d not in ("__pycache__", ".git"))
+        for f in sorted(fn):
+            p = os.path.join(dp, f)
+            _hash_file(h, os.path.relpath(p, top).replace("\\", "/"), p)
+
+
+def fingerprint(step):
+    """What a lift step reads, as one hash."""
+    h = hashlib.sha256()
+    h.update(("\0".join(["lift-v1", step, sys.version, str(os.cpu_count()), os.path.abspath(TK), os.path.abspath(PORT)]) + "\0").encode())
+    _hash_file(h, "rebuild_win.py", os.path.abspath(__file__))
+    _hash_tree(h, os.path.join(TK, "tools"))
+    for k in sorted(os.environ, key=str.upper):
+        ku = k.upper()
+        if ku.startswith(("PPU_", "SPU_", "PORT_", "PS3_")) and ku not in LIFT_ENV_SKIP:
+            h.update(f"{ku}={os.environ[k]}\0".encode())
+    if step == "firmware":
+        for m in FIRMWARE:
+            _hash_file(h, m, os.path.join(FW, m + ".prx"))
+    else:
+        _hash_file(h, "elf", ELF)
+    if step == "ppu":
+        for f in ("hooks.txt", "patches.txt"):
+            _hash_file(h, f, os.path.join(CHEATS, f))
+    if step in ("spu", "jobs"):
+        _hash_file(h, "natives", SPU_NATIVES)
+        _hash_file(h, "spu_patches", SPU_PATCHES)
+    if step == "jobs":
+        _hash_tree(h, os.path.join(PORT, "tools"))   # the port's own lift tools (step_port puts them there)
+    return h.hexdigest()
+
+
+def _outputs(step):
+    """A lift step's outputs, relative to PORT."""
+    if step in LIFT_DIRS:
+        return [d for d in LIFT_DIRS[step] if os.path.exists(os.path.join(PORT, d))]
+    spu = os.path.join(PORT, "spu")
+    names = sorted(os.listdir(spu)) if os.path.isdir(spu) else []
+    return ["spu/" + n for n in names if n.startswith(("jobmod_", "datamod_", "relocmod_")) or n == "jobmods" or n in JOB_OUTPUTS]
+
+
+def lift_skip(step):
+    """True: the step's outputs are there and its inputs did not change since its last good run. Else the
+    step will run: its fingerprint is dropped first (a stopped run never counts) and its old outputs are
+    held aside, so that lift_restore_times can give byte-identical new files their old times."""
+    if step not in ("firmware", "ppu", "spu", "jobs"):
+        return False
+    fp_file = os.path.join(LIFT, step + ".fp")
+    if not REUSE:   # a lift no fingerprint describes: a later PORT_LIFT_REUSE run must not keep it
+        if os.path.isfile(fp_file):
+            os.remove(fp_file)
+        return False
+    want = fingerprint(step)
+    have = open(fp_file).read().strip() if os.path.isfile(fp_file) else ""
+    # jobs writes into spu/: when spu lifted again, so does jobs
+    blocked = step == "jobs" and "spu" in _lifted
+    if have == want and _outputs(step) and not blocked:
+        print(f"  unchanged since the last build: kept ({len(_outputs(step))} output(s))", flush=True)
+        return True
+    if os.path.isfile(fp_file):
+        os.remove(fp_file)
+    for rel in _outputs(step):
+        src, dst = os.path.join(PORT, rel), os.path.join(HELD, rel)
+        try:
+            if os.path.exists(dst):             # (held since a stopped run: that older one stays)
+                shutil.rmtree(src) if os.path.isdir(src) else os.remove(src)
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.replace(src, dst)
+        except OSError as e:                    # (a file in use: the step's own clean-up deals with it)
+            print(f"  could not set {rel} aside ({e}): its files are compiled again", flush=True)
+    _lifted.add(step)
+    return False
+
+
+def lift_done(step):
+    if REUSE and step in _lifted:
+        os.makedirs(LIFT, exist_ok=True)
+        with open(os.path.join(LIFT, step + ".fp"), "w") as f:
+            f.write(fingerprint(step) + "\n")
+
+
+def lift_restore_times():
+    """Every newly lifted file with the same bytes as the one it replaces gets that one's time back."""
+    if not os.path.isdir(HELD):
+        return
+    kept = new = 0
+    for dp, _, fn in os.walk(HELD):
+        for f in fn:
+            old = os.path.join(dp, f)
+            cur = os.path.join(PORT, os.path.relpath(old, HELD))
+            try:
+                so = os.stat(old)
+                if os.path.isfile(cur) and os.path.getsize(cur) == so.st_size and _same_bytes(old, cur):
+                    os.utime(cur, ns=(so.st_atime_ns, so.st_mtime_ns))
+                    kept += 1
+                else:
+                    new += 1
+            except OSError:
+                new += 1
+    shutil.rmtree(HELD, ignore_errors=True)
+    print(f"  lifted files: {kept} unchanged (kept their times: not compiled again), {new} new or changed", flush=True)
+
+
+def _same_bytes(a, b):
+    with open(a, "rb") as fa, open(b, "rb") as fb:
+        while True:
+            x, y = fa.read(1 << 20), fb.read(1 << 20)
+            if x != y:
+                return False
+            if not x:
+                return True
+
+
+def toolset_check(build):
+    """PORT_LIFT_REUSE: the compiler and the C++ libraries the kept objects were made with. When they
+    changed (a newer port wants newer tools: tools/fetch_tools.py), every object is made again."""
+    if not REUSE:
+        return
+    import port_paths as pp
+    parts = []
+    portable = pp.get("msvc", required=False) and pp.get("sdk", required=False)
+    for k in ("llvm", "msvc", "sdk") + (() if portable else ("vcvars",)):
+        v = pp.get(k, required=False)
+        if not v:
+            continue
+        mark = os.path.join(v, ".ready") if os.path.isdir(v) else v
+        stamp = ""
+        if os.path.isfile(mark):
+            st = os.stat(mark)
+            stamp = f"{st.st_size}:{st.st_mtime_ns}"
+        clang = os.path.join(v, "bin", "clang-cl.exe") if k == "llvm" else ""
+        if clang and os.path.isfile(clang):
+            st = os.stat(clang)
+            stamp += f"|{st.st_size}:{st.st_mtime_ns}"
+        parts.append(f"{k}={os.path.abspath(v)}|{stamp}")
+    want = "\n".join(parts) + "\n"
+    f = os.path.join(build, ".toolset")
+    have = open(f).read() if os.path.isfile(f) else None
+    if have is not None and have != want:
+        print("  the build tools changed since the last build: every object is made again", flush=True)
+        for n in ("CMakeCache.txt", ".ninja_log", ".ninja_deps", "build.ninja"):
+            p = os.path.join(build, n)
+            if os.path.isfile(p):
+                os.remove(p)
+        shutil.rmtree(os.path.join(build, "CMakeFiles"), ignore_errors=True)
+    os.makedirs(build, exist_ok=True)
+    with open(f, "w") as fh:
+        fh.write(want)
+
+
 def step_inputs():
     os.makedirs(WORK, exist_ok=True)
     if ppu_hash(ELF_SRC) != PPU_HASH:
@@ -142,12 +351,12 @@ def step_inputs():
     for m in FIRMWARE:
         prx = os.path.join(FW, m + ".prx")
         if not os.path.isfile(prx):
-            RPCS3 = port_paths.get("rpcs3")
-            src = os.path.join(RPCS3, "dev_flash", "sys", "external", m + ".sprx")
+            flash, rpcs3_exe = rpcs3_firmware(port_paths.get("rpcs3"))
+            src = os.path.join(flash, "sys", "external", m + ".sprx")
             dst = os.path.join(FW, m + ".sprx")
             shutil.copy2(src, dst)
             # RPCS3 is single-instance: one file per invocation, nothing else running
-            subprocess.run([os.path.join(RPCS3, "rpcs3.exe"), "--decrypt", dst], timeout=120)
+            subprocess.run([rpcs3_exe, "--decrypt", dst], timeout=120)
             for cand in (os.path.join(FW, m + ".prx"), os.path.join(FW, m + ".elf")):
                 if os.path.isfile(cand) and cand != prx:
                     os.replace(cand, prx)
@@ -167,12 +376,12 @@ if os.environ.get("PORT_CHEATS_DIR"):
     CHEATS = os.path.abspath(os.environ["PORT_CHEATS_DIR"])
     if not os.path.isfile(os.path.join(CHEATS, "cheats.cpp")):
         sys.exit("PORT_CHEATS_DIR: no cheats.cpp in " + CHEATS)
-PORT_PATCHES = os.path.join(ROOT, "patches", "port")   # our edits to community port files
+PORT_PATCHES = os.path.join(ROOT, "patches", "port")   # our edits to the port base's files
 
 
 def step_port():
-    """Pristine community port files, then our files, then our patches, so
-    work/port always equals community + port_src + patches/port."""
+    """Pristine port base files (base/infamous2-lle), then our files, then our patches, so
+    work/port always equals the port base + port_src + patches/port."""
     os.makedirs(os.path.join(PORT, "tools"), exist_ok=True)
     n = 0
     pairs = [(os.path.join(PORT_SRC, f), os.path.join(PORT, f)) for f in PORT_FILES]
@@ -226,6 +435,19 @@ def step_port():
             print("  app.rc: the exe gets work/icon/app.ico")
 
 
+# Linux: the rewrites are written against the MSVC CRT (_aligned_malloc, ...); the toolkit's
+# msvc_compat.h supplies those names off Windows (the SPU TUs have runtime/platform on their path).
+LINUX_REWRITE_PRELUDE = '#include "msvc_compat.h"   /* off Windows: the MSVC CRT names a rewrite uses */\n'
+
+
+def rewrite_wrapper(path, linux=None):
+    """The text of spu/zz_native_<name>/spu_recomp.c for the rewrite at <path> (linux: this host's)."""
+    linux = (not IS_WIN) if linux is None else linux
+    return ("/* native SPU rewrite (work/rewrites/spu: game-derived, gitignored), built like the lifted SPU TUs */\n"
+            + (LINUX_REWRITE_PRELUDE if linux else "")
+            + '#include "%s"\n' % path.replace("\\", "/"))
+
+
 def spu_rewrites():
     """work/rewrites/spu/*.c into the port tree, one lifted-SPU-like TU each (spu/zz_native_<name>:
     the port's CMake globs spu/*/spu_recomp.c and builds them with the SPU flags; one TU per file,
@@ -249,8 +471,7 @@ def spu_rewrites():
             shutil.rmtree(os.path.join(spu, n))
     for n, f in sorted(want.items()):
         os.makedirs(os.path.join(spu, n), exist_ok=True)
-        text = ("/* native SPU rewrite (work/rewrites/spu: game-derived, gitignored), built like the lifted SPU TUs */\n"
-                '#include "%s"\n' % os.path.join(src, f).replace("\\", "/"))
+        text = rewrite_wrapper(os.path.join(src, f))
         p = os.path.join(spu, n, "spu_recomp.c")
         if not os.path.isfile(p) or open(p, encoding="utf-8").read() != text:
             with open(p, "w", encoding="utf-8") as fh:
@@ -259,14 +480,72 @@ def spu_rewrites():
         print("  native SPU rewrites:", ", ".join(cs))
 
 
+def pgo_profile_names(profdata, exe=None):
+    """How a profile names static functions: 'path' ('<full source path>;<name>', LLVM's
+    default, every profile before PORT_PGO_NAMES) or 'base' ('<file name>;<name>'). For a
+    'path' profile trained from another tree than this build's (PORT_TK, PORT_DIR), say
+    so: every static function of this build then compiles without its profile.
+    exe: llvm-profdata (default: the Windows LLVM folder's)."""
+    exe = exe or os.path.join(port_paths.get("llvm"), "bin", "llvm-profdata.exe")
+    try:
+        out = subprocess.run([exe, "show", "--all-functions", profdata], capture_output=True,
+                             text=True, errors="replace").stdout
+    except OSError:
+        return "path"
+    paths = []
+    for ln in out.splitlines():
+        s = ln.strip()
+        if s.endswith(":") and ";" in s:
+            f = s[:-1].split(";", 1)[0]
+            if (len(f) > 2 and f[1] == ":" and f[2] in "\\/") or (not IS_WIN and f.startswith("/")):
+                paths.append(os.path.normcase(os.path.normpath(f)))
+    if not paths:
+        return "base"
+    mine = tuple(os.path.normcase(os.path.abspath(d)) + os.sep for d in (TK, PORT))
+    other = [p for p in paths if not p.startswith(mine)]
+    if len(other) > len(paths) // 2:
+        trees = sorted({os.sep.join(p.split(os.sep)[:5]) for p in other})
+        print(f"  PGO WARNING: {os.path.basename(profdata)} names static functions by path and was trained "
+              f"from {', '.join(trees[:3])}; this build compiles from {TK} and {PORT}, so {len(other)} of "
+              f"the profile's {len(paths)} static-function records match nothing: those functions get NO "
+              f"profile. Retrain (new profiles use file names), or build from the trained trees.")
+    return "path"
+
+
+def pgo_mismatch_summary(logf, start):
+    """After a PGO use build: the functions whose code changed since the profile was trained
+    (IR PGO's '-Wbackend-plugin' "hash mismatch ... up to N count discarded": they compile
+    without profile), hottest first. Only what this build compiled (the log from `start`;
+    an object ninja did not recompile keeps what it had)."""
+    import re
+    hits = {}
+    with open(logf, encoding="utf-8", errors="replace") as f:
+        f.seek(start)
+        for ln in f:
+            m = re.search(r"hash mismatch\) (\S+) Hash = \d+ up to (\d+) count", ln)
+            if m:
+                hits[m.group(1)] = max(hits.get(m.group(1), 0), int(m.group(2)))
+    if not hits:
+        print("  PGO: every compiled function matched its profile")
+        return
+    top = sorted(hits.items(), key=lambda kv: -kv[1])
+    print(f"  PGO: {len(hits)} function(s) changed since the profile and compiled without it; hottest: "
+          + ", ".join(f"{n} ({c:.2g})" for n, c in top[:6])
+          + (" -- retrain when these are hot (new profile file name)" if top[0][1] >= 1e8 else ""))
+
+
 def step_compile():
+    if not IS_WIN:
+        return step_compile_linux()
     spu_rewrites()
+    lift_restore_times()   # (PORT_LIFT_REUSE) after spu_rewrites: its spu/zz_native_* files count too
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from vsenv import vs_env, rc_compiler
     env = dict(vs_env(), PS3RECOMP=TK)
     cmake = port_paths.get("cmake")     # tools-cache, config.local.json, or this PC's
     rc = rc_compiler()                  # the portable SDK's rc.exe (None: Visual Studio's, found by CMake)
     build = os.environ.get("PORT_BUILD") or os.path.join(PORT, "build")   # PORT_BUILD: a separate build tree
+    toolset_check(build)
     jobs = os.environ.get("PORT_JOBS", "8")   # each lifted TU is ~150k lines: bound the RAM
     # PORT_PGO=gen | use:<profdata>: clang PGO over every C/C++ TU (lifted PPU/SPU/firmware +
     # runtime). gen = instrumented build (the port's PS3_PGO_DUMP_AT writes the counters: the
@@ -285,6 +564,22 @@ def step_compile():
     spu_arch = os.environ.get("PORT_SPU_ARCH", "/arch:AVX2;-DSPU_LS_FASTPATH=1;-DSPU_FLOAT_RZ_ONLY=1")
     c_rel, cxx_rel = "/O2 /Ob2 /DNDEBUG /Z7", "/O2 /Ob2 /DNDEBUG"
     link_rel = "/INCREMENTAL:NO /DEBUG /OPT:REF /OPT:ICF"
+    # How a profile names a STATIC function (inf2-perf, 2026-11-11). LLVM's default is
+    # '<full source path>;<name>', so a profile trained from one tree misses every static
+    # function of a build from another, silently: m17 (wt\m17 + work\port-m17, profile
+    # r6next trained from wt\next + work\port-cpuint) lost the SPU channel/DMA inlines and
+    # the draw engine's helpers (dock -5%). PORT_PGO_NAMES=base (the default for new
+    # profiles) = '<file name>;<name>', a profile fits a build from any tree; path = LLVM's
+    # default (every profile up to inf2-r6next). A use build follows its profile's own
+    # scheme unless PORT_PGO_NAMES says otherwise. Only in the flag strings: the
+    # -mllvm option may occur once per command line.
+    if pgo:
+        names = os.environ.get("PORT_PGO_NAMES") or (pgo_profile_names(pgo[4:]) if pgo.startswith("use:") else "base")
+        if names not in ("base", "path"):
+            raise StepError("PORT_PGO_NAMES must be base or path, not %r" % names)
+        if names == "base":
+            c_rel += " -mllvm -static-func-full-module-prefix=false"; cxx_rel += " -mllvm -static-func-full-module-prefix=false"
+        print(f"  PGO: static functions named by {'file name' if names == 'base' else 'full path'}")
     if pgo == "gen":
         g = "/clang:-fprofile-generate"
         lift_opt += ";" + g; spu_arch += ";" + g; c_rel += " " + g; cxx_rel += " " + g + " -DPORT_PGO_GEN"
@@ -296,8 +591,14 @@ def step_compile():
         link_rel += ' "' + rt[-1].replace("\\", "/") + '"'
     elif pgo.startswith("use:"):
         u = "/clang:-fprofile-use=" + pgo[4:].replace("\\", "/")
-        w = "/clang:-Wno-profile-instr-unprofiled /clang:-Wno-profile-instr-out-of-date /clang:-Wno-backend-plugin"
-        lift_opt += ";" + u; spu_arch += ";" + u; c_rel += " " + u + " " + w; cxx_rel += " " + u + " " + w
+        # -Wbackend-plugin stays on (inf2-perf, 2026-11-11): it is where IR PGO reports a function whose
+        # code changed since the profile ("hash mismatch ... count discarded"); pgo_mismatch_summary
+        # lists the hottest after the build (m17 lost spu_wrch's profile, 48.8e9 counts, unnoticed).
+        w = "/clang:-Wno-profile-instr-unprofiled /clang:-Wno-profile-instr-out-of-date"
+        # a player's folder may have spaces (Setup's "Optimise for this PC"): the flag strings below are
+        # command-line text, so the flag is quoted there; the ;-lists are list items (CMake quotes them)
+        uq = '"%s"' % u if " " in u else u
+        lift_opt += ";" + u; spu_arch += ";" + u; c_rel += " " + uq + " " + w; cxx_rel += " " + uq + " " + w
     elif pgo:
         raise StepError("PORT_PGO must be gen or use:<profdata>, not %r" % pgo)
     # PORT_LIFT_LTO=thin (ppu-xfn, 2026-11-10): ThinLTO over the lifted PPU + firmware TUs, so a
@@ -340,7 +641,9 @@ def step_compile():
                  # build's flags never linger in the cache of a later normal build.
                  "-DCMAKE_C_FLAGS_RELEASE=" + c_rel, "-DCMAKE_CXX_FLAGS_RELEASE=" + cxx_rel],
                 [cmake, "--build", build, "-j", jobs, "--", "-k", "0"]):
-        with open(os.path.join(LOGS, "compile%s.log" % (("-" + os.path.basename(os.environ["PORT_BUILD"])) if os.environ.get("PORT_BUILD") else "")), "a", encoding="utf-8", errors="replace") as lf:
+        logf = os.path.join(LOGS, "compile%s.log" % (("-" + os.path.basename(os.environ["PORT_BUILD"])) if os.environ.get("PORT_BUILD") else ""))
+        log0 = os.path.getsize(logf) if os.path.exists(logf) else 0
+        with open(logf, "a", encoding="utf-8", errors="replace") as lf:
             lf.write("\n$ " + " ".join(cmd) + "\n")
             lf.flush()
             t0 = time.time()
@@ -348,6 +651,8 @@ def step_compile():
             lf.write(f"[exit {p.returncode} after {time.time() - t0:.1f}s]\n")
         if p.returncode != 0:
             raise StepError(f"{cmd[1]} exited {p.returncode} (python -I tools/build_errors.py work/logs/compile.log)")
+        if pgo.startswith("use:") and cmd[1] == "--build":
+            pgo_mismatch_summary(logf, log0)
     sdl = os.path.join(DEPS, "SDL2-2.30.10", "lib", "x64", "SDL2.dll")   # runtime DLL
     dst = os.path.join(build, "SDL2.dll")
     try:
@@ -356,6 +661,111 @@ def step_compile():
         if not (os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(sdl)):
             raise
     print("  built:", os.path.join(build, "Infamous2Recomp.exe"))
+
+
+# ---------------------------------------------------------------------------------------------
+# Linux: the same build in GNU spelling (work/crossplat/REPORT.md). clang/clang++ and lld from
+# the LLVM folder (PORT_LLVM, config.local.json "llvm", tools-cache/llvm; else PATH); the
+# Windows step above is untouched by it.
+# ---------------------------------------------------------------------------------------------
+LINUX_LIFT_OPT = "-O2;-march=x86-64-v3;-fno-stack-protector"   # = /clang:-O2;/arch:AVX2;/GS-
+LINUX_SPU_ARCH = "-march=x86-64-v3;-fno-stack-protector;-DSPU_LS_FASTPATH=1;-DSPU_FLOAT_RZ_ONLY=1"
+
+
+def linux_tools():
+    """{cc, cxx, lld, profdata, cmake, ninja}: absolute paths of the Linux build's programs."""
+    llvm = port_paths.get("llvm", required=False)
+    out = {}
+    for key, name in (("cc", "clang"), ("cxx", "clang++"), ("lld", "ld.lld"), ("profdata", "llvm-profdata")):
+        p = os.path.join(llvm, "bin", name) if llvm else shutil.which(name)
+        if not p or not os.path.isfile(p):
+            raise StepError(f"no {name} ({'in ' + os.path.join(llvm, 'bin') if llvm else 'on PATH'}): "
+                            "set PORT_LLVM to the LLVM folder (bin/clang, bin/ld.lld)")
+        out[key] = p
+    out["cmake"], out["ninja"] = port_paths.get("cmake"), port_paths.get("ninja")
+    return out
+
+
+def linux_compile_flags(build, jobs, pgo="", lto="0", profdata=None, lift_opt=None, spu_arch=None):
+    """(lift_opt, spu_arch, c_rel, cxx_rel, link_rel) for clang + lld: step_compile's flags in
+    GNU spelling. pgo: "" | gen | use:<profdata>; lto: 0 | thin; lift_opt / spu_arch: else
+    PORT_LIFT_OPT / PORT_SPU_ARCH, else the defaults above. Raises StepError on a bad value."""
+    lift_opt = lift_opt or os.environ.get("PORT_LIFT_OPT", LINUX_LIFT_OPT)
+    spu_arch = spu_arch or os.environ.get("PORT_SPU_ARCH", LINUX_SPU_ARCH)
+    c_rel, cxx_rel = "-O2 -DNDEBUG -g", "-O2 -DNDEBUG"   # = /O2 /Ob2 /DNDEBUG /Z7, /O2 /Ob2 /DNDEBUG
+    link_rel = "-fuse-ld=lld"   # the symbol table stays in the ELF (= /DEBUG's public symbols)
+    if pgo:
+        names = os.environ.get("PORT_PGO_NAMES") or (pgo_profile_names(pgo[4:], profdata) if pgo.startswith("use:") else "base")
+        if names not in ("base", "path"):
+            raise StepError("PORT_PGO_NAMES must be base or path, not %r" % names)
+        if names == "base":
+            c_rel += " -mllvm -static-func-full-module-prefix=false"; cxx_rel += " -mllvm -static-func-full-module-prefix=false"
+        print(f"  PGO: static functions named by {'file name' if names == 'base' else 'full path'}")
+    if pgo == "gen":
+        g = "-fprofile-generate"   # the clang driver links the profile runtime itself
+        lift_opt += ";" + g; spu_arch += ";" + g; c_rel += " " + g; cxx_rel += " " + g + " -DPORT_PGO_GEN"
+        link_rel += " " + g
+    elif pgo.startswith("use:"):
+        u = "-fprofile-use=" + pgo[4:]
+        w = "-Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date"
+        uq = "'%s'" % u if " " in u else u   # the flag strings are shell text (ninja runs /bin/sh -c)
+        lift_opt += ";" + u; spu_arch += ";" + u; c_rel += " " + uq + " " + w; cxx_rel += " " + uq + " " + w
+    elif pgo:
+        raise StepError("PORT_PGO must be gen or use:<profdata>, not %r" % pgo)
+    if lto not in ("0", ""):
+        if lto != "thin":
+            raise StepError("PORT_LIFT_LTO must be thin or 0, not %r" % lto)
+        lift_opt += ";-flto=thin"
+        cache = os.path.join(build, "thinlto-cache")
+        cache = "'%s'" % cache if " " in cache else cache
+        link_rel += (" -flto=thin -Wl,--thinlto-jobs=%s -Wl,--thinlto-cache-dir=%s"
+                     " -Wl,--thinlto-cache-policy=cache_size_bytes=8g" % (jobs, cache))
+    return lift_opt, spu_arch, c_rel, cxx_rel, link_rel
+
+
+def linux_configure_cmd(build, tools, flags, port=None, tk=None, python=None):
+    """The Linux CMake configure command (tools/linux_syncheck.py runs it with a cross toolchain)."""
+    lift_opt, spu_arch, c_rel, cxx_rel, link_rel = flags
+    cmd = [tools["cmake"], "-S", port or PORT, "-B", build, "-G", "Ninja",
+           "-DCMAKE_MAKE_PROGRAM=" + tools["ninja"],
+           "-DCMAKE_C_COMPILER=" + tools["cc"], "-DCMAKE_CXX_COMPILER=" + tools["cxx"],
+           "-DCMAKE_BUILD_TYPE=Release", "-DPS3RECOMP_DIR=" + (tk or TK), "-DPython3_EXECUTABLE=" + (python or PY),
+           "-DPS3RECOMP_RSX_VULKAN=ON",
+           "-DPS3RECOMP_VULKAN_INCLUDE_DIR=" + os.path.join(DEPS, "Vulkan-Headers", "include")]
+    if os.environ.get("PORT_SDL2_DIR"):
+        cmd.append("-DSDL2_DIR=" + os.environ["PORT_SDL2_DIR"])
+    gl = os.environ.get("PORT_GLSLANG_DIR") or os.path.join(DEPS, "glslang-install-linux", "lib", "cmake", "glslang")
+    if os.path.isdir(gl):
+        cmd.append("-Dglslang_DIR=" + gl)
+    return cmd + ["-DPORT_LIFT_OPT=" + lift_opt, "-DPORT_SPU_ARCH=" + spu_arch,
+                  "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=" + link_rel,
+                  "-DCMAKE_C_FLAGS_RELEASE=" + c_rel, "-DCMAKE_CXX_FLAGS_RELEASE=" + cxx_rel]
+
+
+def step_compile_linux():
+    spu_rewrites()
+    tools = linux_tools()
+    env = dict(os.environ, PS3RECOMP=TK)
+    build = os.environ.get("PORT_BUILD") or os.path.join(PORT, "build")
+    jobs = os.environ.get("PORT_JOBS", "8")
+    pgo = os.environ.get("PORT_PGO", "")
+    flags = linux_compile_flags(build, jobs, pgo, os.environ.get("PORT_LIFT_LTO", "0"), tools["profdata"])
+    for cmd in (linux_configure_cmd(build, tools, flags),
+                [tools["cmake"], "--build", build, "-j", jobs, "--", "-k", "0"]):
+        logf = os.path.join(LOGS, "compile%s.log" % (("-" + os.path.basename(os.environ["PORT_BUILD"])) if os.environ.get("PORT_BUILD") else ""))
+        log0 = os.path.getsize(logf) if os.path.exists(logf) else 0
+        os.makedirs(LOGS, exist_ok=True)
+        with open(logf, "a", encoding="utf-8", errors="replace") as lf:
+            lf.write("\n$ " + " ".join(cmd) + "\n")
+            lf.flush()
+            t0 = time.time()
+            p = subprocess.run(cmd, cwd=PORT, stdout=lf, stderr=subprocess.STDOUT, env=env)
+            lf.write(f"[exit {p.returncode} after {time.time() - t0:.1f}s]\n")
+        if p.returncode != 0:
+            raise StepError(f"{cmd[1]} exited {p.returncode} (python -I tools/build_errors.py {logf})")
+        if pgo.startswith("use:") and cmd[1] == "--build":
+            pgo_mismatch_summary(logf, log0)
+    print("  built:", os.path.join(build, "Infamous2Recomp"))
 
 
 # The three SPU code bodies libsre's SPURS kernel DMAs into local store (system service,
@@ -461,7 +871,10 @@ def step_ppu():
     run("ppu", [PY, T("ppu_lifter.py"), ELF,
                 "--functions", "out/EBOOT.functions.json", "--hle-stubs", "out/EBOOT.imports.json",
                 "--code-end", "0x742e18", "--max-chunk-lines", "150000",
-                "--jobs", str(os.cpu_count() or 8), "--output", "recompiled/"], env_defaults=fast)
+                # PORT_LIFT_JOBS: the lifter's worker processes (default: every CPU; a shared box,
+                # e.g. the Linux test server, keeps it to a few)
+                "--jobs", os.environ.get("PORT_LIFT_JOBS") or str(os.cpu_count() or 8),
+                "--output", "recompiled/"], env_defaults=fast)
 
 
 def step_spu():
@@ -512,15 +925,20 @@ def main():
         steps = steps[steps.index(a.start):]
     if a.only:
         steps = [s for s in steps if s in a.only.split(",")]
+    if not REUSE and os.path.isdir(HELD):   # held by a PORT_LIFT_REUSE run that stopped: not this build's
+        shutil.rmtree(HELD, ignore_errors=True)
     for s in steps:
         t0 = time.time()
         print(f"[{s}]", flush=True)
         try:
-            globals()["step_" + s]()
+            if not lift_skip(s):
+                globals()["step_" + s]()
+                lift_done(s)
         except StepError as e:
             print(f"  FAILED: {e}")
             sys.exit(1)
         print(f"  done in {time.time() - t0:.1f}s", flush=True)
+    lift_restore_times()   # (lift steps run without the compile step)
 
 
 if __name__ == "__main__":

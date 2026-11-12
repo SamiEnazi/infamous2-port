@@ -1,7 +1,7 @@
 // SetupWizard.cs -- Setup.exe of the inFAMOUS 2 Windows port: one big Install button.
 //
 // Install does everything, asking only what it truly cannot find out:
-//   1. Setup.exe downloaded on its own: the port as ZIP files from GitHub (no git) into a folder
+//   1. Setup.exe downloaded on its own: the port as one ZIP file from GitHub (no git) into a folder
 //      next to Setup.exe (else %LOCALAPPDATA%\inFAMOUS2-port), then Setup.exe copies itself there.
 //   2. RPCS3 and the game: found on this PC (RPCS3's own game list for the game); a small "Where
 //      is ...?" dialog only when one is not found.
@@ -15,9 +15,12 @@
 //
 // build.cmd compiles it with the C# compiler that ships with Windows (.NET Framework 4.5+, C# 5):
 // no $"", no => members, no ?., no nameof, no out var. Non-ASCII text is written as \u escapes.
+// The port's scripts run as "powershell -ExecutionPolicy RemoteSigned -File <script>" (Util.PowerShellFile).
 //
-// Test switches (README.md): --test-build, --rpcs3 <folder>, --disc <folder>, --folder <folder>,
+// Test switches (README.md): --test-build, --rpcs3 <folder>, --disc <folder> (or --game), --folder <folder>,
 // --no-shortcut, --no-cleanup, --only-cache, --exit-when-done, --page done|ask.
+// The updater (tools\update_check.ps1, F2 > Update in the game): --update --folder <port folder> [--to v0.5.1]
+// = "Update to the latest version" at once, in the window; with --no-window [--dry-run] without one (class Headless).
 
 using System;
 using System.Collections.Concurrent;
@@ -35,12 +38,16 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("inFAMOUS 2 PC port Setup")]
-[assembly: AssemblyDescription("Builds inFAMOUS 2 for Windows from your own copy of the game")]
-[assembly: AssemblyProduct("inFAMOUS 2 native Windows port (fan project)")]
-[assembly: AssemblyCopyright("MIT license")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+// The file's version information (Explorer > Properties > Details). The manifest is setup.manifest (build.cmd).
+[assembly: AssemblyTitle("inFAMOUS 2 Native PC Port Setup")]
+[assembly: AssemblyDescription("Open-source setup of the inFAMOUS 2 Native PC Port: builds the game for Windows from the player's own copy (github.com/SamiEnazi/infamous2-port)")]
+[assembly: AssemblyCompany("Sami Enazi")]
+[assembly: AssemblyProduct("inFAMOUS 2 Native PC Port (unofficial fan project)")]
+[assembly: AssemblyCopyright("Copyright (c) 2026 Sami Enazi. MIT license.")]
+[assembly: AssemblyTrademark("inFAMOUS is a trademark of Sony Interactive Entertainment LLC. Not affiliated with Sony or Sucker Punch.")]
+[assembly: AssemblyVersion("0.5.0.0")]
+[assembly: AssemblyFileVersion("0.5.0.0")]
+[assembly: AssemblyInformationalVersion("0.5.0")]
 
 namespace Inf2Setup
 {
@@ -63,11 +70,15 @@ namespace Inf2Setup
             Opts opt = Opts.Parse(args);
             // RecompLauncher (recomplauncher.json): --prepare and --play, without a window
             if (opt.Prepare || opt.Play) return Headless.Run(opt, Path.GetDirectoryName(Path.GetFullPath(Application.ExecutablePath)));
+            // the updater without a window (tests, scripts)
+            if (opt.Update && opt.NoWindow) return Headless.Run(opt, Path.GetDirectoryName(Path.GetFullPath(Application.ExecutablePath)));
             Theme.Init(FitScale());
             string exeDir = Path.GetDirectoryName(Path.GetFullPath(Application.ExecutablePath));
+            // --update works on --folder (play.ps1 starts a Setup.exe it built in work\update\setup): that folder's lock
+            string lockDir = opt.Update && !string.IsNullOrEmpty(opt.Folder) ? Path.GetFullPath(opt.Folder).TrimEnd('\\') : exeDir;
             bool first;
             // one Setup per folder: two builds in the same folder would trip over each other
-            using (Mutex m = new Mutex(true, "inFAMOUS2-port-setup-" + Util.Hash(exeDir.ToLowerInvariant()), out first))
+            using (Mutex m = new Mutex(true, "inFAMOUS2-port-setup-" + Util.Hash(lockDir.ToLowerInvariant()), out first))
             {
                 if (!first)
                 {
@@ -115,6 +126,8 @@ namespace Inf2Setup
         public List<string> PlayArgs = new List<string>();   // after --play: play.ps1's own options
         public string Page, Disc, Rpcs3, Folder;
         public bool TestBuild, NoShortcut, ExitWhenDone, NoCleanup, OnlyCache, TestFailBuild;
+        public bool Update, NoWindow;    // --update [--no-window]: the newest port over --folder (the updater)
+        public string To;                // --to v0.5.1: the version the update brings (only shown)
 
         public static Opts Parse(string[] a)
         {
@@ -136,7 +149,8 @@ namespace Inf2Setup
                         }
                         break;
                     case "--page": o.Page = v; i++; break;
-                    case "--disc": o.Disc = v; i++; break;
+                    case "--disc":
+                    case "--game": o.Disc = v; i++; break;   // --game: the name launchers and the Recomp Standards use
                     case "--rpcs3": o.Rpcs3 = v; i++; break;
                     case "--folder": o.Folder = v; i++; break;
                     case "--test-build": o.TestBuild = true; break;
@@ -145,6 +159,9 @@ namespace Inf2Setup
                     case "--no-cleanup": o.NoCleanup = true; break;
                     case "--only-cache": o.OnlyCache = true; break;
                     case "--test-fail-build": o.TestFailBuild = true; break;
+                    case "--update": o.Update = true; break;
+                    case "--no-window": o.NoWindow = true; break;
+                    case "--to": o.To = v; i++; break;
                 }
             }
             return o;
@@ -361,6 +378,43 @@ namespace Inf2Setup
             return File.Exists(p) ? p : "powershell.exe";
         }
 
+        // PowerShell running one of the port's own scripts: -File (no inline code), under this process's
+        // RemoteSigned policy, which also runs them on a PC left at Windows' default (Restricted). The
+        // scripts Setup downloads and unpacks itself carry no "downloaded from the internet" mark.
+        public static string PowerShellFile(string ps1, bool interactive)
+        {
+            return "-NoProfile " + (interactive ? "" : "-NonInteractive ") + "-ExecutionPolicy RemoteSigned -File " + Arg(ps1);
+        }
+
+        // RemoteSigned refuses a script that carries the mark: a release ZIP downloaded with a browser and
+        // unpacked with Explorer. PowerShell's own error says so in words the player can't act on.
+        public static bool ScriptBlocked(string stderr)
+        {
+            return stderr != null && (stderr.Contains("PSSecurityException") || stderr.Contains("UnauthorizedAccess"));
+        }
+
+        public const string BlockedHelp = "Windows marked the port's files as downloaded from the internet, so PowerShell won't run its " +
+            "scripts. Right-click the ZIP you downloaded, choose Properties, tick Unblock, press OK and unpack it again " +
+            "(or use Setup.exe on its own: it downloads the port itself)";
+
+        // One command-line argument, quoted the way Windows splits them again.
+        public static string Arg(string s)
+        {
+            if (s.Length > 0 && s.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) return s;
+            StringBuilder b = new StringBuilder("\"");
+            int bs = 0;
+            foreach (char c in s)
+            {
+                if (c == '\\') { bs++; continue; }
+                if (c == '"') { b.Append('\\', bs * 2 + 1); b.Append('"'); bs = 0; continue; }
+                b.Append('\\', bs); bs = 0;
+                b.Append(c);
+            }
+            b.Append('\\', bs * 2);
+            b.Append('"');
+            return b.ToString();
+        }
+
         // Only Windows' own folders: the build's PATH in the --only-cache test.
         public static string WindowsPath()
         {
@@ -369,22 +423,20 @@ namespace Inf2Setup
                                                    Path.Combine(w, "System32\\WindowsPowerShell\\v1.0") });
         }
 
-        // A PowerShell single-quoted string.
-        public static string Q(string s) { return "'" + (s ?? "").Replace("'", "''") + "'"; }
-
         public static bool HasPort(string dir)
         {
             try { return !string.IsNullOrEmpty(dir) && File.Exists(Path.Combine(dir, "tools\\setup_common.ps1")); }
             catch (Exception) { return false; }
         }
 
-        // The port with its toolkit and port base (a finished download or a git clone).
+        // The port with its engine and port base, folders of the one repository since v0.5.0 (a finished
+        // download or a git clone).
         public static bool PortComplete(string dir)
         {
             try
             {
-                return HasPort(dir) && File.Exists(Path.Combine(dir, "toolkit\\CMakeLists.txt")) &&
-                       File.Exists(Path.Combine(dir, "community\\erikomis-infamous2-recomp\\infamous2-lle\\CMakeLists.txt"));
+                return HasPort(dir) && File.Exists(Path.Combine(dir, "engine\\CMakeLists.txt")) &&
+                       File.Exists(Path.Combine(dir, "base\\infamous2-lle\\CMakeLists.txt"));
             }
             catch (Exception) { return false; }
         }
@@ -402,29 +454,51 @@ namespace Inf2Setup
             return null;
         }
 
-        // port-version.txt (written by the download): { port commit, toolkit pin, port-base pin }, or null.
-        public static string[] ReadPortVersion(string root)
+        // port-version.txt (written by the download): the port's commit, or null. Since v0.5.0 the engine and
+        // the port base are in that commit (engine\, base\); the "toolkit" and "community/..." pin lines of
+        // older downloads are only read past.
+        public static string ReadPortVersion(string root)
         {
             try
             {
                 string f = Path.Combine(root, "port-version.txt");
                 if (!File.Exists(f)) return null;
-                string[] v = new string[3];
+                string v = null;
                 foreach (string ln in File.ReadAllLines(f))
                 {
                     string[] t = ln.Trim().Split(' ');
-                    if (t.Length == 2 && t[0] == "SamiEnazi/infamous2-port") v[0] = t[1];
-                    else if (t.Length == 3 && t[0] == "toolkit") v[1] = t[2];
-                    else if (t.Length == 3 && t[0].StartsWith("community/", StringComparison.Ordinal)) v[2] = t[2];
+                    if (t.Length == 2 && t[0] == "SamiEnazi/infamous2-port") v = t[1];
                 }
-                return v[0] != null && v[1] != null && v[2] != null ? v : null;
+                return v;
             }
             catch (Exception) { return null; }
         }
 
-        // What an update never writes into: the player's folders and files, the build's own folders, and
-        // the toolkit and port base (those are swapped whole). game\disc is a junction to the player's disc.
-        static readonly string[] KeepTop = { "game", "work", "play", "saves-backup", "tools-cache", "deps", "build", "eboot", "toolkit", "community" };
+        // port-version.txt names the toolkit / port base pins (written by a Setup.exe of v0.4.2 or older, or a
+        // release zip before v0.5.0): toolkit\ and community\ then hold only that downloaded source.
+        public static bool HadPins(string root)
+        {
+            try
+            {
+                string f = Path.Combine(root, "port-version.txt");
+                if (!File.Exists(f)) return false;
+                foreach (string ln in File.ReadAllLines(f))
+                {
+                    string[] t = ln.Trim().Split(' ');
+                    if (t.Length == 3 && t[0] == "toolkit") return true;
+                }
+                return false;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // What an update never writes into: the player's folders and files, the build's own folders, the
+        // engine and the port base (those are swapped whole), and the toolkit\ and community\ folders of an
+        // install from before v0.5.0. game\disc is a junction to the player's disc.
+        static readonly string[] KeepTop = { "game", "work", "play", "saves-backup", "tools-cache", "deps", "build", "eboot", "engine", "base", "toolkit", "community" };
+        // Pure source inside the port's download, replaced whole on an update (a file deleted upstream must not
+        // stay behind: the engine's CMake builds every file it finds in libs\ and runtime\).
+        public static readonly string[] SwapTop = { "engine", "base" };
         static readonly string[] KeepFiles = { "input.toml", "config.local.json", "Setup.exe", "port-version.txt", ".zip-source" };
 
         public static bool Protected(string rel)
@@ -504,6 +578,30 @@ namespace Inf2Setup
                 else { File.Copy(e.FullName, Path.Combine(dst, e.Name), true); n++; }
             }
             return n;
+        }
+
+        // Two files with the same bytes (an update keeps such a file's time: the build files stay valid for it).
+        public static bool SameFile(string a, string b)
+        {
+            try
+            {
+                FileInfo fa = new FileInfo(a), fb = new FileInfo(b);
+                if (!fa.Exists || !fb.Exists || fa.Length != fb.Length) return false;
+                using (FileStream x = new FileStream(a, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16))
+                using (FileStream y = new FileStream(b, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16))
+                {
+                    byte[] p = new byte[1 << 16], q = new byte[1 << 16];
+                    while (true)
+                    {
+                        int n = x.Read(p, 0, p.Length);
+                        if (n <= 0) return true;
+                        int m = 0;
+                        while (m < n) { int r = y.Read(q, m, n - m); if (r <= 0) return false; m += r; }
+                        for (int i = 0; i < n; i++) if (p[i] != q[i]) return false;
+                    }
+                }
+            }
+            catch (Exception) { return false; }
         }
 
         // The drive of `path` can hold the junction Setup makes (game\disc -> the player's game folder):
@@ -808,24 +906,27 @@ namespace Inf2Setup
 
     static class Checker
     {
-        // Get-SetupChecks of tools\setup_common.ps1, as JSON, in a hidden PowerShell.
+        // The last Run could not start the scripts because Windows marked them as downloaded (error = BlockedHelp).
+        public static volatile bool Blocked;
+
+        // Get-SetupChecks of tools\setup_common.ps1, as JSON (tools\setup_checks.ps1), in a hidden PowerShell.
         public static List<Row> Run(string repo, string disc, string rpcs3, out string error)
         {
             error = null;
+            Blocked = false;
             List<Row> rows = new List<Row>();
             try
             {
-                string common = Path.Combine(repo, "tools\\setup_common.ps1");
-                if (!File.Exists(common)) { error = "tools\\setup_common.ps1 is missing in " + repo; return rows; }
-                string cmd = "& { [Console]::OutputEncoding = [Text.Encoding]::UTF8; . " + Util.Q(common) +
-                             "; Get-SetupChecks -Disc " + Util.Q(disc) + " -Rpcs3 " + Util.Q(rpcs3) + " | ConvertTo-Json -Depth 3 }";
+                string checks = Path.Combine(repo, "tools\\setup_checks.ps1");
+                if (!File.Exists(checks)) { error = "tools\\setup_checks.ps1 is missing in " + repo; return rows; }
                 string so, se;
-                int code = Util.Capture(Util.PowerShellExe(), "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"" + cmd + "\"",
-                                        repo, 180000, out so, out se);
+                int code = Util.Capture(Util.PowerShellExe(), Util.PowerShellFile(checks, false) + " -Disc " + Util.Arg(disc ?? "") +
+                                        " -Rpcs3 " + Util.Arg(rpcs3 ?? ""), repo, 180000, out so, out se);
                 int a = so.IndexOf('['), b = so.IndexOf('{');
                 int start = a >= 0 && (b < 0 || a < b) ? a : b;
                 if (start < 0)
                 {
+                    if (Util.ScriptBlocked(se)) { Blocked = true; error = Util.BlockedHelp; return rows; }
                     string first = (se ?? "").Trim();
                     int nl = first.IndexOf('\n');
                     if (nl > 0) first = first.Substring(0, nl).Trim();
@@ -953,10 +1054,11 @@ namespace Inf2Setup
         }
     }
 
-    // The port as ZIP files from GitHub, no git: the port at the newest commit of main, and the
-    // toolkit and the port base at the commits that commit pins (GitHub's API names them). Each part
-    // is unpacked next to its place and moved in when complete, so a stopped download never leaves a
-    // half folder that looks whole. Lines: "== [n/4] ...", "progress: <n>% ...", "error: <why>".
+    // The port as one ZIP file from GitHub, no git: the port at the newest commit of main, with the
+    // engine (engine\) and the port base (base\) in it (since v0.5.0; before, they were two more
+    // downloads at the commits main pinned). It is unpacked next to its place and moved in when
+    // complete, so a stopped download never leaves a half folder that looks whole. Lines:
+    // "== [n/2] ...", "progress: <n>% ...", "error: <why>".
     sealed class PortDownload : IJob
     {
         const string Repo = "SamiEnazi/infamous2-port";
@@ -966,7 +1068,7 @@ namespace Inf2Setup
         readonly string target;
         readonly bool update;           // the port is there already: the newest code over it, in place
         long doneBytes;
-        const long TotalGuess = 38L << 20;      // the three ZIP files together (GitHub sends no sizes)
+        const long TotalGuess = 40L << 20;      // the ZIP file (GitHub sends no size; v0.5.0's is about 40 MB)
 
         public PortDownload(string target, bool update) { this.target = target; this.update = update; }
 
@@ -988,14 +1090,14 @@ namespace Inf2Setup
         {
             try
             {
-                Say("== [1/4] asking GitHub for the newest version");
+                Say("== [1/2] asking GitHub for the newest version");
                 string commit = Sha(Api("repos/" + Repo + "/commits/main"));
-                string tk = Sha(Api("repos/" + Repo + "/contents/toolkit?ref=" + commit));
-                string cm = Sha(Api("repos/" + Repo + "/contents/community/erikomis-infamous2-recomp?ref=" + commit));
-                Say("  port " + commit + ", toolkit " + tk + ", port base " + cm);
-                string[] have = update ? Util.ReadPortVersion(target) : null;
-                if (have != null && have[0] == commit && have[1] == tk && have[2] == cm)
+                Say("  port " + commit + " (with its engine and port base)");
+                string have = update ? Util.ReadPortVersion(target) : null;
+                bool pinned = update && Util.HadPins(target);   // (before port-version.txt is written again)
+                if (have == commit && Util.PortComplete(target))
                 {
+                    if (pinned) DropOldLayout(true);
                     Say("  already the newest version: nothing to download");
                     Say("progress: 100% up to date");
                 }
@@ -1004,11 +1106,9 @@ namespace Inf2Setup
                     string temp = Path.Combine(Path.GetTempPath(), "inFAMOUS2-setup-download");
                     Directory.CreateDirectory(temp);
                     Part(2, "the port", Repo, commit, target, temp);
-                    Part(3, "the toolkit", "SamiEnazi/ps3recomp", tk, Path.Combine(target, "toolkit"), temp);
-                    Part(4, "the port base", "erikomis/infamous2-recomp", cm, Path.Combine(target, "community\\erikomis-infamous2-recomp"), temp);
                     File.WriteAllText(Path.Combine(target, "port-version.txt"),
-                        "Downloaded by Setup.exe " + DateTime.Now.ToString("yyyy-MM-dd HH:mm") + "\r\n" + Repo + " " + commit +
-                        "\r\ntoolkit SamiEnazi/ps3recomp " + tk + "\r\ncommunity/erikomis-infamous2-recomp erikomis/infamous2-recomp " + cm + "\r\n");
+                        "Downloaded by Setup.exe " + DateTime.Now.ToString("yyyy-MM-dd HH:mm") + "\r\n" + Repo + " " + commit + "\r\n");
+                    DropOldLayout(pinned);
                     try { Util.DeleteTree(temp); } catch (Exception) { }
                     Say("progress: 100% downloaded");
                 }
@@ -1025,11 +1125,11 @@ namespace Inf2Setup
         // One part: the ZIP of repo at sha, unpacked into dest. Skipped when dest already has it.
         void Part(int step, string what, string repo, string sha, string dest, string temp)
         {
-            Say("== [" + step + "/4] downloading " + what);
+            Say("== [" + step + "/2] downloading " + what);
             string mark = Path.Combine(dest, ".zip-source");
             if (File.Exists(mark) && File.ReadAllText(mark).Trim() == repo + " " + sha) { Say("  " + what + ": already there"); return; }
             string zip = Path.Combine(temp, repo.Replace('/', '-') + ".zip");
-            Download("https://codeload.github.com/" + repo + "/zip/" + sha, zip, what);
+            Download(Site("PORT_SETUP_CODELOAD", "https://codeload.github.com") + "/" + repo + "/zip/" + sha, zip, what);
             Say("progress: " + Pct() + "% unpacking " + what);
             string tmp = dest.TrimEnd('\\') + ".unzip";
             Util.DeleteTree(tmp);
@@ -1055,8 +1155,24 @@ namespace Inf2Setup
             if (Directory.Exists(dest) && !Util.EmptyDir(dest))
             {
                 if (!update) throw new IOException(dest + " is not empty");
-                if (Util.SamePath(dest, target)) MergeInto(tmp, dest);     // the port's own files, over the old ones
-                else Swap(tmp, dest);                                       // the toolkit / port base: pure source
+                if (Util.SamePath(dest, target))
+                {
+                    // the engine and the port base: pure source, swapped whole; then the port's own files over the old ones
+                    foreach (string s in Util.SwapTop)
+                    {
+                        string fresh = Path.Combine(tmp, s), have = Path.Combine(dest, s);
+                        if (!Directory.Exists(fresh)) continue;
+                        if (Directory.Exists(have) && !Util.EmptyDir(have)) Swap(fresh, have);
+                        else
+                        {
+                            if (Directory.Exists(have)) Directory.Delete(have);
+                            Directory.Move(fresh, have);
+                        }
+                        Say("  " + s + "\\: replaced whole");
+                    }
+                    MergeInto(tmp, dest);
+                }
+                else Swap(tmp, dest);
                 File.Delete(zip);
                 Say("  " + what + ": " + repo + " " + sha.Substring(0, 7));
                 return;
@@ -1075,7 +1191,8 @@ namespace Inf2Setup
         {
             string top = Path.GetFullPath(tmp).TrimEnd('\\');
             Dictionary<string, bool> seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-            int n = 0, skipped = 0;
+            int n = 0, skipped = 0, same = 0;
+            DateTime now = DateTime.UtcNow;
             foreach (string f in Directory.GetFiles(top, "*", SearchOption.AllDirectories))
             {
                 if (cancel) throw new OperationCanceledException();
@@ -1089,14 +1206,17 @@ namespace Inf2Setup
                 {
                     FileAttributes a = File.GetAttributes(dst);
                     if ((a & FileAttributes.ReparsePoint) != 0) { skipped++; continue; }
+                    if (Util.SameFile(f, dst)) { same++; continue; }   // unchanged: keeps its time
                     if ((a & FileAttributes.ReadOnly) != 0) File.SetAttributes(dst, a & ~FileAttributes.ReadOnly);
                 }
                 File.Copy(f, dst, true);
+                // newer than anything built from the old file (the ZIP's time is the commit's, maybe older)
+                File.SetLastWriteTimeUtc(dst, now);
                 n++;
             }
             File.Copy(Path.Combine(top, ".zip-source"), Path.Combine(dest, ".zip-source"), true);
             Util.DeleteTree(top);
-            Say("  " + n + " files updated in place, nothing deleted" + (skipped > 1 ? " (" + (skipped - 1) + " left alone)" : ""));
+            Say("  " + n + " files updated in place, " + same + " unchanged, nothing deleted" + (skipped > 1 ? " (" + (skipped - 1) + " left alone)" : ""));
         }
 
         // Pure source, replaced whole: set aside first (nothing is lost if a move fails), then deleted;
@@ -1105,6 +1225,7 @@ namespace Inf2Setup
         {
             string link = Util.FindLink(dest);
             if (link != null) throw new IOException("Setup will not replace " + dest + ": it contains a link (" + link + ")");
+            Retime(tmp, dest);
             string old = dest.TrimEnd('\\') + ".old";
             Util.DeleteTree(old);
             Directory.Move(dest, old);
@@ -1112,7 +1233,62 @@ namespace Inf2Setup
             try { Util.DeleteTree(old); } catch (Exception ex) { Say("  could not delete " + old + ": " + ex.Message); }
         }
 
+        // toolkit\ and community\erikomis-infamous2-recomp\: the engine and the port base of an install from before
+        // v0.5.0, or what a Setup.exe of v0.4.2 or older still downloads (the public repository keeps their two
+        // pins for it). The port builds from engine\ and base\, so they are only left-overs: deleted when a
+        // Setup download made them (their .zip-source mark) or the install's port-version.txt pinned them
+        // (pinned: an older Setup.exe or a release zip), never with a link inside; else kept. Empty ones (the
+        // placeholders a ZIP of the repository has for the pins) go too.
+        void DropOldLayout(bool pinned)
+        {
+            string[] old = { "toolkit", "community\\erikomis-infamous2-recomp" };
+            foreach (string o in old)
+            {
+                string d = Path.Combine(target, o);
+                if (!Directory.Exists(d)) continue;
+                try
+                {
+                    if (Util.EmptyDir(d)) { Directory.Delete(d); continue; }
+                    if (!pinned && !File.Exists(Path.Combine(d, ".zip-source"))) { Say("  " + o + "\\ kept (not made by Setup): the port no longer uses it"); continue; }
+                    Util.DeleteTree(d);
+                    Say("  " + o + "\\ (before v0.5.0; the port now builds from engine\\ and base\\): deleted");
+                }
+                catch (Exception ex) { Say("  could not delete " + d + " (" + ex.Message + "): the port no longer uses it"); }
+            }
+            string cm = Path.Combine(target, "community");
+            try { if (Directory.Exists(cm) && Util.EmptyDir(cm)) Directory.Delete(cm); } catch (Exception) { }
+        }
+
+        // Before a new tree replaces the old one: an unchanged file gets its old time back, a changed or new one
+        // gets now (a ZIP's times are the commit's, maybe older than a build made from the old file). The build
+        // files Setup keeps (tools\setup_cleanup.ps1 -KeepBuildCache) then recompile only what changed.
+        void Retime(string fresh, string old)
+        {
+            string top = Path.GetFullPath(fresh).TrimEnd('\\');
+            DateTime now = DateTime.UtcNow;
+            int same = 0, changed = 0;
+            foreach (string f in Directory.GetFiles(top, "*", SearchOption.AllDirectories))
+            {
+                if (cancel) throw new OperationCanceledException();
+                string o = Path.Combine(old, f.Substring(top.Length + 1));
+                try
+                {
+                    if (Util.SameFile(f, o)) { File.SetLastWriteTimeUtc(f, File.GetLastWriteTimeUtc(o)); same++; }
+                    else { File.SetLastWriteTimeUtc(f, now); changed++; }
+                }
+                catch (Exception) { }
+            }
+            Say("  " + changed + " files new or changed, " + same + " unchanged");
+        }
+
         int Pct() { return (int)Math.Min(99, 100 * doneBytes / TotalGuess); }
+
+        // GitHub, or a stand-in for tests (PORT_SETUP_API, PORT_SETUP_CODELOAD: e.g. http://127.0.0.1:8765)
+        static string Site(string env, string github)
+        {
+            string v = Environment.GetEnvironmentVariable(env);
+            return string.IsNullOrEmpty(v) ? github : v.TrimEnd('/');
+        }
 
         HttpWebRequest Request(string url)
         {
@@ -1122,14 +1298,14 @@ namespace Inf2Setup
             return r;
         }
 
-        // GitHub's API (no sign-in: 60 questions an hour per network, Setup asks 3)
+        // GitHub's API (no sign-in: 60 questions an hour per network, Setup asks 1)
         string Api(string path)
         {
             for (int attempt = 1; ; attempt++)
             {
                 try
                 {
-                    HttpWebRequest r = Request("https://api.github.com/" + path);
+                    HttpWebRequest r = Request(Site("PORT_SETUP_API", "https://api.github.com") + "/" + path);
                     r.Accept = "application/vnd.github+json";
                     using (WebResponse resp = r.GetResponse())
                     using (StreamReader sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
@@ -1298,7 +1474,7 @@ namespace Inf2Setup
     // ------------------------------------------------------------------ RecompLauncher: no window
 
     // recomplauncher.json starts Setup.exe in two ways. Only these switches come here; the window is untouched.
-    //   Setup.exe --prepare --disc <game folder> [--rpcs3 <folder>] [--dry-run]
+    //   Setup.exe --prepare --disc <game folder> (or --game) [--rpcs3 <folder>] [--dry-run]
     //     Easy Setup's "prepare" step: Install's checks and tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup
     //     (the setup screen's label says that it accepts Microsoft's license), plus -NoShortcut (the launcher
     //     is the shortcut), without "Optimise for this PC" (its training run opens the game's window).
@@ -1313,7 +1489,7 @@ namespace Inf2Setup
     {
         public const int Busy = 69, NoPort = 70, NotGameFolder = 71, NotThisGame = 72, NoRpcs3 = 73, NoFirmware = 74,
                          NoUpdate = 75, Rpcs3Open = 76, PcCannot = 77, BadDrive = 78, BuildFailed = 79,
-                         NotBuilt = 80, PlayFailed = 82;
+                         NotBuilt = 80, PlayFailed = 82, ScriptsBlocked = 83;
 
         static StreamWriter stdout, stderr, log;
         static double lastFrac;
@@ -1323,13 +1499,13 @@ namespace Inf2Setup
             try
             {
                 StayWithMe();
-                return opt.Prepare ? Prepare(opt, exeDir) : Play(opt, exeDir);
+                return opt.Update ? Update(opt, exeDir) : opt.Prepare ? Prepare(opt, exeDir) : Play(opt, exeDir);
             }
             catch (Exception ex)
             {
                 Write(ref stderr, true, "Setup.exe: " + ex.Message);
                 Log("== stopped: " + ex);
-                return opt.Prepare ? BuildFailed : PlayFailed;
+                return opt.Prepare || opt.Update ? BuildFailed : PlayFailed;
             }
             finally
             {
@@ -1390,8 +1566,10 @@ namespace Inf2Setup
 
         static int Prepare(Opts opt, string dir)
         {
-            OpenLog(Path.Combine(dir, "play\\setup.log"));
+            if (log == null) OpenLog(Path.Combine(dir, "play\\setup.log"));   // (--update --no-window: its own log goes on)
             Log(string.Format("Setup.exe --prepare{0} {1:yyyy-MM-dd HH:mm}, Windows {2}", opt.DryRun ? " --dry-run" : "", DateTime.Now, Environment.OSVersion.Version));
+            // RecompLauncher installs each release as a new zip: no build files are kept for updates (setup_build.ps1)
+            if (!opt.Update) Environment.SetEnvironmentVariable("PORT_BUILD_CACHE", "0");
             Progress(0, "Checking your PC and your game");
             bool first;
             using (Mutex m = new Mutex(true, "inFAMOUS2-port-setup-" + Util.Hash(dir.ToLowerInvariant()), out first))
@@ -1406,16 +1584,16 @@ namespace Inf2Setup
                 Log("game: " + disc);
                 string err;
                 List<Row> rows = Checker.Run(dir, disc, rpcs3, out err);
-                if (err != null) return Stop(BuildFailed, "the checks could not run: " + err);
+                if (err != null) return Stop(Checker.Blocked ? ScriptsBlocked : BuildFailed, "the checks could not run: " + err);
                 foreach (Row r in rows) Log(string.Format("  {0,-5} {1}: {2}", r.Ok == true ? "ok" : r.Ok == false ? "MISS" : "note", r.Name, r.Detail));
                 foreach (Row r in rows)
                     if (r.Ok == false) return Stop(CheckCode(r.Name), r.Name + ": " + r.Detail);
                 if (Process.GetProcessesByName("rpcs3").Length > 0) return Stop(Rpcs3Open, "RPCS3 is open: close it (Setup uses it to unlock your game)");
-                string cmd = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; & " + Util.Q(Path.Combine(dir, "tools\\setup_build.ps1")) +
-                             " -Disc " + Util.Q(disc) + " -Rpcs3 " + Util.Q(rpcs3) + " -AcceptMsvcLicense -NoShortcut -Cleanup; exit [int]$LASTEXITCODE";
+                string cmd = Util.PowerShellFile(Path.Combine(dir, "tools\\setup_build.ps1"), false) +
+                             " -Disc " + Util.Arg(disc) + " -Rpcs3 " + Util.Arg(rpcs3) + " -AcceptMsvcLicense -NoShortcut -Cleanup";
                 if (opt.DryRun)
                 {
-                    Log("dry run, nothing built. The build would be: powershell -Command \"" + cmd + "\"");
+                    Log("dry run, nothing built. The build would be: powershell " + cmd);
                     Progress(1, "Dry run: the checks passed, nothing was built");
                     return 0;
                 }
@@ -1449,7 +1627,7 @@ namespace Inf2Setup
             Native.KeepAwake(true);
             Log("> setup_build.ps1");
             Job j = new Job();
-            j.Start(Util.PowerShellExe(), "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"" + cmd + "\"", dir, null);
+            j.Start(Util.PowerShellExe(), cmd, dir, null);
             BuildProgress p = new BuildProgress(dir);
             string lastKey = null;
             DateTime lastAt = DateTime.MinValue;
@@ -1628,6 +1806,53 @@ namespace Inf2Setup
             public string Key() { return step + "/" + sub + "/" + detail; }
         }
 
+        // ---------------------------------------------------------- --update --no-window
+
+        // Setup.exe --update --no-window --folder <port folder> [--disc <game folder>] [--rpcs3 <folder>] [--dry-run]
+        //   What the window's "Update to the latest version" does, without the window (tests, scripts): the newest
+        //   port over the folder in place (the player's files untouched; unchanged files keep their times, so kept
+        //   build files rebuild only what changed), then the build as --prepare does it (saves backed up first and
+        //   reapplied). The game folder: --disc, else game\disc (the link Setup made). --dry-run downloads and
+        //   checks, then stops before the build. Log: play\update.log. Exit codes as --prepare's.
+        static int Update(Opts opt, string exeDir)
+        {
+            string dir = Path.GetFullPath(string.IsNullOrEmpty(opt.Folder) ? exeDir : opt.Folder).TrimEnd('\\');
+            OpenLog(Path.Combine(dir, "play\\update.log"));
+            Log(string.Format("Setup.exe --update --no-window{0} {1:yyyy-MM-dd HH:mm}, Windows {2}{3}", opt.DryRun ? " --dry-run" : "",
+                              DateTime.Now, Environment.OSVersion.Version, string.IsNullOrEmpty(opt.To) ? "" : ", to " + opt.To));
+            Progress(0, "Getting the newest version");
+            if (!Util.HasPort(dir)) return Stop(NoPort, "there is no port in " + dir + " to update");
+            if (Directory.Exists(Path.Combine(dir, ".git")) || File.Exists(Path.Combine(dir, ".git")))
+                return Stop(NoPort, "a git clone: git pull gets the newest code");
+            bool first;
+            using (Mutex m = new Mutex(true, "inFAMOUS2-port-setup-" + Util.Hash(dir.ToLowerInvariant()), out first))
+            {
+                if (!first) return Stop(Busy, "Setup is already running in " + dir);
+                PortDownload d = new PortDownload(dir, true);
+                d.Start();
+                string err = null;
+                while (true)
+                {
+                    string ln;
+                    while (d.Lines.TryDequeue(out ln))
+                    {
+                        Log(ln);
+                        if (ln.StartsWith("error:", StringComparison.Ordinal)) err = ln.Substring(6).Trim();
+                        else if (ln.StartsWith("progress:", StringComparison.Ordinal))
+                        {
+                            int pct = Util.Percent(ln);
+                            if (pct >= 0) Progress(0.02 * pct / 100.0, "Getting the newest version: " + ln.Substring(9).Trim());
+                        }
+                    }
+                    if (d.Exited && d.Lines.IsEmpty) break;
+                    Thread.Sleep(100);
+                }
+                if (d.ExitCode != 0 || !Util.PortComplete(dir)) return Stop(BuildFailed, "the download stopped: " + (err ?? "exit code " + d.ExitCode));
+            }
+            if (string.IsNullOrEmpty(opt.Disc) && Util.IsDisc(Path.Combine(dir, "game\\disc"))) opt.Disc = Path.Combine(dir, "game\\disc");
+            return Prepare(opt, dir);   // (--dry-run: it stops before the build)
+        }
+
         // ---------------------------------------------------------- --play
 
         static int Play(Opts opt, string exeDir)
@@ -1639,6 +1864,8 @@ namespace Inf2Setup
             OpenLog(Path.Combine(repo, "play\\launcher.log"));
             Log(string.Format("Setup.exe --play {0:yyyy-MM-dd HH:mm}, Windows {1}, launcher {2} ({3})", DateTime.Now, Environment.OSVersion.Version,
                               Environment.GetEnvironmentVariable("RECOMPLAUNCHER_VERSION") ?? "-", Environment.GetEnvironmentVariable("RECOMPLAUNCHER_MODE") ?? "-"));
+            // RecompLauncher updates this copy from the releases itself: play.ps1 then asks GitHub nothing (update_check.ps1)
+            Environment.SetEnvironmentVariable("PS3_PORT_LAUNCHER", "recomplauncher");
             if (!File.Exists(Util.BuiltExe(repo))) return Stop(NotBuilt, "the game is not built yet (" + Util.BuiltExe(repo) + ")");
             // an update of the port arrived after this game was built: it still plays, the log says so
             try
@@ -1649,7 +1876,7 @@ namespace Inf2Setup
                         "): setting it up again builds the new one");
             }
             catch (Exception) { }
-            StringBuilder a = new StringBuilder("-NoProfile -ExecutionPolicy Bypass -File " + Arg(ps1));
+            StringBuilder a = new StringBuilder(Util.PowerShellFile(ps1, true));
             bool fs = false;
             foreach (string s in opt.PlayArgs) if (string.Equals(s, "-Fullscreen", StringComparison.OrdinalIgnoreCase)) fs = true;
             if (!fs && string.Equals(Environment.GetEnvironmentVariable("RECOMPLAUNCHER_MODE"), "bigpicture", StringComparison.OrdinalIgnoreCase)) a.Append(" -Fullscreen");
@@ -1714,23 +1941,7 @@ namespace Inf2Setup
             catch (Exception) { }
         }
 
-        // One command-line argument, quoted the way Windows splits them again.
-        static string Arg(string s)
-        {
-            if (s.Length > 0 && s.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) return s;
-            StringBuilder b = new StringBuilder("\"");
-            int bs = 0;
-            foreach (char c in s)
-            {
-                if (c == '\\') { bs++; continue; }
-                if (c == '"') { b.Append('\\', bs * 2 + 1); b.Append('"'); bs = 0; continue; }
-                b.Append('\\', bs); bs = 0;
-                b.Append(c);
-            }
-            b.Append('\\', bs * 2);
-            b.Append('"');
-            return b.ToString();
-        }
+        static string Arg(string s) { return Util.Arg(s); }
 
         // ---------------------------------------------------------- a job that ends with Setup.exe
 
@@ -2065,6 +2276,8 @@ namespace Inf2Setup
             // Setup.exe in the port's folder, or downloaded on its own next to an earlier install; else
             // Install gets the port first
             repo = Util.HasPort(dir) ? dir : Util.ExistingInstall(dir);
+            // --update --folder <port>: that folder (play.ps1 starts a Setup.exe it built in work\update\setup)
+            if (o.Update && !string.IsNullOrEmpty(o.Folder) && Util.HasPort(o.Folder)) repo = Path.GetFullPath(o.Folder).TrimEnd('\\');
             ExitCode = o.TestBuild ? 2 : 0;
 
             Text = Title;
@@ -2162,6 +2375,8 @@ namespace Inf2Setup
                 ThreadPool.QueueUserWorkItem(delegate { foundRpcs3 = Util.FindRpcs3(d, r); searching = false; });
             }
             if (opt.TestBuild) Install();
+            // --update (F2 > Update in the game): "Update to the latest version", at once
+            else if (opt.Update && repo != null) Install();
         }
 
         // ---------------------------------------------------------- the screen
@@ -2178,7 +2393,7 @@ namespace Inf2Setup
             if (s == State.Done) { status.Text = ""; status.Visible = false; }
             line.Visible = s != State.Working;
             if (s == State.Start) { line.Text = Intro; line.ForeColor = Theme.Dim; }
-            if (s == State.Done) { line.Text = gitClone ? "Ready to play. (A git clone: git pull --recurse-submodules gets the newest code.)" : "Ready to play."; line.ForeColor = Theme.Dim; }
+            if (s == State.Done) { line.Text = gitClone ? "Ready to play. (A git clone: git pull gets the newest code.)" : "Ready to play."; line.ForeColor = Theme.Dim; }
             license.Visible = s == State.Start || s == State.Failed;
             copyLog.Visible = s == State.Failed;
             again.Visible = s == State.Done && !opt.TestBuild;
@@ -2265,7 +2480,7 @@ namespace Inf2Setup
             if (gitClone)
             {
                 // a git clone gets its code from git; Setup only rebuilds it
-                AddLog("a git clone: the newest code comes with git pull --recurse-submodules");
+                AddLog("a git clone: the newest code comes with git pull");
                 FindThenCheck();
                 return;
             }
@@ -2356,7 +2571,7 @@ namespace Inf2Setup
         // One line, and only for what the player must fix; a wrong folder is asked for again.
         void Checked(List<Row> rows, string err)
         {
-            if (err != null) { Fail("Setup could not run its checks: " + err); return; }
+            if (err != null) { Fail(Checker.Blocked ? err + "." : "Setup could not run its checks: " + err); return; }
             foreach (Row r in rows) AddLog(string.Format("  {0,-5} {1}: {2}", r.Ok == true ? "ok" : r.Ok == false ? "MISS" : "note", r.Name, r.Detail));
             foreach (Row r in rows)
             {
@@ -2400,9 +2615,8 @@ namespace Inf2Setup
             }
             else Util.RefreshPath();
             // pressing Install accepts Microsoft's license (the line under the button says so)
-            string cmd = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; & " + Util.Q(script) + " -Disc " + Util.Q(disc) +
-                         " -Rpcs3 " + Util.Q(rpcs3) + (opt.TestFailBuild ? "" : " -AcceptMsvcLicense") + (opt.NoShortcut ? " -NoShortcut" : "") +
-                         (opt.NoCleanup ? "" : " -Cleanup") + "; exit [int]$LASTEXITCODE";
+            string cmd = Util.PowerShellFile(script, false) + " -Disc " + Util.Arg(disc) + " -Rpcs3 " + Util.Arg(rpcs3) +
+                         (opt.TestFailBuild ? "" : " -AcceptMsvcLicense") + (opt.NoShortcut ? " -NoShortcut" : "") + (opt.NoCleanup ? "" : " -Cleanup");
             ResetProgress();
             compileLog = Path.Combine(repo, "work\\logs\\compile.log");
             Status("Getting ready\u2026");
@@ -2414,7 +2628,7 @@ namespace Inf2Setup
             jobKind = JobKind.Build;
             AddLog("> setup_build.ps1" + (opt.OnlyCache ? " (PORT_ONLY_CACHE=1, Windows-only PATH)" : ""));
             Job j = new Job();
-            try { j.Start(Util.PowerShellExe(), "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"" + cmd + "\"", repo, env); }
+            try { j.Start(Util.PowerShellExe(), cmd, repo, env); }
             catch (Exception ex) { CloseLogFile(); Fail("Setup could not start PowerShell: " + ex.Message); return; }
             job = j;
         }
@@ -2560,6 +2774,7 @@ namespace Inf2Setup
                 ExitCode = 0;
                 FinishUpdate(true);
                 SetState(State.Done);
+                if (opt.Update) line.Text = "Updated" + (string.IsNullOrEmpty(opt.To) ? "" : " to " + opt.To) + ". Your saves, settings, mods and controls are kept.";
                 if (opt.ExitWhenDone) CloseSoon();
                 return;
             }
@@ -2639,8 +2854,8 @@ namespace Inf2Setup
             if (!File.Exists(ps1)) { MessageBox.Show(this, "tools\\play.ps1 is missing in " + repo + ".", Title); return; }
             try
             {
-                ProcessStartInfo si = new ProcessStartInfo(Util.PowerShellExe(),
-                    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File \"" + ps1 + "\"");
+                // the console starts minimized through the start info (as -WindowStyle Minimized did)
+                ProcessStartInfo si = new ProcessStartInfo(Util.PowerShellExe(), Util.PowerShellFile(ps1, true));
                 si.UseShellExecute = true;
                 si.WindowStyle = ProcessWindowStyle.Minimized;
                 si.WorkingDirectory = repo;

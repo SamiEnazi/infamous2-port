@@ -1,5 +1,5 @@
 @echo off
-rem Build the patched ps3recomp runtime with clang-cl + Ninja (MSVC headers/SDK).
+rem Build the engine alone (engine\, our ps3recomp fork) with clang-cl + Ninja (MSVC headers/SDK).
 rem   tools\build_toolkit.cmd [Release|Debug] [extra cmake args...]
 rem The compile environment: tools\vsenv.py (the portable MSVC in tools-cache, else Visual Studio).
 rem CMake, Ninja, LLVM: tools\port_paths.py (tools-cache, config.local.json, or found on this PC).
@@ -15,7 +15,7 @@ if not defined CMAKE exit /b 1
 if not defined NINJA exit /b 1
 set RUN="%PY%" -I "%~dp0vsenv.py" run
 set ROOT=%~dp0..
-%RUN% "%CMAKE%" -S "%ROOT%\toolkit" -B "%ROOT%\build\toolkit-%CFG%" -G Ninja ^
+%RUN% "%CMAKE%" -S "%ROOT%\engine" -B "%ROOT%\build\toolkit-%CFG%" -G Ninja ^
   "-DCMAKE_MAKE_PROGRAM=%NINJA%" ^
   -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl ^
   -DCMAKE_BUILD_TYPE=%CFG% %2 %3 %4 %5 %6 || exit /b 1

@@ -1,0 +1,535 @@
+# inFAMOUS 2 — static recompilation for PC (macOS)
+
+🌐 **English** · [Português (BR)](README.pt-BR.md)
+
+A native port of **inFAMOUS 2** (PS3, digital release `NPUA80638`) to
+**macOS/arm64**, built with static recompilation: the game's PowerPC and SPU
+code is translated to C/C++ and compiled into a native executable, with
+graphics on Metal. It is not an emulator.
+
+**It boots, shows its menus and cutscenes, and New Marais is playable**, at
+~38-40 fps on Apple silicon in headless runs (the game has no 30 fps cap in
+gameplay). Get the app from the
+[**v0.2.16 alpha release**](https://github.com/erikomis/infamous2-recomp/releases/tag/v0.2.16)
+and it rebuilds the game from your own copy ([how](#download-and-play)); from
+v0.2.7 on, the app updates itself.
+
+| | |
+| --- | --- |
+| [<img src="docs/screenshots/01-boot-sucker-punch-logo.jpg" width="420" alt="Sucker Punch logo at boot">](docs/screenshots/01-boot-sucker-punch-logo.jpg)<br>Boot: the studio logos | [<img src="docs/screenshots/02-main-menu.jpg" width="420" alt="Main menu, START A NEW GAME">](docs/screenshots/02-main-menu.jpg)<br>3D main menu |
+| [<img src="docs/screenshots/03-intro-comic.jpg" width="420" alt="Comic-book intro video">](docs/screenshots/03-intro-comic.jpg)<br>Comic-book intro (Bink video) | [<img src="docs/screenshots/04-cutscene-sunset-docks.jpg" width="420" alt="In-engine cutscene, boat at the docks at sunset">](docs/screenshots/04-cutscene-sunset-docks.jpg)<br>Arriving in New Marais (in-engine cutscene) |
+| [<img src="docs/screenshots/05-cutscene-kuo.jpg" width="420" alt="In-engine cutscene, Kuo on the pier">](docs/screenshots/05-cutscene-kuo.jpg)<br>Kuo on the pier (in-engine cutscene) | [<img src="docs/screenshots/06-pier-gameplay.jpg" width="420" alt="Cole on the pier, day">](docs/screenshots/06-pier-gameplay.jpg)<br>Gameplay: the pier by day |
+| [<img src="docs/screenshots/07-street-amp.jpg" width="420" alt="Cole with the Amp in a New Marais street">](docs/screenshots/07-street-amp.jpg)<br>The streets of New Marais, Amp in hand | [<img src="docs/screenshots/08-street-corner.jpg" width="420" alt="New Marais street corner in late afternoon">](docs/screenshots/08-street-corner.jpg)<br>Late afternoon in the city |
+| [<img src="docs/screenshots/09-dusk-neon-taxi.jpg" width="420" alt="Neon signs and a taxi at dusk">](docs/screenshots/09-dusk-neon-taxi.jpg)<br>Neon at dusk |  |
+
+<sub>Frames from the port itself running on an Apple-silicon Mac (M4 Pro),
+built from the player's own copy, at the game's 1280×720; subtitles are in
+Brazilian Portuguese, the port's default dub. inFAMOUS 2 © Sony Interactive
+Entertainment, developed by Sucker Punch Productions; shown only to document
+the port.</sub>
+
+Built on [ps3recomp](https://github.com/sp00nznet/ps3recomp) and, above all,
+on [NoahBPeterson](https://github.com/NoahBPeterson/ps3recomp)'s **inFAMOUS 1
+fork**, which brought the firmware LLE and the fixes that got the first game
+running on the Mac. See [CREDITS.md](CREDITS.md).
+
+> [!WARNING]
+> **Alpha, not tested from start to finish yet.** The game runs from boot to
+> the first missions in New Marais, only on Apple silicon macOS. Nobody has
+> gone past 1% of the story yet, so later missions may break. What is missing
+> is in [ROADMAP.md](ROADMAP.md).
+
+> **This repository contains no game data, no firmware, no Sony keys and
+> nothing translated from them.** Everyone generates all of that locally from
+> their own legitimate copy. A fan project, not affiliated with Sony
+> Interactive Entertainment or Sucker Punch Productions.
+
+## Status
+
+| | |
+| --- | --- |
+| Boot, firmware LLE, SPURS, Wwise audio (SPU jobs) | ✅ |
+| Health warning, studio logos, Bink videos, loading screens | ✅ |
+| 3D main menu, pause menu, options | ✅ |
+| New game → comic-book intro → in-engine cutscenes | ✅ |
+| Empire City prologue (the Beast, the freighter) | ✅ |
+| New Marais: first missions, played in a window with a DualSense | ✅ |
+| Performance | ✅ ~38-40 fps on the headless New Marais walk on Apple silicon. The game has no 30 fps cap in gameplay; menus and the comics stay at 30, as on the console. A long windowed session is still to confirm it |
+| Internal resolution 1080p / 1440p / 4K | ✅ since v0.2.9; 1080p runs at ~37 fps headless since the framebuffer-fetch fix (v0.2.11); 4K is too heavy for now |
+| Ultrawide 21:9 and 32:9 (wider view, HUD kept 16:9 in the centre) | ✅ since v0.2.10, checked headless |
+| Controller (DualSense tested; DualShock 4 and Xbox through SDL), rumble, reconnect without a restart | ✅ |
+| Keyboard and mouse (mouse camera, remappable, also live in the in-game menu) | 🧪 mapped, little tested in a window |
+| Button prompts that follow the controller (Xbox A/B/X/Y, keyboard keys) | 🧪 since v0.2.6, checked headless, waiting for a windowed test |
+| In-game menu (F1 / Cmd+, / L3+R3): image, audio, controls, game languages, performance HUD | ✅ since v0.2.4 (live changes) |
+| Quit game (F1 > Quit game, Cmd+Q, closing the window) | ✅ since v0.2.10, checked headless; a save being written finishes first |
+| Texture packs and more image effects (clarity, curves, colour presets) | 🧪 since v0.2.8, waiting for a windowed test |
+| Saves and trophies (in `~/Library/Application Support`), saves manager in the app | ✅ |
+| Brazilian Portuguese dub and subtitles (default), other languages your copy ships, DLC | ✅ |
+| The app: install, rebuild, play, settings, controls, saves, debug mode | ✅ [v0.2.16 alpha](https://github.com/erikomis/infamous2-recomp/releases/tag/v0.2.16) |
+| The app updates itself | 🧪 since v0.2.7 (v0.2.8 to v0.2.16 were offered through it), waiting for Erik's confirmation |
+| Add to Steam (Big Picture with the controller) | 🧪 since v0.2.7, waiting for a test with Steam |
+| Whole game | ❓ nobody has gone past 1% yet |
+| Linux and Windows | ⏳ planned |
+
+Details and next steps in [ROADMAP.md](ROADMAP.md).
+
+## Download and play
+
+You need an Apple-silicon Mac and your own copy of inFAMOUS 2 (the PSN
+release `NPUA80638`, for example installed in [RPCS3](https://rpcs3.net) with
+its `.rap` licence).
+
+> **Game version: 1.03 only.** The port is built for the game with its **1.03
+> update** (`APP_VER 01.03`). The base game (01.00) does not work: its
+> executable and SPU job modules are different, and the rebuild stops at the
+> *jobs* step. Install the 1.03 update in RPCS3 (*File → Install
+> Packages/Raps/Edats*, the update's `.pkg`); RPCS3's game list then shows
+> the game as 01.03.
+
+1. Download `infamous2-recomp_0.2.18_aarch64.dmg` from the
+   [v0.2.18 release](https://github.com/erikomis/infamous2-recomp/releases/tag/v0.2.18)
+   (every release so far is a pre-release; the
+   [releases page](https://github.com/erikomis/infamous2-recomp/releases) lists any newer one)
+   and drag the app to Applications. It is not notarized: the first time,
+   right-click > Open (or System Settings > Privacy & Security > Open Anyway).
+2. The app lists what your Mac still needs (Xcode Command Line Tools, a few
+   Homebrew packages) and installs it with your OK.
+3. Pick your game folder; the `.rap` is found on its own. Decryption uses
+   RPCS3 if you have it, or your own key file and the PS3 firmware (a
+   `dev_flash` folder or Sony's `PS3UPDAT.PUP`). No keys ship with the app.
+4. **Install** (the first rebuild takes a few minutes), then **Play**.
+
+From v0.2.7 on, the app updates itself: the Updates card on Home offers
+**Download and install**, then **Restart to finish** (signed and checked;
+"Check for updates automatically" can be turned off). After an update it
+offers **Rebuild the game**. On v0.2.6 or older, install the new app by hand
+once. The release ships no game files: the app recompiles the game on your
+Mac.
+
+## The app
+
+[`launcher/`](launcher/README.md) is a desktop app (Tauri) that does all of
+this without a terminal, in the game's own look: Home (your copy's art, PLAY,
+quick settings, last save, status), Graphics, Performance, Game, Controls and
+Advanced.
+
+- **Install / rebuild** with a progress bar: checks and installs the tools,
+  finds your copy and its `.rap`, decrypts with RPCS3 or without it.
+- **Graphics:** window, fullscreen or borderless, screen, vsync, gamma,
+  anisotropic filtering, FXAA or SMAA, sharpening (CAS), vibrance, contrast,
+  MetalFX upscaling, fps counter, and ready-made profiles (Performance /
+  Balanced / Quality). macOS Game Mode turns on in fullscreen.
+- **Controls:** remap keyboard, mouse and controller, mouse camera,
+  vibration; **audio** volume and output; **game language** (the ones your
+  copy ships), with the voice and the subtitles/menus each in its own
+  language if you like (e.g. English voice, Portuguese subtitles).
+- **Saves:** list, back up, restore, import/export with RPCS3, `.zip`.
+- **Trophies:** the game's trophies with your unlocks (names and icons from
+  your copy), and a "Trophy unlocked" notice in the game.
+- **Community patches** from your own RPCS3 patch file: skip the intro, a
+  wider field of view.
+- **Debug mode** (Advanced > Debug mode): play normally while the game logs
+  what goes wrong (missing functions, shader/texture failures, GPU stalls,
+  SPU faults, audio falling behind, files it cannot open, frame-rate drops)
+  and keeps a timed index of the session; press **F12** in the game (or
+  **Capture this frame** in the app) when something looks wrong. Afterwards **Analyse** runs
+  `infamous2-lle/tools/log_triage.py` on the session and lists the top
+  issues (also in `triage.md` in the session folder, for a developer or an
+  agent to go through), and **Create .zip** packs it all for an issue.
+  Details in [launcher/README.md](launcher/README.md#debug-mode-report-a-problem).
+  Plus a **game log viewer** that follows the log live.
+- **Updates card:** downloads and installs a newer app version (signed,
+  verified, one click and a restart), and offers a rebuild when the installed
+  game is older than the app's sources.
+- **Your copy's icon** in the Dock for the app and the game (read from your
+  install, never shipped).
+- **Play shortcut** (Home > Status): a "Play inFAMOUS 2" icon on the Desktop
+  that opens the app and starts the game at once with your settings.
+- **Add to Steam** (Home > Status, optional): inFAMOUS 2 as a non-Steam game
+  with cover art made from your copy, to start from Big Picture with the
+  controller; **Remove from Steam** takes it out again.
+
+**In the game,** F1 (fn+F1), Cmd+, or L3+R3 opens the **in-game menu**:
+image (gamma, sharpening, FXAA/SMAA, vibrance, contrast, clarity, curves,
+colour presets, MetalFX, vsync, display mode, internal resolution, aspect
+ratio), audio volume, controls (live remapping of keyboard, mouse and
+controller, "play with" controller / keyboard and mouse / both, vibration,
+mouse), the game's voice and text languages, a performance HUD (fps, frame
+time, CPU/GPU) and **Quit game**. A DualSense that switches off comes back by
+itself within about a second.
+
+| | |
+| --- | --- |
+| [<img src="launcher/docs/screenshots/home.en.png" width="420" alt="Launcher Home">](launcher/docs/screenshots/home.en.png) | [<img src="launcher/docs/screenshots/graphics.png" width="420" alt="Launcher Graphics page">](launcher/docs/screenshots/graphics.png) |
+
+CI builds it for macOS, Windows and Linux on every change (the game itself
+builds only on macOS so far); the installers are not signed yet.
+
+## Known problems
+
+- Fixed in v0.2.12: sun shadows were inverted and out of place (dark ground
+  with bright hard-edged streaks, no shadow under Cole, shadows detached from
+  what cast them). The shadow-map compare ran the wrong way round, and the
+  maps were read through a copy 1.25x too wide. The doubled sun shadows on
+  some ground in daylight most likely had the same cause; not confirmed in a
+  window yet.
+- A rare hang during the city load: seen in 2 of 9 headless runs on a
+  heavily loaded Mac, with and without the v0.2.12 shadow fix. Report it if
+  it happens to you.
+- The first time the game shows a new effect, its shader is translated on
+  the render thread, which can stall up to ~2 s. Windowed play caches them,
+  so each one happens once; `PS3_SHADER_ASYNC=1` builds them in the
+  background instead (some objects appear a moment late).
+- Fixed in v0.2.5: facades turned away from the sun (and Cole's back and
+  sides) went black, and sun shadows were missing everywhere. The sun shadow
+  maps were read from an empty colour buffer at the same address as their
+  depth buffer, so every surface counted as sunlit and the unclamped sun term
+  went negative on the far side. The occlusion-volume passes (soft contact
+  shadows), skipped while they were the suspect, are drawn again since
+  v0.2.8.
+- Windows and Linux are not supported yet.
+- With less than about 3 GB free on the disk the game shows a "not enough
+  space" error at boot, which in the window is just a black screen.
+
+## Work in progress
+
+What is being worked on now (details in [ROADMAP.md](ROADMAP.md)):
+
+- **Playing the whole story:** nobody has gone past 1% yet, so later
+  missions may break; `tools/play_capture.sh` records what a graphics bug
+  needs in a windowed session.
+- **Doubled sun shadows in daylight:** most likely gone with the v0.2.12
+  shadow fix; waiting for a look in a window, in daylight.
+- **The rare city-load hang** (see Known problems): so far seen only on a
+  heavily loaded Mac.
+- **MetalFX temporal upscaling, HDR (EDR) and TAA:** not started; the
+  temporal ones need motion vectors.
+- **Windows and Linux:** planned.
+- **Pull requests to [ps3recomp](https://github.com/sp00nznet/ps3recomp):**
+  68 of Erik's PRs have been merged; the latest batch, on 2026-10-26, took
+  most of rounds 6 to 8 and the polygon-offset fix (#562). A few are still
+  open (#470 and #545 among them), plus issue #546, a proposal for internal
+  resolution, texture packs and more grading upstream.
+
+## Building from source
+
+The app does all of this for you; by hand, from a terminal:
+
+### What you need
+
+- An Apple Silicon Mac (tested on an M4 Pro, macOS 27).
+- A legitimate copy of inFAMOUS 2 installed in [RPCS3](https://rpcs3.net),
+  **with the 1.03 update** (`APP_VER 01.03`; the base game 01.00 does not
+  work), its license (`.rap`) and the PS3 firmware installed there.
+- Xcode Command Line Tools and Homebrew:
+
+```sh
+brew install cmake ninja sdl2 glslang spirv-cross spirv-tools python@3.12
+python3.12 -m venv .venv
+```
+
+### Building
+
+```sh
+git clone https://github.com/erikomis/infamous2-recomp.git
+cd infamous2-recomp
+tools/setup_toolkit.sh                        # toolkit in ./ps3recomp-fork
+.venv/bin/pip install -r ps3recomp-fork/requirements.txt
+```
+
+Then one command does the rest (decrypt, translate, compile), from your
+copy and its licence:
+
+```sh
+python3 infamous2-lle/tools/rebuild.py --game "<RPCS3>/dev_hdd0/game/NPUA80638" --rap <NPUA80638...rap>
+```
+
+`--dry-run` lists the steps and checks every prerequisite first. By default
+the EBOOT and the firmware are decrypted with RPCS3; without RPCS3, pass your
+own key file (scetool format) with `--keys KEYFILE`, and the firmware as
+Sony's `PS3UPDAT.PUP` with `--firmware PS3UPDAT.PUP`. No keys ship with this
+repository. The manual recipe is in
+[`infamous2-lle/README.md`](infamous2-lle/README.md#rebuilding).
+
+Translation takes a few minutes and compiling ~80 s on an M4 Pro.
+
+## Playing from the terminal
+
+```sh
+cd infamous2-lle
+./run.sh
+```
+
+A controller (DualSense tested) works out of the box. One that is switched off
+and on again mid-game (a DualSense on Bluetooth that went to sleep), or
+plugged in later, is picked up again by itself, on the PS3 port it had; no
+restart needed. Keyboard and mouse add on top of it:
+
+| Key | PS3 |
+| --- | --- |
+| W A S D | left stick |
+| I J K L or mouse | right stick (camera) |
+| Arrow keys | D-pad |
+| Space | ✕ |
+| Q / E / R | ○ / □ / △ |
+| U / O | L1 / R1 |
+| Y / P | L2 / R2 |
+| G / H | L3 / R3 |
+| Return / Tab | START / SELECT |
+| Left / right / middle mouse button | R1 / R2 / L1 |
+
+The mouse is tuned with `PS3_MOUSE_SENS`, `PS3_MOUSE_INVERT_Y=1`,
+`PS3_MOUSE_INVERT_X=1` and `PS3_MOUSE_DEADZONE`; `PS3_MOUSE=0` turns it off. A
+click in the game captures it (the cursor hides and the camera follows the
+mouse); Esc or Cmd releases it, and so does switching to another app.
+`PS3_MOUSE_CAPTURE=0` goes back to the uncaptured camera.
+
+Every binding above can be changed in a controls file: the launcher's
+**Controls** screen writes it, so does the in-game menu's **Controls** tab
+(F1, below; the change applies at once), or write it by hand at
+`~/Library/Application Support/infamous2-recomp/input.toml` (`input.ini` also
+works; `PS3_INPUT_MAP=<file>` picks another one, `PS3_INPUT_MAP=` none).
+Anything the file leaves out keeps the layout above (the mouse's side
+buttons press L1, like the middle one), except that an input the file binds
+leaves the controls it does not mention: `cross = "Q"` takes Q off ○ (list it
+under both to keep both). Names are not case-sensitive, and an unknown one
+is reported once in the log and ignored.
+
+```toml
+[keyboard]                  # PS3 control = keys
+cross    = "Space"
+circle   = "F"
+start    = "Return, KeypadEnter"   # several keys
+l3       = "Shift"
+r3       = ""                      # unbound
+
+[mouse_buttons]             # PS3 control = mouse buttons
+r1   = "Left"
+up   = "WheelUp"            # each wheel notch is one press
+down = "WheelDown"
+l1   = "Button4"
+
+[mouse]                     # the environment variables above win over these
+camera      = true
+sensitivity = 1.5
+invert_x    = false
+invert_y    = false
+deadzone    = 30
+capture     = true
+
+[controller]                # PS3 control = SDL controller inputs
+cross  = "a"                # Cross on a DualSense, A on an Xbox pad
+circle = "b"
+select = "touchpad"
+```
+
+- PS3 controls: `cross circle square triangle l1 r1 l2 r2 l3 r3 start select`,
+  `up down left right` (D-pad), `ls_up ls_down ls_left ls_right` and
+  `rs_up rs_down rs_left rs_right` (sticks).
+- Keys, by their place on a US Mac keyboard: `A`-`Z`, `0`-`9`, `F1`-`F20`,
+  `Space Return Tab Escape Backspace ForwardDelete Up Down Left Right Home End
+  PageUp PageDown`, `Minus Equal LeftBracket RightBracket Backslash Semicolon
+  Quote Comma Period Slash Grave Section`, `Keypad0`-`Keypad9 KeypadEnter
+  KeypadPlus KeypadMinus KeypadMultiply KeypadDivide KeypadDecimal
+  KeypadEquals KeypadClear`, `Shift RightShift Control RightControl Option
+  RightOption`, or a raw key code (`0x00`-`0x7F`). Cmd cannot be bound, and
+  Esc releases the captured mouse before it reaches the game.
+- Mouse buttons: `Left Right Middle Button4`-`Button8 WheelUp WheelDown`.
+- Controller (SDL names): `a b x y back guide start leftstick rightstick
+  leftshoulder rightshoulder lefttrigger righttrigger dpup dpdown dpleft
+  dpright touchpad misc1 paddle1`-`paddle4`; PlayStation and Xbox names work
+  too (`cross`, `options`, `share`, `l1`, `r2`, `lb`, `rt`, ...). The physical
+  sticks always drive the PS3 sticks.
+
+The window resizes freely and the image keeps its 16:9 shape (or the
+`PS3_ASPECT` one), with black bars when the window has another one.
+
+| Shortcut | What it does |
+| --- | --- |
+| Cmd+F or Option+Return | fullscreen on/off (borderless with `PS3_WINDOW_MODE=borderless`, macOS fullscreen otherwise) |
+| Cmd+Ctrl+F | macOS fullscreen on/off |
+| Esc / Cmd | release the mouse |
+| F1 (fn+F1 on a Mac keyboard), Insert or Cmd+, ; L3+R3 on a controller | the in-game menu (below) |
+| Cmd+Q | quit the game at once (as the menu's **Quit game**, without the question) |
+
+### In-game menu
+
+F1 (fn+F1 on a Mac keyboard, where F1 is the brightness key), Insert (Help on
+older Mac keyboards) or Cmd+, opens and closes it; on a controller, press L3
+and R3 (both sticks) together. Esc or ○ also closes it, L1/R1 switch tabs, the
+D-pad/left stick and ✕ work the controls, and the mouse clicks. While it is
+open the game gets no input (its pad, keys and mouse are held neutral and the
+cursor is released), but it keeps running: pause it first with START if
+needed. One stick click alone still reaches the game as before; while both
+are held down neither does. `PS3_OVERLAY_PAD=0` turns the
+controller combo off, `PS3_OVERLAY=0` the whole menu.
+
+**Quit game**, at the bottom next to Close, asks first ("Unsaved progress since
+the last autosave will be lost"; Cancel has the focus, Esc or ○ backs out).
+Quit does what the console's Quit Game does: the game is asked to exit
+(`CELL_SYSUTIL_REQUEST_EXITGAME`), and if it has not after 3 s it is ended for
+it, never in the middle of writing a save, with exit status 0, so the
+launcher (and `--exit-with-game`, the Steam shortcut) sees a normal end.
+Progress counts up to the last autosave, as on the console.
+
+| Tab | What it changes, live |
+| --- | --- |
+| Image | the gamma override (or the game's own brightness), sharpening, FXAA or SMAA, vibrance, contrast, clarity, the tone curve, a colour preset or LUT, vignette, film grain, MetalFX upscaling, vsync, window / macOS fullscreen / borderless; anisotropic filtering, internal resolution and aspect ratio apply at the next start |
+| Audio | master volume (movies included) |
+| Controls | play with controller + keyboard/mouse, controller only, or keyboard/mouse only; the button icons in the game's prompts (automatic, PlayStation, Xbox, keyboard and mouse); vibration on/off and strength; mouse camera on/off, sensitivity and vertical/horizontal inversion; a table of every PS3 button with its key, mouse button and controller button: click a cell (or pick it with the pad and press ✕), press the new input and it applies at once (Esc cancels, right-click unbinds, "Restore defaults"). The press goes to the menu, never to the game. Rebindings are saved straight away to the same `input.toml` the launcher's Controls screen edits |
+| Performance | a small HUD in a corner that stays when the menu is closed: fps, frame time with a graph, CPU cores in use and threads busy (≥ 80% of a core: here mostly the SPU threads), the RSX's Metal encode time and the GPU wait per frame; corner, opacity and graph are options |
+| Game | the game language, the voice and the text (menus and subtitles), each among the languages your copy has, and which ones are in use now. The game loads its language when it starts, so these apply when it restarts (the menu says so) |
+
+What the menu changes is saved when it closes, to
+`~/Library/Application Support/infamous2-recomp/overlay.ini` (`run.sh` sets
+`PS3_OVERLAY_INI` to it for windowed play; `PS3_OVERLAY_INI=` keeps changes to
+the session). The file holds only what was changed in the menu, as lines with
+the same names and values as the variables (`PS3_SHARPEN=0.40`,
+`PS3_AUDIO_VOLUME=70`, `PS3_OVERLAY_HUD=1`, ...). Precedence at start:
+
+1. a variable set when the game starts wins (the shell, or the launcher, which
+   passes only the settings it has away from their defaults);
+2. otherwise the menu's line in `overlay.ini`;
+3. otherwise the built-in default (and, for the mouse, `[mouse]` in the
+   controls file).
+
+The menu marks a setting whose variable was set with an orange "env": a change
+applies at once, but the variable wins again the next time. To let the menu's
+value stick, put the launcher's setting back to its default. A small notice in
+the corner says when the settings were saved. Headless runs never read the
+file and draw nothing; `PS3_OVERLAY_FORCE_OPEN=1` / `PS3_OVERLAY_HUD=1` draw
+the menu / HUD there too, into the frames `tools/capture.sh` keeps (a test
+switch).
+
+**Game Mode.** On macOS the build makes an app bundle,
+`build/Infamous2Recomp.app` (`build/Infamous2Recomp` links to its executable,
+and `run.sh` starts it directly, so the environment and the log work as
+before). Its Info.plist marks it as a game, so macOS 14+ turns on Game Mode
+while the game is fullscreen and in front: first call on the CPU and GPU, half
+the Bluetooth latency for controllers and AirPods. macOS fullscreen turns it on;
+borderless may not. The game also keeps macOS from App-Napping it.
+`PS3_QOS=1` (experimental) puts its PPU, SPU and RSX threads in the top QoS
+class; it did not raise the frame rate in tests and coincided with hangs.
+
+| Variable | What it does |
+| --- | --- |
+| `PS3_LANG=pt\|en\|es\|fr\|ru\|ja\|...` | the console language (default `pt`: Brazilian Portuguese). This Americas release picks its own files only for `pt` (brazilian), `es` (latino), `en` and `fr`, and plays every other language in English; the port then serves that language's files itself, so `ru`, `ja`, `de`, `it`, `nl`, `pl`, `tr`, `ko`, `zh-t`, `en-gb`, `pt-pt` (European Portuguese) and `es-es` (Spanish of Spain) work too (Korean, Chinese and UK English have no dub: English voice). Read once at start |
+| `PS3_VOICE_LANG=<name>` | the dub in another language: dialogue and the voice track of the movies. `<name>` is the file name in your copy: `english`, `brazilian`, `portuguese`, `latino`, `spanish`, `french`, `german`, `italian`, `dutch`, `polish`, `russian`, `turkish`, `japanese`. Unset: the game language's. E.g. `PS3_LANG=pt PS3_VOICE_LANG=english` = English voice, Portuguese text |
+| `PS3_TEXT_LANG=<name>` | menus, HUD and subtitles in another language (they change together: the font with the letters comes with the menus); the names above plus `british`, `korean`, `chinese`. Unset: the game language's. The log shows each file served (`[lang] ...`) |
+| `PS3_WINDOW_MODE=windowed\|fullscreen\|borderless` | how the game opens: a window (default), macOS fullscreen (a Space of its own) or borderless fullscreen (covers the screen in place, menu bar and Dock hidden, instant app switching) |
+| `PS3_WINDOW_SIZE=<w>x<h>` | the window's size in points, e.g. `1920x1080` (default 1280x720, shrunk to fit the screen) |
+| `PS3_WINDOW_ICON=game\|<file>\|none` | the Dock icon: by default the launcher's original placeholder (`infamous2-lle/window_icon.png`, no Sony art); `game` uses your copy's own `PS3_GAME/ICON0.PNG` |
+| `PS3_DISPLAY=<n>\|<name>` | the screen the game opens on, which fullscreen and borderless then cover: `1` is the one with the menu bar, `2` the next, or a screen's name as System Settings shows it (`DELL U2720Q`; any case, or a part of it). Default: the main screen |
+| `PS3_VSYNC=0` | presents frames without waiting for the screen's refresh (less latency, may tear in fullscreen). The game's 30 fps pacing comes from its own vblank clock and does not change |
+| `PS3_ANISO=2\|4\|8\|16` | anisotropic filtering: ground and walls seen at an angle stay sharp. Only the game's mipmapped textures change. Default off |
+| `PS3_PATCHES="Skip Intro,Extended FOV"` | Community patches by name, read from your own RPCS3 `patches/patch.yml` (`PS3_PATCH_YML` for another file) and applied when the game starts; only the block whose `PPU-<sha1>` matches this EBOOT counts. In the app: Game > Community patches |
+| `PS3_LUT=<file.png>` | A colour LUT in ReShade's `LUT.png` layout (1024x32 or 4096x64), your own file; `PS3_LUT_STRENGTH=0..1` mixes it in (default 1) |
+| `PS3_VIGNETTE=0..1`, `PS3_GRAIN=0..1` | Darker corners; film grain. Default 0 (off) |
+| `PS3_VIBRANCE=-1..1` | Vibrance: saturation raised most on dull colours (negative mutes). Default 0 (off) |
+| `PS3_CONTRAST=0.5..1.5` | Contrast around mid-grey. Default 1 (off) |
+| `PS3_CLARITY=-1..1` | Clarity (local contrast): the luminance minus a wide blur of it, added back toward the midtones, so large shapes stand out without the fine grain sharpening adds; negative softens. Default 0 (off) |
+| `PS3_SHADOWS`, `PS3_MIDTONES`, `PS3_HIGHLIGHTS=-1..1` | A tone curve: each lifts (or, negative, lowers) its third of the range while black and white stay put. Default 0 (off) |
+| `PS3_LUT_PRESET=warm\|cool\|film\|vivid` | A built-in colour grade (written for this port, generated as a 32³ LUT) in place of the `PS3_LUT` file; `PS3_LUT_STRENGTH` mixes it in. Default off |
+| `PS3_MODS=<pack>,<pack>` | Texture packs: folders in `PS3_MODS_DIR` (`run.sh`: `~/Library/Application Support/infamous2-recomp/mods`) of PNGs named by the key of the texture they replace (`<16 hex digits>.png`, optionally `_anything` before `.png`); the first pack wins. Any size (a higher-resolution PNG gets its own mip chain); the sampler and channel remap of the original stay. Colour textures only (RGBA8 and DXT); one the game reads in texels must keep its size. In the app: Game > Texture packs. Default none |
+| `PS3_MODS_DUMP=<dir>` | Writes every colour texture the game uploads, once each, as `<dir>/<key>.png` (the name a pack uses) with a line in `<dir>/textures.txt` (key, size, format, address): dump, edit, drop into a pack |
+| `PS3_AA=fxaa` / `smaa` | Anti-aliasing on the game's 1280x720 image, before any scaling: FXAA (cheapest, slightly soft) or SMAA 1x (sharper text and textures). Default off |
+| `PS3_SHARPEN=<0..1>` | contrast-adaptive sharpening (AMD CAS style) at the output resolution; 0 (default) is off |
+| `PS3_RES_SCALE=1.5\|2\|3` | Internal resolution: the game's render targets at 1.5x (1080p), 2x (1440p) or 3x (4K) of 1280x720; 3D, effects, HUD and text all get sharper. Any value 1..4 (or `1080p`, `1440p`, `4k`); unset or 1 is the old path. What the PS3 code reads back stays at 720p. Restart to change (in-game menu: Image > Internal resolution; launcher: Graphics > Display). Cost, headless New Marais: 43 fps at 1x, 36 at 1.5x, 32 at 2x, 16 at 3x |
+| `PS3_ASPECT=21:9\|32:9` | Ultrawide: the cameras see more to the sides at the same vertical view (hor+), the picture renders that much wider and fills a 21:9 (or 32:9) screen with no bars; the HUD stays 16:9 in the middle, and menus, comics and movies get black bars beside them. Unset (or `16:9`) is the old path. Restart to change (in-game menu: Image > Aspect ratio; launcher: Graphics > Display). Combines with `PS3_RES_SCALE`. Cost, headless New Marais: 21:9 within the noise of 16:9 (~37 fps both), 32:9 ~33 fps |
+| `PS3_UPSCALE=metalfx` | MetalFX spatial upscaling from 1280x720 to the window's pixel size (macOS 13+), instead of the layer's plain stretch. Falls back to the plain path, with a line in the log, where MetalFX is missing. Default off |
+| `PS3_AUDIO_VOLUME=<0..100>` | master volume (default 100). Applied to what the Mac plays (the movies' sound too: it is all one mix), on a curve that sounds even: 50 is about −12 dB. Live from the in-game menu and `PS3_TOGGLE_FILE` |
+| `PS3_AUDIO_DEVICE=<name>` | the audio output, by its name in Sound settings (any case, or a part: `AirPods`); not found or unset, the system default (which the game follows when it changes) |
+| `PS3_RUMBLE=0` | no controller vibration. On by default: the game's rumble reaches DualSense, DualShock 4 and Xbox controllers through SDL |
+| `PS3_RUMBLE_STRENGTH=<0..200>` | vibration strength in percent (default 100); above 100 strengthens light rumble, capped at the motors' maximum. `PS3_RUMBLE_LOG=1` prints every request the game makes |
+| `PS3_INPUT_MODE=both\|controller\|keyboard` | what plays the game: everything (default), the controller only (keys and mouse do nothing in the game), or keyboard and mouse only (the controller still opens the menu with L3+R3). The in-game menu switches it live |
+| `PS3_BUTTON_ICONS=auto\|playstation\|xbox\|keyboard` | the button glyphs in the game's prompts ("Press ✕ to continue", the HUD hints). `auto` (default) follows the device you used last: an Xbox controller (360/One/Series, and pads SDL does not call PlayStation or Nintendo) shows A/B/X/Y, LB/RB/LT/RT, View/Menu and LS/RS; a DualShock/DualSense (and, for now, a Switch pad) the original glyphs; the keyboard and mouse the keys and mouse buttons bound in `input.toml`. They switch the moment you pick up the other device. The glyphs are drawn by the port (simple shapes, no artwork copied) into the game's prompt atlas as it is uploaded; the game's files are untouched. The in-game menu (Controls) and `PS3_TOGGLE_FILE` change it live |
+
+Saves and trophies live in `~/Library/Application Support/infamous2-recomp/gamedata`
+(Linux: `~/.local/share/infamous2-recomp`), whatever directory the game is launched from;
+the first windowed `./run.sh` copies an older `infamous2-lle/gamedata` there.
+`PS3_GAMEDATA_ROOT=<dir>` picks another place.
+
+Options worth knowing:
+
+| Variable | What it does |
+| --- | --- |
+| `PS3RECOMP_ENG_GPU_SSAO=` (empty) | puts the SSAO job back on the SPUs (on the GPU by default since 2026-10-17: ~21 → 26–28 fps walking) |
+| `PS3RECOMP_ENG_GPU_LIGHT=` (empty) | puts the light pass back on the SPUs (slower; on the GPU by default) |
+| `PS3_DISPLAY_GAMMA=<0.8..1.2>` | overrides the display gamma; by default the game's own brightness setting is applied, as on the console |
+| `PS3RECOMP_ENG_USER_CLIP=0` | ignores the RSX user clip planes (on by default since 2026-10-22: the water's planar reflection clips at the water plane) |
+| `PS3RECOMP_ENG_DEPTH_EXPORT=0` | ignores fragment-program depth export (on by default since 2026-10-22: the depth downsample the soft particles test against) |
+| `PS3RECOMP_ENG_FBFETCH=0` | the G-buffer decals read the pixel under them through copies again instead of Metal framebuffer fetch (on by default since v0.2.11: faces right at 1080p and above, GPU time at 1080p 19 → 9 ms a frame) |
+| `PS3RECOMP_ENG_DEPTH_BOUNDS=0` | ignores the RSX depth-bounds test (emulated in the shader by default since v0.2.11: the sun-shadow cascades and the light and occlusion volumes); also live |
+| `PS3RECOMP_ENG_SHADOW_CMP=0`, `PS3RECOMP_ENG_ZTEX_CROP=0` | the old shadow-map compare direction / the old stretched shadow-map read (both fixed in v0.2.12: sun shadows as on the PS3); live |
+| `PS3RECOMP_ENG_POLY_OFFSET=0` | the old draw without the polygon offset (the game's shadow casters set one; honoured since v0.2.13, without it the blue acne bands on walls and trims of v0.2.12 come back); live |
+| `PS3RECOMP_ENG_DEPTH_CLAMP=0` | the sun-shadow casters clipped at the near/far planes again instead of depth-clamped as the game asks (since v0.2.14: building shadows no longer vanish up close); live |
+| `PS3RECOMP_ENG_VCACHE_PRUNE=1` | the vertex cache's v0.2.13 prune (since v0.2.14 it drops one-frame entries first, so it no longer starts over in busy streets) |
+| `PS3RECOMP_ENG_SHADE_BACKFACE=0` | world surfaces facing away from the sun read the shadow map again instead of counting as shaded (since v0.2.16: no more blue dot grids on walls, posts and crates at dusk); live |
+
+`tools/play_dump.sh <name>` opens the game in a window and, each time Return is
+pressed in its terminal, saves that frame (render targets, shaders, pass log)
+under `out/<name>/`: the quickest way to report a rendering bug.
+
+For headless tests: `tools/capture.sh <name> <seconds>` saves a PNG of the
+frame every 10 s, `PAD_SCRIPT="95:0x4000"` presses ✕ at 95 s
+(`760:0x0400:400` holds L1 for 400 s) and `PAD_STICK="lx,ly,rx,ry,from,to;..."`
+holds the sticks over a time range (0–255, 128 = center). That is how the
+tutorial was played: ✕ at 95 and 110 s for the menu, the right stick in each
+direction for 10 s from 470 s, then the left one, the left stick forward from
+640 s ("Head towards the disturbance") and L1 held with R1 taps (`0x0800`) at
+the pier gate ("Hold L1 to aim"). `tools/play_prologue.sh [name] [seconds]`
+does all of that in one command.
+
+Switching knobs while the game runs: `PS3_TOGGLE_FILE=<file>` names a text
+file the game re-reads every 250 ms when it changes, one `NAME=value` per line
+(`#` starts a comment), NAME being the environment variable. A line overrides
+that variable, a removed line goes back to it, and each change logs
+`[toggle] NAME old -> new`. Live: `PS3RECOMP_ENG_VCACHE`,
+`PS3RECOMP_ENG_TEXHASH_FULL`, `PS3RECOMP_ENG_SKIP_FP` (the whole list),
+`PS3_SPU_FASTJOB`, `PS3_SPU_STUB_MICRO`, `PS3_SPU_STACK_HINT`,
+`PS3_SPU_DRAIN_INLINE` (the drain's inline launch check), `PS3_DISPLAY_GAMMA`,
+`PS3_SHARPEN`, `PS3_AA`, `PS3_ANISO`, `PS3RECOMP_METAL_FPS`, `PS3_BUTTON_ICONS` and
+`PS3_QUIT=1` (quit the game as the menu's Quit game does: a scripted run ends
+with status 0); everything else
+(the GPU light/SSAO passes among them) is still read once at start. Without the
+variable nothing changes. `tools/ab_live.sh <name> <KNOB> [B] [A]` uses it for
+an fps A/B inside one headless run: it flips the knob every 20 s from 200 s
+into the New Marais recipe and `tools/ftrace_report.py --phases` reports the
+frame times of each value, so both sides see the same scene at the same moment
+instead of two runs that drift apart.
+
+## Fixes made here
+
+In the toolkit (in `infamous2-lle/patches/`, applied by `setup_toolkit.sh`):
+
+- **Lifter:** jump tables lost behind a tail-call epilogue.
+- **cellGcm:** the FIFO skipped commands when the game "parked" the GPU before re-linking the block; the menu froze.
+- **SPU:** the interpreter did not return to translated code inside WWS job modules; the menu ran at ~0.4 fps.
+- **Fragment shaders:** the NV40 pack/unpack opcodes (PK4UB, UP4UB, PKG, UPG and their 16-bit siblings) were missing from the decompiler and got skipped; the game uses them for sRGB↔linear conversion in character materials, and without them Cole's scalp came out green and skin tones were wrong. Implemented following RPCS3.
+- **Brightness:** the image came out dark and muddy, with characters nearly black against the light. The game asks the RSX for linear→sRGB conversion when writing the framebuffer and sRGB→linear decoding when reading textures, and the engine ignored both; ported upstream PRs #304 and #305.
+- **Given back upstream:** six of these fixes landed in ps3recomp v0.15.0
+  (#311–#316), and the ps3recomp README mentions this port in its
+  "In the community" section.
+- **Upstream:** open PRs applied — #297, #275, #274, #278, #293, #303; #266, #302, #304 and #305 ported by hand (credits in [CREDITS.md](CREDITS.md)).
+- **Adopted from upstream (2026-10-18, in v0.2.0):** #358 (NV3089 source origin in 12.4 fixed point), #340, #326, #349, #360, #366 and the log-cap wrap from issue #364.
+
+In the port: an extractor for the 27 job modules embedded in the EBOOT,
+registration of the `Wws_Job` policy module, PARAM.SFO at boot, and the run
+and capture scripts.
+
+## Layout
+
+| Folder | What it is |
+| ------ | ---------- |
+| [`infamous2-lle/`](infamous2-lle/README.md) | **Current port.** inFAMOUS 1 fork + firmware LLE. |
+| [`infamous2/`](infamous2/README.md) | First attempt, against upstream ps3recomp v0.14.0 with SPURS in HLE. Stops before the first frame; kept as reference. Its local `game/`, `fw/` and `vfs/` folders are also used by the current port. |
+| [`launcher/`](launcher/README.md) | The desktop app (Tauri): install, rebuild, play, settings, saves. |
+| `tools/setup_toolkit.sh` | Clones the fork at the commit in use and applies this repository's patches. |
+| `docs/screenshots/` | The gallery at the top of this page. |
+
+## License
+
+Code in this repository: MIT ([LICENSE](LICENSE)). The toolkit and the fork
+are MIT by their authors. inFAMOUS 2 © Sony Computer Entertainment America
+LLC, developed by Sucker Punch Productions; this project is not affiliated
+with Sony.

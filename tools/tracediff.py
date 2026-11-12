@@ -19,7 +19,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TK = os.path.join(ROOT, "toolkit")
+TK = os.environ.get("PORT_TK") or os.path.join(ROOT, "engine")
 
 
 def norm(name):

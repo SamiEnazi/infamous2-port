@@ -350,6 +350,9 @@ def get_msvc(files, pay, full, sv, prog):
         os.replace(src, dest)
     shutil.rmtree(sdk_tmp, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
+    for k, pin in (("msvc", MSVC_VERSION), ("sdk", SDK_VERSION)):   # what was asked for (stale())
+        with open(os.path.join(CACHE, k, ".pin"), "w") as f:
+            f.write(pin + "\n")
     _ready(os.path.join(CACHE, "msvc"), "MSVC " + full)
     _ready(os.path.join(CACHE, "sdk"), "Windows SDK 10.0." + sv)
     print(f"  MSVC {full} and Windows SDK 10.0.{sv}: tools-cache\\msvc, tools-cache\\sdk", flush=True)
@@ -357,13 +360,42 @@ def get_msvc(files, pay, full, sv, prog):
 
 # ---------------------------------------------------------------- main
 
+def _ready_text(key):
+    try:
+        with open(os.path.join(CACHE, key, ".ready")) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def stale(key):
+    """A tools-cache copy of another version than this script pins: Setup now keeps tools-cache between
+    updates (tools/setup_cleanup.ps1 -KeepBuildCache), so a newer port may want newer tools. The objects
+    an older compiler made are rebuilt then (tools/rebuild_win.py: the tool set changed)."""
+    if not port_paths.cached(key):
+        return False
+    t = _ready_text(key)
+    if key in ARCHIVES:
+        return t != ARCHIVES[key]["label"]
+    if key in ("msvc", "sdk"):     # the version this script asked Microsoft's manifest for (.pin, get_msvc)
+        try:
+            with open(os.path.join(CACHE, key, ".pin")) as f:
+                return f.read().strip() != (MSVC_VERSION if key == "msvc" else SDK_VERSION)
+        except OSError:
+            return False
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--accept-msvc-license", action="store_true")
     a = ap.parse_args()
     t0 = time.time()
-    get = [k for k in ("cmake", "ninja", "llvm") if not port_paths.cached(k) and not port_paths.configured(k)]
-    msvc = not (port_paths.cached("msvc") and port_paths.cached("sdk")) and \
+    for k in ("cmake", "ninja", "llvm", "msvc", "sdk"):
+        if stale(k) and not port_paths.configured(k):
+            print(f"  tools-cache\\{k} is {_ready_text(k) or 'an unknown version'}: this port wants another one", flush=True)
+    get = [k for k in ("cmake", "ninja", "llvm") if (not port_paths.cached(k) or stale(k)) and not port_paths.configured(k)]
+    msvc = not (port_paths.cached("msvc") and port_paths.cached("sdk") and not stale("msvc") and not stale("sdk")) and \
         not (port_paths.configured("msvc") and port_paths.configured("sdk")) and not port_paths.configured("vcvars")
     if msvc and not a.accept_msvc_license:
         raise SystemExit("The C++ compiler parts (MSVC and the Windows SDK) are Microsoft's, under the Visual Studio "

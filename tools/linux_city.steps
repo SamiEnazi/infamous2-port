@@ -1,0 +1,19 @@
+# Linux boot check (tools/linux_run.py): from the first save into the city -- the game loads the newest save by
+# itself at boot (pgo_save.steps) -- with game-side shots and X screen shots once the world is drawn (the GAME
+# writes anchor.flag on its first world frame, PS3RECOMP_ENG_WORLD_MARK, not in the first 20 s after the first
+# present). Correctness only: a slow GPU (or llvmpipe) takes its time.
+#! seconds 900
+#! savefrom work\saves\first-save\gamedata
+#! worldmark 20
+sleep 15
+xshot boot15
+anchorfile 840
+at 5
+shot world5
+xshot world5
+at 30
+shot world30
+at 60
+shot world60
+xshot world60
+close

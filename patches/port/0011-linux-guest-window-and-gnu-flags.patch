@@ -1,0 +1,144 @@
+From: SamiEnazi <85966743+SamiEnazi@users.noreply.github.com>
+Subject: [PATCH] Linux: a 4 GB-aligned guest window, and the Windows build's flags in GNU spelling
+
+Two things the Linux build needs that no compiler error shows (work/crossplat/REPORT.md):
+
+- main.cpp, POSIX branch: the guest window was calloc(1, 0xE0000000), a heap block on
+  no 4 GB boundary, so every host-to-guest pointer truncation (GUEST_EA) named a wrong
+  guest address. Now the whole 32-bit space + the 64K guard (VM_SIZE, as on Windows),
+  mmap'd MAP_NORESERVE, over-mapped by 4 GB and trimmed to a 4 GB boundary;
+  ppu_vm_size = 0 as on Windows (no OOB guard). guest_vm_map_flat is taken from
+  ThiagoFraga761/infamous2-pc (work/patches/ps3recomp.patch, runtime/memory/guest_vm.h),
+  MIT License, Copyright (c) 2026 the infamous2-recomp contributors: the permission
+  notice in that repository's LICENSE applies to that function.
+- CMakeLists.txt, GNU branch (clang/gcc off Windows): the lifted SPU sources had -O2
+  only -- no ISA flag and, worse, no -ffp-contract=off: clang's C default fuses a*b+c
+  into one FMA wherever the ISA has it, and the SPU job replay is then not bit exact.
+  Now SPU: -O2 -ffp-contract=off + PORT_SPU_ARCH (x86-64 Linux default
+  -march=x86-64-v3 -fno-stack-protector -DSPU_LS_FASTPATH=1 -DSPU_FLOAT_RZ_ONLY=1);
+  lifted PPU + firmware: -w -ffp-contract=off + PORT_LIFT_OPT (x86-64 Linux default
+  -O2 -march=x86-64-v3 -fno-stack-protector), i.e. rebuild_win.py's Windows flags
+  (/arch:AVX2, /GS-) in GNU spelling. PORT_LIFT_OPT / PORT_SPU_ARCH take GNU flags
+  there. Elsewhere (macOS arm64) both default to empty.
+
+Windows: only #ifndef _WIN32 code and the non-MSVC CMake branch change; the clang-cl
+build's preprocessed main.cpp and its configure are the same as without this patch.
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f09d5ad..0dd6150 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -234,7 +234,21 @@ if(SPU_SOURCES)
+             "clang-cl ISA flag for the lifted SPU sources (empty = baseline x86-64)")
+         set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;/clang:-ffp-contract=off;${PORT_SPU_ARCH}")
+     elseif(NOT MSVC)
+-        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
++        # GNU spelling (clang/gcc: Linux; also macOS). -ffp-contract=off is
++        # mandatory: clang's C default fuses a*b+c into one FMA wherever the ISA
++        # has one (x86-64-v3 does), one rounding where the SPU makes two, and the
++        # job replay is no longer bit exact. PORT_SPU_ARCH as in the clang-cl
++        # branch; the x86-64 Linux default is what the Windows build gets from
++        # rebuild_win.py: x86-64-v3 (= /arch:AVX2), no stack protector, the LS
++        # fast path and RZ-only floats. Elsewhere (macOS arm64) empty.
++        if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
++            set(_port_spu_arch "-march=x86-64-v3;-fno-stack-protector;-DSPU_LS_FASTPATH=1;-DSPU_FLOAT_RZ_ONLY=1")
++        else()
++            set(_port_spu_arch "")
++        endif()
++        set(PORT_SPU_ARCH "${_port_spu_arch}" CACHE STRING
++            "GNU-style ISA and extra flags for the lifted SPU sources (empty = baseline)")
++        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-ffp-contract=off;${PORT_SPU_ARCH}")
+     endif()
+ endif()
+ 
+@@ -382,8 +396,20 @@ elseif(MSVC)
+     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
+         COMPILE_OPTIONS "/w;/bigobj")
+ else()
++    # GNU spelling (clang/gcc: Linux; also macOS). PORT_LIFT_OPT as in the
++    # clang-cl branch; the x86-64 Linux default is the Windows build's
++    # (rebuild_win.py): -O2, x86-64-v3 (= /arch:AVX2: the lift's AltiVec-on-AVX2
++    # and MOVBE paths), no stack protector (= /GS-). Elsewhere empty = the
++    # build type's own -O, as before.
++    if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
++        set(_port_lift_opt "-O2;-march=x86-64-v3;-fno-stack-protector")
++    else()
++        set(_port_lift_opt "")
++    endif()
++    set(PORT_LIFT_OPT "${_port_lift_opt}" CACHE STRING
++        "GNU-style optimisation and ISA flags for the lifted TUs (empty = the build type's)")
+     set_source_files_properties(${RECOMP_SOURCES} ${LLE_SOURCES} PROPERTIES
+-        COMPILE_OPTIONS "-w;-ffp-contract=off")
++        COMPILE_OPTIONS "-w;-ffp-contract=off;${PORT_LIFT_OPT}")
+ endif()
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/main.cpp b/main.cpp
+index 5c2afc8..ba97673 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -56,6 +56,9 @@ static inline void infamous2_host_qos_self(void) {}
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifndef _WIN32
++#include <sys/mman.h>   /* the guest window (guest_vm_map_flat) */
++#endif
+ 
+ #ifdef _WIN32
+ /* timeBeginPeriod: <windows.h> arrives with WIN32_LEAN_AND_MEAN set, which
+@@ -423,6 +426,37 @@ extern "C" uint8_t* ppu_vm_reserve_plain(uint64_t size)
+ #pragma comment(linker, "/alternatename:ppu_vm_reserve=ppu_vm_reserve_plain")
+ #endif
+ 
++#ifndef _WIN32
++/* The guest window off Windows, 4 GB aligned. The HLE turns a host pointer
++ * back into a guest address by truncating it to 32 bits (GUEST_EA; toolkit
++ * runtime/memory/vm.h), which holds only while the low 32 bits of vm_base are
++ * zero. The old calloc'd arena sat on no such boundary, so every truncated
++ * pointer named another guest address, a different one each run: silent
++ * corruption, not a crash. Over-map by 4 GB and trim the head and tail (mmap
++ * can hand back part of a mapping: no retry, no race). MAP_NORESERVE and lazy
++ * backing: only the pages the title touches cost memory, like the Windows
++ * reservation's commit on first touch.
++ * guest_vm_map_flat is from ThiagoFraga761/infamous2-pc (runtime/memory/
++ * guest_vm.h in its work/patches/ps3recomp.patch), MIT License, Copyright (c)
++ * 2026 the infamous2-recomp contributors. */
++static uint8_t* guest_vm_map_flat(size_t size)
++{
++    const size_t align = (size_t)0x100000000ull;
++    size = (size + 0xFFFFu) & ~(size_t)0xFFFFu;   /* whole pages on any host (<= 64 KB) */
++    uint8_t* raw = (uint8_t*)mmap(NULL, size + align, PROT_READ | PROT_WRITE,
++                                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    if (raw == MAP_FAILED)
++        return NULL;
++    uint8_t* base = (uint8_t*)(((uintptr_t)raw + align - 1u) & ~(uintptr_t)(align - 1u));
++    uint8_t* end = raw + size + align;
++    if (base > raw)
++        munmap(raw, (size_t)(base - raw));
++    if (end > base + size)
++        munmap(base + size, (size_t)(end - (base + size)));
++    return base;
++}
++#endif
++
+ static bool alloc_guest_vm(void)
+ {
+ #ifdef _WIN32
+@@ -430,12 +464,11 @@ static bool alloc_guest_vm(void)
+     vm_base = ppu_vm_reserve(VM_SIZE);   /* = VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE) unless PS3_LARGE_PAGES */
+     ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
+ #else
+-    /* No vectored exception handlers off Windows, so the arena is committed up
+-     * front and lazily backed by the OS: only pages the title touches cost
+-     * anything. It stops below the 0xE0000000 mark, so ppu_vm_size arms the
+-     * loader's bounds check for what is left. */
+-    vm_base = (uint8_t*)calloc(1, 0xE0000000u);
+-    ppu_vm_size = 0xE0000000u;
++    /* The whole 32-bit guest space + the 64K guard, as on Windows: 4 GB aligned
++     * and backed lazily by the OS (guest_vm_map_flat above), so every guest
++     * offset is valid and no OOB guard is needed. */
++    vm_base = guest_vm_map_flat((size_t)VM_SIZE);
++    ppu_vm_size = 0;
+ #endif
+     return vm_base != nullptr;
+ }

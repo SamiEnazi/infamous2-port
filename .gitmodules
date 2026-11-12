@@ -1,3 +1,5 @@
+# Only for Setup.exe v0.4.2 and older, which asks GitHub for these two pins before it downloads the port.
+# The port builds from engine/ and base/ (this repository's own folders); nothing builds these.
 [submodule "toolkit"]
 	path = toolkit
 	url = https://github.com/SamiEnazi/ps3recomp.git

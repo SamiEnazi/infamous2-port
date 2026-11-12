@@ -1,0 +1,34 @@
+[package]
+name = "infamous2-launcher"
+version = "0.1.0"
+description = "Launcher for the inFAMOUS 2 static-recompilation port: rebuild from your own copy, settings, play"
+license = "MIT"
+edition = "2021"
+publish = false
+
+[lib]
+name = "infamous2_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# the saves manager's .zip files (both already in the tree through tauri)
+flate2 = "1"
+crc32fast = "1"
+# the launcher's Dock icon from the player's copy (src/app_icon.rs): PNG in and
+# out, already in the tree through tauri (muda)
+png = "0.18"
+tauri-plugin-updater = "2.14"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSApplication/NSWorkspace for the Dock and Finder icons (the versions and
+# most features tauri itself uses)
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder", "NSWorkspace"] }

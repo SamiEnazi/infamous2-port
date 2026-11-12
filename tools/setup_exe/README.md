@@ -6,11 +6,21 @@
 What Install does, in order. It asks nothing it can find out itself:
 
 1. **The port's files.** If Setup.exe was downloaded on its own (no `tools\setup_common.ps1` beside it), it
-   downloads the port from GitHub as ZIP files, with no git:
-   - the port at the newest commit of `main`
-   - the toolkit and the port base at the commits the port pins (GitHub's API names them)
+   downloads the port from GitHub as one ZIP file, with no git: the port at the newest commit of `main`,
+   with the engine (`engine\`) and the port base (`base\`) in it. (Before v0.5.0 these were two more
+   downloads, the `toolkit` and `community/erikomis-infamous2-recomp` submodules at the commits the port
+   pinned.)
 
-   They go into a folder next to Setup.exe (else `%LOCALAPPDATA%\inFAMOUS2-port`), about 40 MB. Then
+   **Older Setup.exe files keep working.** A Setup.exe of v0.4.2 or older asks GitHub for those two pins
+   before it downloads anything, so the public repository keeps them (`.gitmodules` and two gitlinks, made
+   by `tools\publish_export.ps1`: the toolkit at v0.4.2's commit, the port base at 8077cda). Such a Setup.exe
+   then downloads the port (with `engine\` and `base\`) plus the two pinned folders, and runs the new
+   `tools\setup_build.ps1`, which builds from `engine\` and `base\` only. It copies the new files over the old
+   ones without deleting, so `setup_build.ps1` deletes what `engine\` and `base\` hold beyond the version's own
+   list (`.port-files`, also made by the export). This Setup.exe ignores the pins, and deletes `toolkit\` and
+   `community\erikomis-infamous2-recomp\` when an older Setup.exe or a release zip made them.
+
+   It goes into a folder next to Setup.exe (else `%LOCALAPPDATA%\inFAMOUS2-port`), about 40 MB. Then
    Setup.exe copies itself in.
 2. **RPCS3 and the game.** It finds them by itself:
    - RPCS3: the saved choice, a running RPCS3, next to Setup.exe, the user's Desktop, Downloads and
@@ -41,13 +51,17 @@ What Install does, in order. It asks nothing it can find out itself:
 1. **Backs up** the saves (`game\gamedata\dev_hdd0\home\00000001\savedata`), `input.toml`,
    `config.local.json` and the game as it is (exe + `SDL2.dll`). They go to
    `%LOCALAPPDATA%\inFAMOUS2-port\save-backups\<time>\`, not `%TEMP%`, and the newest 3 are kept.
-2. **Gets the newest code.** It asks GitHub (3 API calls) and downloads only if the port commit or a pin
-   differs from `port-version.txt`.
+2. **Gets the newest code.** It asks GitHub (1 API call) and downloads only if the port commit differs
+   from `port-version.txt`.
    - The port's own files are overwritten in place and nothing is deleted. `game\`, `work\`, `play\`
      and the other player and build folders are never written, and nothing is written through a
      link (`game\disc` is a junction to the player's disc).
-   - `toolkit\` and `community\erikomis-infamous2-recomp\` are replaced whole: set aside first, and
-     never when a link is inside them.
+   - `engine\` and `base\` are replaced whole (a file deleted upstream must not stay behind: the
+     engine's CMake builds every file in its folders): set aside first, and never when a link is
+     inside them.
+   - An install from before v0.5.0: its `toolkit\` and `community\erikomis-infamous2-recomp\`
+     (the engine and the port base then) are deleted after the download when an earlier Setup.exe
+     made them (their `.zip-source` mark), never with a link inside.
    - A git clone is left to `git pull`.
 3. **Builds** with the normal flow.
 4. **Restores, built or not.** If the new game was not built, the old exe and `SDL2.dll` go back, so
@@ -63,16 +77,60 @@ failure, **Copy log** copies it for a bug report.
 Run `tools\setup_exe\build.cmd` (double-click works). It uses the C# compiler that ships with
 Windows (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`, .NET Framework 4.5+) and writes
 `Setup.exe` to the repo root, with `tools\setup.ico` as its icon. That compiler is C# 5: no `$""`, no
-`=>` members, no `?.` and no `nameof`.
+`=>` members, no `?.` and no `nameof`. The exe carries full version information (the `[assembly: ...]` lines
+at the top of `SetupWizard.cs`: keep the version in step with the release) and the manifest
+`setup.manifest` (runs as the player, never as admin; Windows 10/11; DPI aware). It is not packed or
+obfuscated.
 
-`Setup.exe` is not committed: it is attached to a GitHub Release.
+Setup runs the port's scripts with `powershell -NoProfile -ExecutionPolicy RemoteSigned -File <script>`
+(no inline `-Command` code): `tools\setup_checks.ps1` for the checks, `tools\setup_build.ps1` for the build
+and `tools\play.ps1` for Play. The policy is this process's only, so it also works on a PC left at Windows'
+default (Restricted). The files Setup downloads and unpacks itself carry no "downloaded from the internet"
+mark. A release ZIP downloaded with a browser and unpacked with Explorer does carry the mark, which
+RemoteSigned refuses: Setup then stops at the checks and says how to unblock the ZIP (Properties > Unblock),
+exit code 83 under `--prepare`.
+
+`Setup.exe` is not committed: it is attached to a GitHub Release (see the next section).
+
+GitHub Actions builds it the same way: `.github/workflows/setup-exe.yml` runs `build.cmd` on GitHub's own Windows
+machine for every change to these files and for every release, and keeps the exe as the run's artifact.
+
+## Releases and signing
+
+Release Setup.exe files are signed by [SignPath Foundation](https://signpath.org) (free for open source; the
+README's *Code signing policy*). SignPath signs only the exe the workflow built from the release's tag, and only
+after the approver has approved it. Its settings are the repository's `SIGNPATH_*` secret and variables (listed at
+the top of the workflow). Without them the workflow only builds, and releases are made as before.
+
+1. Set the version at the top of `SetupWizard.cs` (the three `[assembly: ...Version]` lines) and in
+   `setup.manifest`. Commit and push `main`.
+2. Publish the release on GitHub (tag `v<version>`) without Setup.exe. The release notes link the README's
+   *Code signing policy* (SignPath asks for that term on the download page).
+3. The workflow builds Setup.exe from the tag and sends it to SignPath. SignPath e-mails the approver: open the
+   request on app.signpath.io and approve it (the workflow waits up to an hour).
+4. The workflow checks the signature (Windows must accept it) and attaches the signed Setup.exe to the release.
+   If the approval came too late: Actions > Setup.exe > Run workflow, pick the tag.
+5. The zip, with that same signed exe:
+
+   ```
+   gh release download v<version> -R SamiEnazi/infamous2-port -p Setup.exe -D work\release\signed
+   tools\make_release_zip.ps1 -Version <version> -SetupExe work\release\signed\Setup.exe -RequireSigned
+   gh release upload v<version> -R SamiEnazi/infamous2-port work\release\inFAMOUS2-port-v<version>-Windows-x64.zip
+   ```
+
+To publish everything at once instead: push the tag, create the release as a draft, run the workflow on the tag
+(Run workflow, pick the tag), approve, attach the zip, then publish. The workflow then finds the signed
+Setup.exe on the release and does not sign it again.
+
+SignPath's `test-signing` policy (the first one SignPath sets up) signs with a certificate Windows does not
+trust: the workflow keeps that exe as the run's artifact `Setup.exe-signed` and attaches nothing.
 
 ## Test switches
 
 | Switch | What it does |
 |---|---|
 | `--test-build` | press Install right away |
-| `--rpcs3 <folder>`, `--disc <folder>` | use these instead of looking |
+| `--rpcs3 <folder>`, `--disc <folder>` (or `--game <folder>`) | use these instead of looking |
 | `--folder <folder>` | where a downloaded-alone Setup.exe puts the port |
 | `--no-shortcut` | pass `-NoShortcut` (no desktop shortcut) |
 | `--no-cleanup` | keep the build tools and files afterwards |
@@ -80,16 +138,17 @@ Windows (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`, .NET Framework
 | `--exit-when-done` | close after the build. The exit code is 0 for built, 1 for stopped and 2 for closed early. |
 | `--page done` / `--page ask` | show the Play screen / the "Where is RPCS3?" dialog (for screenshots) |
 | `--test-fail-build` | make the build fail on purpose at step 2 (no license flag), to check that the old game and the saves come back |
+| `PORT_SETUP_API`, `PORT_SETUP_CODELOAD` (environment) | a stand-in for `https://api.github.com` and `https://codeload.github.com` (e.g. `http://127.0.0.1:8765`), to test the download and the update with a local copy of a commit |
 
 ## RecompLauncher: `--prepare` and `--play`
 
 [RecompLauncher](https://recomplauncher.com) installs the port from the release's
-`inFAMOUS2-port-v<version>-Windows-x64.zip` (made by `tools\make_release_zip.ps1`: the port, the toolkit and the
-port base at the release's commits, `Setup.exe`, `port-version.txt` and `recomplauncher.json` at the top). The
+`inFAMOUS2-port-v<version>-Windows-x64.zip` (made by `tools\make_release_zip.ps1`: the port at the release's
+commit, with `engine\` and `base\`, and `Setup.exe`, `port-version.txt` and `recomplauncher.json` at the top). The
 repo's `recomplauncher.json` tells it to use Setup.exe in two ways, both without a window. Without these
 switches Setup.exe is exactly as before.
 
-- `Setup.exe --prepare --disc <game folder> [--rpcs3 <folder>]` is the launcher's setup step, after the player
+- `Setup.exe --prepare --disc <game folder> [--rpcs3 <folder>]` (`--game` works as well as `--disc`) is the launcher's setup step, after the player
   picks their game folder. It does what Install does after the download:
   - finds RPCS3 the same way
   - runs the same checks
@@ -106,6 +165,19 @@ switches Setup.exe is exactly as before.
   exit code (0 for a normal quit). If the port was updated after the game was built, the log says so.
 - `--dry-run` with either one does everything up to the build or the start, then stops. Nothing is built or
   started. Setup.exe has no console, so pipe it to see the lines: `Setup.exe --prepare --dry-run --disc <folder> | more`.
+
+The updater (F2 > Update in the game, `tools\update_check.ps1`, which builds its own Setup.exe from
+`tools\setup_exe` into `work\update\setup` with the same compiler as build.cmd):
+
+- `Setup.exe --update --folder <port folder> [--to v0.5.1] [--disc <game folder>] [--rpcs3 <folder>]` opens the
+  window and does at once what "Update to the latest version" does: saves backed up, the newest port over the
+  folder, the build, the saves reapplied; the last line says "Updated to v0.5.1", then Play. One Setup per
+  port folder (the lock is the folder's, wherever this Setup.exe is).
+- `--update --no-window [--dry-run]`: the same without a window (tests, scripts), its log in `play\update.log`,
+  `--prepare`'s progress lines and exit codes; `--dry-run` downloads and checks, then stops before the build.
+  The game folder is `--disc`, else the `game\disc` link.
+- An update keeps the time of every port, engine and port-base file that did not change, and gives a changed
+  one the current time (a ZIP's times are the commit's), so the build files Setup keeps rebuild only what changed.
 
 Both put themselves in a job object that Windows closes with them. When the launcher stops Setup.exe, the
 build or the game stops too. Exit codes (`recomplauncher.json`'s `exit_codes` has the player's message for each):
@@ -125,17 +197,20 @@ build or the game stops too. Exit codes (`recomplauncher.json`'s `exit_codes` ha
 | 79 | the checks or the build failed (`play\setup.log`) |
 | 80 | `--play`: the game is not built yet |
 | 82 | `--play`: play.ps1 could not run |
+| 83 | Windows marked the port's scripts as downloaded from the internet (a ZIP unpacked without Unblock) |
 
 ## Known limits
 
-- The exe is not signed, so Windows SmartScreen says "Windows protected your PC" on the first start.
-  Click **More info**, then **Run anyway**.
+- Until the releases are signed (see *Releases and signing*), Windows SmartScreen says "Windows protected your
+  PC" on the first start. Click **More info**, then **Run anyway**. A few machine-learning virus scanners on
+  VirusTotal flagged v0.4.1's unsigned exe (false positives).
 - The port's folder must be on a local NTFS (or ReFS) drive, because `game\disc` is a junction to the
   player's game folder. FAT32/exFAT drives (USB sticks, many external disks) and network drives can't hold
   one; Windows then fails with only "Incorrect function" (GitHub issue #2). So a downloaded-alone
   Setup.exe on such a drive installs into `%LOCALAPPDATA%\inFAMOUS2-port` instead and says so in the log.
   The checks (`Get-SetupChecks`) stop with a plain reason when the folder was chosen by hand (`--folder`,
   or Setup.cmd in such a folder). A game folder on a network drive is refused the same way.
-- The first build downloads about 1.3 GB of tools, and an update downloads them again.
+- The first build downloads about 1.3 GB of tools. They and the build files stay (about 2.6 GB) so an update
+  builds only what changed; `tools\setup_cleanup.ps1` deletes them. `--prepare` (RecompLauncher) still deletes them.
 - GitHub's API answers 60 questions an hour per network without a sign-in. Setup asks 3 per download.
 - Only one Setup runs per folder at a time.

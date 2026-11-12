@@ -21,6 +21,12 @@ No emulator while you play.
 
 </div>
 
+> ▶️ **How to play:** you need your own PS3 copy of inFAMOUS 2 (the Europe or US disc with the 1.04 update,
+> or the digital version 01.03) set up in [RPCS3](https://rpcs3.net) with the PS3 firmware. Download
+> **Setup.exe** from the [latest release](../../releases/latest), run it and press **Install**: it builds the
+> game from your copy once (20–60 minutes), then **Play**. Details: [What you need](#-what-you-need) ·
+> [Install](#-install).
+
 ## 🚀 Performance: native vs RPCS3
 
 <picture>
@@ -134,7 +140,7 @@ The community's inFAMOUS 2 mods work as they are: the ones made for tiffsomniac'
   and the page says which option to untick (for example *"15 textures were made for another version of
   cole_gold_amp.xpps: untick Solid Gold Amp"*)
 
-How it works and the mod format: [`docs/MODS.md`](https://github.com/SamiEnazi/ps3recomp/blob/infamous2/docs/MODS.md).
+How it works and the mod format: [`engine/docs/MODS.md`](engine/docs/MODS.md).
 
 ### 💾 Save manager
 
@@ -145,6 +151,33 @@ The PS3's own "choose a save" screen, which the port didn't have before:
 - real Yes/No answers to the game's questions, like "save before loading?"
 
 ![The Load Game screen](docs/feat-saves.jpg)
+
+### 🏆 Trophies, in Playnite and RecompLauncher
+
+The game's 52 trophies unlock as on a PS3, the platinum with the last of the others, with a notice in your
+language. The port keeps them in `game\gamedata\trophies\NPWR01730.json` and also writes them the way RPCS3 does,
+in `game\gamedata\dev_hdd0\home\00000001\trophy\NPWR01730_00\` (the names, the icons and `TROPUSR.DAT` with the
+unlock times), so trophy trackers made for RPCS3 can read them.
+
+**Playnite** ([Playnite Achievements](https://github.com/justin-delano/PlayniteAchievements) or
+[SuccessStory](https://github.com/Lacro59/playnite-successstory-plugin)). Both look for an emulator with RPCS3 in
+its name, so the port gets one:
+1. Library → Configure Emulators → Add: name it `RPCS3 inFAMOUS 2 port`, installation folder
+   `<port folder>\game\gamedata`, and one custom profile whose executable is `<port folder>\Play inFAMOUS 2.cmd`.
+2. Add the game by hand: installation folder `<port folder>\game\disc\PS3_GAME` (the plugins find the game's
+   `TROPHY.TRP` there), and a play action of the Emulator type with that emulator and profile.
+3. Playnite Achievements: turn on its RPCS3 source. SuccessStory: Settings → RPCS3 → turn it on and add
+   `<port folder>\game\gamedata\dev_hdd0\home\00000001` as a home user folder.
+4. Start the game once (the folder is made then), then refresh the game's achievements.
+
+Already set up for RPCS3? Add `PS3_TROPHY_RPCS3_DIR=<your RPCS3 folder>` to `settings.ini` and the port also
+copies its unlocks into RPCS3's own trophy folder for the game. It never locks anything or moves a date later
+there, and it keeps a copy of RPCS3's file once (`TROPUSR.DAT.port-backup`). With Playnite Achievements, the
+game's Manage Achievements → Overrides → Platform Override: RPCS3, `NPWR01730_00` then finds them.
+
+**RecompLauncher:** started from RecompLauncher, the port reports each trophy to
+[Recomp Achievements](https://github.com/elripalda/RecompAchievements). A cheat that changes play (F2 → Cheats)
+makes the session's later unlocks Casual. Picking or saving a spot and Black lightning don't.
 
 ### 🎨 A menu that looks like the game
 
@@ -210,8 +243,9 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
   - a CPU with AVX2 (Intel 4th gen / AMD Ryzen or newer)
   - a Vulkan graphics card
   - 16 GB RAM
-  - about 15 GB free disk space while it builds (about 4 GB after)
-- 🌐 **Internet.** Setup downloads its build tools (about 1.3 GB) and deletes them after the build.
+  - about 15 GB free disk space while it builds (about 7 GB after: the game, and the build files Setup keeps so
+    updates take minutes)
+- 🌐 **Internet.** Setup downloads its build tools once (about 1.3 GB) and keeps them for updates.
   **Nothing is installed on Windows**, nothing needs admin rights, and you need no Git, Python or Visual Studio.
 
 ## 📦 Install
@@ -225,13 +259,15 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
    - 🛠️ downloads the build tools into that folder: Python, CMake, Ninja, LLVM and Microsoft's C++ headers and
      libraries (portable copies, about 1.3 GB)
    - 🏗️ builds the game from your copy: 20–60 minutes, one time only (about 15 minutes on the test PC)
-   - 🧹 deletes the build tools again and leaves a desktop shortcut. Its icon is taken from your own copy.
+   - 🧹 cleans up, keeps the build tools and build files for quick updates, and leaves a desktop shortcut. Its
+     icon is taken from your own copy.
 3. 🎮 Press **Play**.
 
 ![Setup: one Install button, one progress bar, then Play](docs/setup.png)
 
-> ⚠️ Setup.exe is not signed, so Windows may say *"Windows protected your PC"* the first time: click
-> **More info**, then **Run anyway**.
+> ⚠️ Windows may say *"Windows protected your PC"* the first time, more so while Setup.exe is not signed
+> (see [Code signing policy](#-code-signing-policy)): click **More info**, then **Run anyway**. A signed Setup.exe
+> names **SignPath Foundation** as its publisher (right-click > Properties > Digital Signatures).
 
 > 📜 Pressing Install accepts Microsoft's [Visual Studio Build Tools license](https://go.microsoft.com/fwlink/?LinkId=2179911)
 > for the C++ headers and libraries Setup downloads from Microsoft.
@@ -240,8 +276,10 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 <summary>🧰 Without Setup.exe (git)</summary>
 
 ```
-git clone --recursive https://github.com/SamiEnazi/infamous2-port
+git clone https://github.com/SamiEnazi/infamous2-port
 ```
+
+(One repository since v0.5.0: the engine and the port base are its `engine/` and `base/` folders, no submodules.)
 
 Then run **`Setup.cmd`** (the PowerShell window), or straight from PowerShell:
 
@@ -249,8 +287,39 @@ Then run **`Setup.cmd`** (the PowerShell window), or straight from PowerShell:
 tools\setup_build.ps1 -Disc <your game folder> -Rpcs3 <your RPCS3 folder> -AcceptMsvcLicense -Cleanup
 ```
 
-Updating later is the same: Setup downloads the build tools again and deletes them afterwards.
+Updating later is the same (`git pull` first), and quick: `-Cleanup` keeps the build tools
+and build files, so only what changed is built again. `-NoBuildCache` deletes them too.
 </details>
+
+<details>
+<summary>🐧 Linux (experimental)</summary>
+
+The port also builds and runs natively on Linux (tested on Ubuntu 22.04 with an AMD GPU). It is
+experimental: less tested than Windows, and there is no Setup.exe. From a `git clone`:
+
+```
+tools/setup.sh --disc <your game folder> --rpcs3 <RPCS3's data folder>
+tools/play.sh
+```
+
+`tools/setup.sh` lists what it needs from your distribution (a C/C++ toolchain, python3 with venv, the
+Vulkan loader, SDL2) and puts everything else in the port's own folder.
+</details>
+
+## 🔄 Updates
+
+- When the game starts it asks GitHub whether a new version is out: in the background, at most every 6 hours,
+  and offline it just starts. If there is one, a notice says *Update available: v0.5.1 - F2 > Update*.
+- **F2 → Update** shows your version, the new one and what's new. Press **Update when I quit** or **Quit and update
+  now**: Setup opens, gets the new version and builds it from your copy, then press **Play**. Your saves,
+  settings, mods and controls are kept (the saves are also copied to `%LOCALAPPDATA%\inFAMOUS2-port\save-backups`
+  first).
+- ⚡ An update that changes a few files takes minutes, not the 20-60 of an install: Setup keeps its build tools and
+  build files (about 2.6 GB), downloads no tools and compiles only what changed. `tools\setup_cleanup.ps1` frees
+  that space (the next update then takes as long as an install).
+- **Check for updates automatically** (F2 → Update) turns the check off; **Check now** asks at once. Running
+  `Setup.exe` and choosing *Update to the latest version* still works too.
+- A copy installed by RecompLauncher is updated by RecompLauncher.
 
 ## 🎮 Playing
 
@@ -261,7 +330,7 @@ Updating later is the same: Setup downloads the build tools again and deletes th
   | Key | Action |
   |---|---|
   | **F1** | fps counter |
-  | **F2** (or hold L3+R3) | PC settings: Display, Graphics (resolution, anti-aliasing, upscaling, sharpening), Audio (volume, language), Controls (mouse, buttons and keys), HUD, Lighting, Effects, Mods, Cheats |
+  | **F2** (or hold L3+R3) | PC settings: Display, Graphics (resolution, anti-aliasing, upscaling, sharpening), Audio (volume, language), Controls (mouse, buttons and keys), HUD, Lighting, Effects, Mods, Update, Cheats |
   | **F3** | your picture vs the original PS3 look |
   | **F7** | go to your saved spot (F2 → Cheats → Saved spots) |
   | **F9** | mark a moment in the session log (a stutter, a glitch, an enemy missing from the minimap) |
@@ -280,22 +349,44 @@ Updating later is the same: Setup downloads the build tools again and deletes th
   16:10. You see more on the sides (nothing is stretched); the HUD stays in the middle 16:9 and movies get
   black bars. It applies at the next start. 16:9 is the default.
 - **Your saves:** `game\gamedata\dev_hdd0\home\00000001\savedata`, backed up to `saves-backup\` before every session.
+- **Your settings:** F2's choices go to `%APPDATA%\inFAMOUS2-port\settings.ini` (with `mods.ini` and the saved spots
+  in `spots.ini`); your controls are in `input.toml` in the game's folder. With an empty `portable.txt` in the game's
+  folder, the settings stay in the game's folder too.
 - **Session logs:** each session writes `play\<date-time>\`: frame times every second, your F9 marks, and every
   frame over 80 ms with what the game was doing. Please attach the folder to bug reports.
+
+## 🗑️ Uninstall
+
+Setup installs nothing into Windows: no admin rights, no registry entries, no services. To remove the port:
+
+1. Copy your saves somewhere first if you want to keep them (`game\gamedata\dev_hdd0\home\00000001\savedata`).
+2. Delete the desktop shortcut **inFAMOUS 2 (PC port)**.
+3. Delete the port's folder (the one with `Play inFAMOUS 2.cmd`). `game\disc` inside it is only a link to your
+   game folder: Windows deletes the link, not your game.
+4. Delete `%APPDATA%\inFAMOUS2-port` (the F2 settings) and `%LOCALAPPDATA%\inFAMOUS2-port` (Setup's save backups,
+   and the port itself when Setup put it there).
+
+RPCS3 and your game are left as they were.
 
 ## 🔬 How it works
 
 - [ps3recomp](https://github.com/sp00nznet/ps3recomp) translates the game's PowerPC (PPU) and SPU code, and
   three PS3 firmware modules taken from **your** RPCS3, into C/C++. clang-cl then compiles it.
-- The toolkit's runtime does the rest:
+- The engine's runtime does the rest:
   - stands in for the PS3 system: files, threads, audio, input, saves and the system dialogs
   - draws the PS3 graphics chip's commands with Vulkan, at any internal resolution
   - runs some SPU jobs on the GPU instead (the deferred lighting and SSAO)
-- This repo holds the Windows build, the setup, the cheats and the tools used to test it.
-  - The toolkit fork lives in [`toolkit/`](https://github.com/SamiEnazi/ps3recomp/tree/infamous2).
-  - The game-specific port base lives in [`community/erikomis-infamous2-recomp`](https://github.com/erikomis/infamous2-recomp).
-  - Our changes to the port base are in `patches/port/`.
-  - The game side of the cheats and of the mouse camera is in `cheats/`.
+
+Everything is in this one repository (since v0.5.0; before, the engine and the port base were submodules):
+
+| Folder | What it is |
+|---|---|
+| [`engine/`](engine/) | The engine: the recompiler (`engine/tools/`) and the runtime (`engine/runtime/`, `engine/libs/`). It started as [sp00nznet's ps3recomp](https://github.com/sp00nznet/ps3recomp) and is maintained here now, with the Windows, Vulkan and performance work of this port. MIT, [`engine/LICENSE`](engine/LICENSE). |
+| [`base/`](base/) | The port base: [Erik Martins' infamous2-recomp](https://github.com/erikomis/infamous2-recomp) as he published it (commit 8077cda); the build uses its `infamous2-lle/` folder. MIT, [`base/LICENSE`](base/LICENSE). |
+| `patches/port/` | Our changes to the port base's files, applied to its copy in `work\port\` at build time (`base/` itself stays as Erik published it). |
+| `port_src/` | Files we add to the port. |
+| `cheats/` | The game side of the cheats and of the mouse camera. |
+| `tools/` | The build (`tools/rebuild_win.py`), Setup (`tools/setup_exe/`, `tools/setup_build.ps1`), `tools/play.ps1`, and the tools used to test it. |
 
 ## 🤖 Made with Claude Code
 
@@ -336,10 +427,14 @@ This port stands on other people's work:
 
 - **[ps3recomp](https://github.com/sp00nznet/ps3recomp)** by Ned Heller / sp00nznet and its
   contributors, and **[Noah Peterson's fork](https://github.com/NoahBPeterson/ps3recomp)**: the
-  recompiler and runtime this port is built on (MIT). Our fork with the Windows/Vulkan work is
-  [SamiEnazi/ps3recomp](https://github.com/SamiEnazi/ps3recomp/tree/infamous2).
+  recompiler and runtime this port is built on (MIT, Copyright (c) 2026 Ned Heller / sp00nznet). This
+  project started from it and our fork of it ([SamiEnazi/ps3recomp](https://github.com/SamiEnazi/ps3recomp/tree/infamous2),
+  up to v0.4.2); since v0.5.0 that engine is the `engine/` folder of this repository and is maintained here,
+  with its full license in [`engine/LICENSE`](engine/LICENSE) and its contributors in `engine/CONTRIBUTORS.md`.
 - **[erikomis/infamous2-recomp](https://github.com/erikomis/infamous2-recomp)** by Erik Martins: the
-  inFAMOUS 2 port this one starts from, and the camera patch behind widescreen (MIT).
+  inFAMOUS 2 port this one started from, and the camera patch behind widescreen (MIT, Copyright (c) 2026 Erik
+  Martins). It is the `base/` folder of this repository (his commit 8077cda, unchanged), with its license in
+  [`base/LICENSE`](base/LICENSE) and its credits in [`base/CREDITS.md`](base/CREDITS.md).
 - **[ThiagoFraga761/infamous2-pc](https://github.com/ThiagoFraga761/infamous2-pc)**: the Vulkan SSAO and
   lighting passes and Windows groundwork we adopted, the texture-cache and buffer-growth ideas behind the
   freeze fix, and the idea of giving the game's Edge geometry code the real picture size (MIT).
@@ -369,8 +464,37 @@ This port stands on other people's work:
   - NVIDIA FXAA 3.11
   - [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB) (zlib)
   - at3_standalone (LGPL-2.1)
+  - [Recomp Achievements](https://github.com/elripalda/RecompAchievements) (its own license: free for
+    games, not MIT; it bundles rcheevos and cJSON, both MIT)
 
-  Their license files are in `toolkit/third_party/`.
+  Their license files are in `engine/third_party/`.
+
+## 🔏 Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- **What is signed:** `Setup.exe` only. GitHub Actions builds it from this repository
+  ([`.github/workflows/setup-exe.yml`](.github/workflows/setup-exe.yml) runs
+  [`tools/setup_exe/build.cmd`](tools/setup_exe/build.cmd)), and SignPath signs exactly that build after the
+  approver has approved it. The game itself is built on your PC from your own copy and is not signed.
+- **Committers and reviewers:** [SamiEnazi](https://github.com/SamiEnazi), the owner of this repository. Changes
+  from anyone else (pull requests) are reviewed by him before they are merged.
+- **Approvers:** [SamiEnazi](https://github.com/SamiEnazi). Every signing request is approved by hand.
+- **Privacy policy:** This program will not transfer any information to other networked systems unless
+  specifically requested by the user or the person installing or operating it.
+  - Setup.exe goes online only when you press **Install** or **Update** (or a launcher runs its setup step),
+    and only to download: the port's files from GitHub, the build tools from their GitHub releases (Python,
+    CMake, Ninja, LLVM, SDL), and Microsoft's C++ headers, libraries and Windows SDK from Microsoft. Those sites
+    see an ordinary download, under their own privacy statements:
+    [GitHub](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement),
+    [Microsoft](https://www.microsoft.com/privacy/privacystatement).
+  - The update check (see [Updates](#-updates)): when the game starts, `tools\play.ps1` asks GitHub's public API
+    which release is the newest (at most every 6 hours, in the background). That question carries no data about
+    you, your PC or your game; F2 → Update → *Check for updates automatically* turns it off. A copy installed by
+    RecompLauncher or from git never asks.
+  - Nothing about you, your PC or your game is sent anywhere: no accounts, no telemetry. The game itself makes
+    no network connections (its PSN stand-in stays offline unless you set `PS3_NET_ONLINE` and `PSNR_SERVER`
+    yourself). Your saves, settings and session logs stay on your PC; a bug report holds only what you attach.
 
 ## ⚖️ Legal
 
@@ -382,5 +506,8 @@ This repository contains no game assets, firmware or keys, and no game code beyo
 instruction words the cheats switch, taken from public community codes. Everything else game-specific is read
 from your own copy on your own PC. Do not share builds of the game, or files taken from it.
 
-The code in this repository is MIT-licensed (see `LICENSE`). The toolkit and the port base keep
-their own MIT licenses.
+The code in this repository is MIT-licensed (see `LICENSE`). The engine (`engine/`, from sp00nznet's ps3recomp)
+and the port base (`base/`, Erik Martins' infamous2-recomp) keep their own MIT licenses and copyright notices
+(`engine/LICENSE`, `base/LICENSE`). The libraries in `engine/third_party/` keep theirs;
+`engine/third_party/rl_achievements` is under the Recomp Achievements License 1.0, not MIT. The third-party
+libraries the build downloads keep their own licenses.

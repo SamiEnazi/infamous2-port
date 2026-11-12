@@ -1,0 +1,24 @@
+# Linux keyboard + mouse check (tools/linux_run.py --env PS3_KBM=1): from the first save, at the docks once Wolfe's
+# call plays (~60 s after the first world frame, Cole free to move), keys and mouse through X (tools/xtest.py)
+# into the game window, a game-side shot after each. W walks forward, the mouse turns the camera (after a click
+# captures it), Space jumps. Compare k0..k4: Cole moves, the view turns.
+#! seconds 900
+#! savefrom work\saves\first-save\gamedata
+#! worldmark 20
+anchorfile 840
+at 62
+xfocus inFAMOUS
+shot k0
+xkey w 2500
+shot k1
+xclick 1 60
+xmove 600 0 30
+shot k2
+xkey space 120
+sleep 0.4
+shot k3
+xkey s 1500
+xmove -300 120 20
+shot k4
+xshot k4
+close

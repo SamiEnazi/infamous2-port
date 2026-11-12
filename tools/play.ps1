@@ -8,7 +8,8 @@
 #                      sharpening, texture filtering, upscaling, volume, language, controls,
 #                      HUD); Esc / Circle closes it, L1/R1 switch pages
 #   Alt+Enter or F11   fullscreen on/off
-# The menu saves to %APPDATA%\inFAMOUS2-port\settings.ini and the next start uses it.
+# The menu saves to %APPDATA%\inFAMOUS2-port\settings.ini and the next start uses it (to settings.ini in the
+# project folder when a portable.txt is there: then mods.ini and spots.ini stay there too).
 # -Fps / -Volume / -Fullscreen given here win over the file for this session
 # (-Fps: frame cap, 72 = smooth on a 144 Hz screen, 0 = uncapped).
 #
@@ -17,7 +18,7 @@
 # one, and the voice and the text apart (only what your disc has); saved as PS3_LANG,
 # PS3_VOICE_LANG and PS3_TEXT_LANG in settings.ini, used from the next start.
 #
-# Controls (the toolkit's docs\INPUT.md has everything):
+# Controls (engine\docs\INPUT.md has everything):
 #   Controller: any pad SDL knows (the community controller database is built in) -- the
 #   8BitDo in Switch mode, DualShock 4/5, Xbox -- paired before the game starts or switched on
 #   later. Buttons by POSITION as on a PlayStation pad (bottom = Cross, right = Circle, ...).
@@ -27,7 +28,7 @@
 #   Q = Triangle, Enter = START, Tab/M = map.
 #   Esc opens the PC menu (and frees the mouse); Alt+F4 or the window's close button quits.
 #   Remapping, dead zones, sensitivity: input.toml in the project folder (made on first run
-#   from the toolkit's docs\input.example.toml).
+#   from engine\docs\input.example.toml).
 #
 # Every session gets its own folder, play\<date-time>\, with a light record of how it ran:
 #   playlog.tsv   one line per second (fps, frame times, slow frames, draws per frame), one per
@@ -112,7 +113,7 @@ if ($pyCmd) {
 # controls file: input.toml in the project folder (survives rebuilds), first made from the example
 $inputToml = Join-Path $root "input.toml"
 if (-not (Test-Path $inputToml)) {
-    $ex = Join-Path $root "toolkit\docs\input.example.toml"
+    $ex = Join-Path $root "engine\docs\input.example.toml"
     if (Test-Path $ex) { Copy-Item $ex $inputToml; "Made input.toml (your controls) from the example." }
 }
 
@@ -140,7 +141,7 @@ $vars = @{
     PS3_DEV_FLASH               = (Get-DevFlash)
     PS3_GAMEDATA_ROOT           = "$game\gamedata"
     PS3_TITLE                   = "inFAMOUS 2"
-    PS3_GAME_MODS_DIR           = $modsDir   # F2 > Mods (the Mod Manager's mod folders; toolkit docs\MODS.md)
+    PS3_GAME_MODS_DIR           = $modsDir   # F2 > Mods (the Mod Manager's mod folders; engine\docs\MODS.md)
     # F2 > Mods > "Restart to apply": the game ends with exit code 0x52455354 and this script starts
     # it again (below); without this variable the game starts itself again.
     PS3_LAUNCHER_RESTART        = "1"
@@ -171,9 +172,22 @@ $vars = @{
     # controller input even when the game window does not have focus: SDL otherwise drops it,
     # and a game started from a console window often starts without focus.
     SDL_GAMECONTROLLER_USE_BUTTON_LABELS = "0"
-    SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS = "1"
     PS3_INPUT_MAP               = $(if (Test-Path $inputToml) { $inputToml } else { "" })
 }
+# portable.txt in the project folder (the sign RecompLauncher and other launchers know): the menu's settings.ini,
+# the mods.ini beside it and the saved spots stay in this folder, as the saves, input.toml and the session logs do.
+$settingsIni = Join-Path $env:APPDATA "inFAMOUS2-port\settings.ini"
+if (Test-Path -LiteralPath (Join-Path $root "portable.txt")) {
+    $settingsIni = Join-Path $root "settings.ini"
+    $vars["PS3_OVERLAY_INI"] = $settingsIni
+    $vars["PS3_CHEATS_SPOTS"] = Join-Path $root "spots.ini"
+}
+# Controller input in the background: on, unless settings.ini has its own SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS
+# line (RecompLauncher's "Controller in the background" setting writes one; the game exports the file's lines
+# before SDL starts). A variable set here would win over that line.
+$bgOwn = $false
+try { $bgOwn = [bool](Select-String -LiteralPath $settingsIni -Pattern '^\s*SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS\s*=' -Quiet -ErrorAction Stop) } catch {}
+if (-not $bgOwn) { $vars["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1" }
 if ($Fullscreen) { $vars["PS3RECOMP_VK_FULLSCREEN"] = "1" }
 if ($PSBoundParameters.ContainsKey('Fps')) { $vars["PS3RECOMP_FPS_CAP"] = [string]$Fps }
 if ($PSBoundParameters.ContainsKey('Volume')) { $vars["PS3_AUDIO_VOLUME"] = [string]$Volume }
@@ -181,6 +195,37 @@ if ($NoHud) { $vars["PS3_OVERLAY_HUD"] = "0" }
 if ($NoKbm) { $vars["PS3_KBM"] = "0" }
 if ($Trace) { $vars["PS3_PAD_TRACE"] = "1" }
 if (-not $NoLog) { $vars["PS3RECOMP_PLAYLOG"] = "$out\playlog.tsv" }
+# --- updates (tools\update_check.ps1) -----------------------------------------------------
+# A copy Setup.exe installed (port-version.txt) asks GitHub for a newer version in the background while
+# the game starts (at most every 6 hours; the game never waits, offline it just starts). The game shows
+# the answer (a notice, F2 > Update), and when the player picks "Update when I quit" or "Quit and update
+# now" it ends with exit code 0x55504454 ("UPDT"): Setup.exe --update then installs the new version
+# (below, after the game ended). Not for RecompLauncher (it updates from the releases itself, and
+# Setup.exe --play says so), a git clone, a folder without port-version.txt, or a -RecordRoute test.
+# PS3_UPDATE_CHECK=0 in the settings file (F2 > Update's checkbox): only "Check now" asks GitHub.
+$updDir = Join-Path $root "work\update"
+$updBy = if ($RecordRoute) { "test" }
+         elseif ($env:PS3_PORT_LAUNCHER -or $env:RECOMPLAUNCHER_VERSION) { "recomplauncher" }
+         elseif (Test-Path (Join-Path $root ".git")) { "git" }
+         elseif (-not (Test-Path (Join-Path $root "port-version.txt"))) { "none" }
+         else { "" }
+$updAuto = $true
+if (-not $updBy) {
+    New-Item -ItemType Directory -Force $updDir | Out-Null
+    # the last session's answer may be about the version this copy had before an update: the game waits for a new one
+    foreach ($f in "status.txt", "check-now") { Remove-Item -LiteralPath (Join-Path $updDir $f) -ErrorAction SilentlyContinue }
+    $vars["PS3_UPDATE_DIR"] = $updDir
+    $vars["PS3_LAUNCHER_UPDATE"] = "1"
+    # the settings file the game reads (PS3_OVERLAY_INI: set above, e.g. a portable folder, or by the caller)
+    $ini = if ($vars["PS3_OVERLAY_INI"]) { $vars["PS3_OVERLAY_INI"] } elseif ($null -ne $env:PS3_OVERLAY_INI) { $env:PS3_OVERLAY_INI }
+           else { Join-Path $env:APPDATA "inFAMOUS2-port\settings.ini" }
+    $auto = if ($env:PS3_UPDATE_CHECK) { $env:PS3_UPDATE_CHECK }
+            elseif ($ini -and (Test-Path -LiteralPath $ini)) {
+                Select-String -LiteralPath $ini -Pattern '^\s*PS3_UPDATE_CHECK\s*=\s*(\S*)' | Select-Object -Last 1 |
+                    ForEach-Object { $_.Matches[0].Groups[1].Value }
+            }
+    $updAuto = -not ($auto -eq "0")
+} else { $vars["PS3_UPDATE_BY"] = $updBy }
 
 # The machine-wide game lock (tools\with_game_lock.ps1): agents' test runs wait while Sami
 # plays, and a test run already going finishes first (they last up to ~7 min).
@@ -263,6 +308,28 @@ if (-not $NoLog) {
 # "=== restart" line; each earlier run's playlog is kept as playlog.<n>.tsv). The game comes back
 # at its title screen: Continue there goes on from the last save.
 $restartCode = 0x52455354
+# The update check, in this process but on its own runspace: the game starts at once. It writes
+# work\update\status.txt, then answers the game's "Check now" (work\update\check-now) while it runs.
+$updWatch = $null
+if ($vars["PS3_UPDATE_DIR"]) {
+    try {
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript({
+            param($Script, $Root, $Dir, $Auto)
+            $ErrorActionPreference = "Continue"
+            try { if ($Auto) { & $Script -Root $Root | Out-Null } else { & $Script -Root $Root -CacheOnly | Out-Null } } catch {}
+            $req = Join-Path $Dir "check-now"
+            while ($true) {
+                Start-Sleep -Seconds 2
+                if (Test-Path -LiteralPath $req) {
+                    Remove-Item -LiteralPath $req -ErrorAction SilentlyContinue
+                    try { & $Script -Root $Root -Force | Out-Null } catch {}
+                }
+            }
+        }).AddArgument((Join-Path $PSScriptRoot "update_check.ps1")).AddArgument($root).AddArgument($updDir).AddArgument($updAuto)
+        $updWatch = @{ PS = $ps; Async = $ps.BeginInvoke() }
+    } catch { "The update check did not start ($_); the game starts the same." }
+}
 $run = 0
 do {
     $run++
@@ -308,11 +375,18 @@ do {
     }
     try { $t1.Wait(5000) | Out-Null; $t2.Wait(5000) | Out-Null } catch {}
 } while ($p.ExitCode -eq $restartCode -and $run -lt 20 -and -not $RecordRoute)
+if ($updWatch) { try { [void]$updWatch.PS.BeginStop($null, $null) } catch {} }
 if ($tw) { $tw.Close() }
 $so.Close(); $se.Close()
 $lockFs.Close()   # agents may run the game again
 Remove-Item $myTicket -ErrorAction SilentlyContinue
 "Exited (code 0x{0:X}) after {1:F0} min. Logs: $out" -f $p.ExitCode, ((Get-Date) - $t0).TotalMinutes
+# F2 > Update ("Update when I quit" / "Quit and update now"): the game ended with 0x55504454 ("UPDT").
+# Setup.exe --update installs the new version in its own window (the saves, settings, mods and
+# controls are kept) and offers Play when it is done.
+if ($p.ExitCode -eq 0x55504454 -and $vars["PS3_UPDATE_DIR"]) {
+    try { & (Join-Path $PSScriptRoot "update_check.ps1") -Root $root -StartUpdate } catch { "Could not start the update: $_ (run Setup.exe in $root)" }
+}
 if (-not $NoLog -and (Test-Path "$out\playlog.tsv")) {
     # the cap the session ended at: the menu can change it while playing
     $cap = 60
