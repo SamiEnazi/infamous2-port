@@ -2,17 +2,19 @@
 
 ![inFAMOUS 2 native PC port: native 1080p up to 4K, 2x the fps of RPCS3, any controller, cheats menu, enhanced lighting, HD fire and smoke, save manager](docs/social-preview.png)
 
-# ⚡ inFAMOUS 2: native Windows port
+# ⚡ inFAMOUS 2: native PC port
 
-**Your own PS3 copy of inFAMOUS 2, recompiled into a real Windows program.**<br>
+**Your own PS3 copy of inFAMOUS 2, recompiled into a real PC program for Windows and Linux.**<br>
 No emulator while you play.
 
+[![Latest release](https://img.shields.io/github/v/release/SamiEnazi/infamous2-port?label=latest&color=f2b200)](../../releases/latest)
 [![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)](#-what-you-need)
+[![Linux: experimental](https://img.shields.io/badge/Linux-experimental-FCC624?logo=linux&logoColor=black)](#-linux-experimental)
 [![Renderer: Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C?logo=vulkan&logoColor=white)](#-how-it-works)
 [![Native 1080p, up to 4K](https://img.shields.io/badge/native-1080p%20%E2%80%A2%20up%20to%204K-6250d6)](#%EF%B8%8F-native-1080p-and-up)
 [![2.3x the frame rate of RPCS3](https://img.shields.io/badge/vs%20RPCS3-2.3%C3%97%20the%20fps-2a78d6)](#-performance-native-vs-rpcs3)
 [![Any controller](https://img.shields.io/badge/controllers-plug%20%26%20play-1baf7a?logo=steamdeck&logoColor=white)](#-full-controller-support)
-[![Status: early public test](https://img.shields.io/badge/status-early%20public%20test-eb6834)](#-status)
+[![Status: public test](https://img.shields.io/badge/status-public%20test-eb6834)](#-status)
 [![License: MIT](https://img.shields.io/badge/license-MIT-1baf7a)](LICENSE)
 [![Made with Claude Code](https://img.shields.io/badge/made%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](#-made-with-claude-code)
 [![Visitors](https://komarev.com/ghpvc/?username=SamiEnazi-infamous2-port&label=visitors&color=3fa9ff&style=flat)](https://github.com/SamiEnazi/infamous2-port)
@@ -25,7 +27,28 @@ No emulator while you play.
 > or the digital version 01.03) set up in [RPCS3](https://rpcs3.net) with the PS3 firmware. Download
 > **Setup.exe** from the [latest release](../../releases/latest), run it and press **Install**: it builds the
 > game from your copy once (20–60 minutes), then **Play**. Details: [What you need](#-what-you-need) ·
-> [Install](#-install).
+> [Install](#-install). On **Linux**: [Linux (experimental)](#-linux-experimental).
+
+## 🆕 New in v0.5.0
+
+- 🔄 **Updates from inside the game:** a notice says when a new version is out, and **F2 → Update** installs it.
+  Later updates rebuild only what changed, so they take minutes. [More](#-updates)
+- 🐧 **Linux (experimental):** builds and runs natively, with `tools/setup.sh` and `tools/play.sh`. [More](#-linux-experimental)
+- 🏆 **Trophies in Playnite and RecompLauncher:** the port writes its trophies the way RPCS3 does, and reports
+  them to Recomp Achievements. [More](#-trophies-in-playnite-and-recomplauncher)
+- ✨ **Glow at high resolutions fixed:** no more blocky or doubled glow around lightning and lamps above 720p
+  ([#12](../../issues/12)).
+- 🎥 **No more stutter at cutscene cuts and loading:** the graphics card's drawing programs are made in the
+  background and prepared ahead at the title screen.
+- 🗺️ **Minimap icons and world objects:** the map's icons show again, and objects no longer pop in and out
+  as the camera turns ([#7](../../issues/7)).
+- 🎮 **The right button pictures:** the game shows Xbox or keyboard prompts when you play with those
+  ([#10](../../issues/10)).
+- 💾 **The "save game error" of the digital (PSN) version is fixed.**
+- 📦 **One repository:** the engine and the port base are folders of this repository now, so Setup downloads one
+  thing instead of three.
+
+Every version and its changes: [Releases](../../releases).
 
 ## 🚀 Performance: native vs RPCS3
 
@@ -57,8 +80,9 @@ gradients and full-resolution effects.
 ### 🖥️ Native 1080p and up
 
 The game draws natively at **1080p** instead of stretching the PS3's 720p, with sharper edges, a crisp HUD and finer
-detail everywhere. F2 → Graphics → *Internal resolution*: 720p / **1080p** / 1440p / 4K. 1440p and 4K use the same
-code but haven't been tested yet.
+detail everywhere. F2 → Graphics → *Internal resolution*: 720p / **1080p** / 1440p / 4K. Players play at 1440p too, and native
+4K runs at about 66 fps on the test PC's RTX 2070 Super. The game's glow and background blur keep the PS3's look
+at every resolution (F2 → Effects → *Glow and blur*).
 
 ![720p upscaled (left) vs native 1080p (right)](docs/feat-1080p.jpg)
 
@@ -69,6 +93,8 @@ code but haven't been tested yet.
   [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB) work out of the box.
 - Turn it on before or during the game: it's picked up while you play.
 - Buttons work by position, as on a PlayStation pad (bottom = ✕, right = ○).
+- The game's button pictures follow what you play with: PlayStation, Xbox, or keyboard and mouse (F2 → Controls
+  says which one it shows).
 - **Remap any button in the game:** F2 → Controls → *Buttons and keys* lists every PS3 control, each with two
   keys, a mouse button and a controller button. Click a cell (✕ on a controller) and press the new one;
   right-click (□) clears it. An input that is already used asks first: *Swap* or *Cancel*. A change applies at
@@ -97,6 +123,7 @@ reaches the graphics card, as on the PS3.
 
 The PS3 drew every fire, smoke, spark and explosion into a tiny 512×288 image and stretched it over the screen,
 which gave blocky edges and blobby flames. Here they're drawn at full resolution (F2 → Effects). The port also
+keeps the glow around lightning, lamps and fire as the PS3 made it at any resolution (F2 → Effects → *Glow and blur*), and it
 loads **texture packs** (PNG/DDS), so the community can make HD versions of any texture. Packs are made from your
 own game's textures, so none are included.
 
@@ -194,6 +221,10 @@ the same overflow, forced on purpose, went from **13 to 40 fps**. With normal se
 test ran at **75 fps with no frame over 37 ms**. That rooftop view now runs at **80–91 fps** at native 1080p with
 every extra on.
 
+Cutscene camera cuts and loading used to stutter while the graphics card's drawing programs (pipelines) were
+made on the spot. They are made on helper threads now, and the ones the game used before are prepared ahead at
+the title screen (`pipelines.rcp`), so the cuts stay smooth.
+
 Every session also watches itself: a frame that takes longer than 80 ms is recorded together with what each
 of the game's threads was doing at that moment (`play\<date-time>\hitches.tsv`, summed up in `summary.txt`), so a
 stutter you report comes with its cause.
@@ -207,9 +238,8 @@ stutter you report comes with its cause.
 Setup translates the game's PS3 code into PC code **on your machine** and compiles it. The game then
 runs directly on your CPU, with its graphics drawn through Vulkan.
 
-> 🧪 **Early public test.** It boots, plays and saves, and it is fast on the PC it was built on, but
-> it has been played on one PC so far. Expect bugs; please [report them](../../issues) with the session's
-> `play\<date-time>` folder.
+> 🧪 **Public test.** It boots, plays and saves, and players run it on Windows 10 and 11 PCs and on Linux.
+> Expect bugs; please [report them](../../issues) with the session's `play\<date-time>` folder.
 
 > 🔒 **No game content is included, and none is downloaded.** You need your own copy of the game,
 > and RPCS3 for Setup. Builds of the game (the `.exe`) are never shared, because they contain the
@@ -220,8 +250,8 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 | | |
 |---|---|
 | ✅ Tested copies | Played and confirmed by players: the **Europe** disc (**BCES01143**) and the **US** disc (**BCUS98125**), each with the **1.04** update, and the **digital (PSN)** version 01.03. |
-| 🖥️ Tested PC | i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p |
-| ⚠️ Known issues | • The Beast fight can drop into the 40s.<br>• Views over a big part of the city (the top of the cathedral spire) run at 75–85 fps: the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them. |
+| 🖥️ Tested PCs | The test PC: i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p to 4K. Players: Windows 10 and 11 PCs, up to an RTX 5070 at 1440p. Linux: Ubuntu 22.04 with an AMD GPU (experimental). |
+| ⚠️ Known issues | • The Beast fight can drop into the 40s.<br>• Views over a big part of the city (the top of the cathedral spire) run at 75–85 fps: the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them.<br>• Renaming or moving the port's folder after Setup can leave a black screen after the intro logos ([#13](../../issues/13)): give the folder its old name back. |
 
 ## 🧰 What you need
 
@@ -239,7 +269,7 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
   - After Setup you can remove RPCS3. Keep your game disc folder where it is.
   - Start the game once in RPCS3 until the main menu: that installs 2.4 GB of data that Setup copies.
 - 💻 **A PC with:**
-  - Windows 10/11 64-bit
+  - Windows 10/11 64-bit (or Linux, experimental: [see below](#-linux-experimental))
   - a CPU with AVX2 (Intel 4th gen / AMD Ryzen or newer)
   - a Vulkan graphics card
   - 16 GB RAM
@@ -291,20 +321,22 @@ Updating later is the same (`git pull` first), and quick: `-Cleanup` keeps the b
 and build files, so only what changed is built again. `-NoBuildCache` deletes them too.
 </details>
 
-<details>
-<summary>🐧 Linux (experimental)</summary>
+## 🐧 Linux (experimental)
 
-The port also builds and runs natively on Linux (tested on Ubuntu 22.04 with an AMD GPU). It is
-experimental: less tested than Windows, and there is no Setup.exe. From a `git clone`:
+The port also builds and runs natively on Linux, with no Wine or Proton (tested on Ubuntu 22.04 with an AMD GPU).
+It is experimental: less tested than Windows, there is no Setup.exe, and the Steam Deck hasn't been tried yet.
+From a `git clone`:
 
 ```
+git clone https://github.com/SamiEnazi/infamous2-port
+cd infamous2-port
 tools/setup.sh --disc <your game folder> --rpcs3 <RPCS3's data folder>
 tools/play.sh
 ```
 
 `tools/setup.sh` lists what it needs from your distribution (a C/C++ toolchain, python3 with venv, the
-Vulkan loader, SDL2) and puts everything else in the port's own folder.
-</details>
+Vulkan loader, SDL2) and puts everything else in the port's own folder. Please [report](../../issues) how it
+runs on your distribution and GPU.
 
 ## 🔄 Updates
 
@@ -346,7 +378,7 @@ Vulkan loader, SDL2) and puts everything else in the port's own folder.
   has: the US disc also has a Latin-American Spanish dub, the Europe disc BCES01143 has English voices with
   menus and subtitles in 16 languages. It applies at the next start.
 - **Widescreen:** F2 → Display → Aspect ratio: *Auto* follows your screen's shape, or pick 21:9, 32:9 or
-  16:10. You see more on the sides (nothing is stretched); the HUD stays in the middle 16:9 and movies get
+  16:10. 32:9 at 1440p draws 5120×1440 for a super-ultrawide monitor. You see more on the sides (nothing is stretched); the HUD stays in the middle 16:9 and movies get
   black bars. It applies at the next start. 16:9 is the default.
 - **Your saves:** `game\gamedata\dev_hdd0\home\00000001\savedata`, backed up to `saves-backup\` before every session.
 - **Your settings:** F2's choices go to `%APPDATA%\inFAMOUS2-port\settings.ini` (with `mods.ini` and the saved spots
