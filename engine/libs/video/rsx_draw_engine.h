@@ -365,6 +365,13 @@ typedef struct rsx_draw_backend {
      * byte (so any crossbar reads it). Returns it, or 0. */
     u32  (*ssao_pass)(void* user, u32 depth, u32 normals, const void* consts, u32 const_bytes,
                       u32 full_w, u32 full_h, u32 half_w, u32 half_h);
+    /* Optional. The half-res linear depth (one float per texel, half_w x
+     * half_h) the last ssao_pass made on its way: a backend-owned texture the
+     * engine binds where the title samples the SSAO job's own half-depth
+     * buffer, which that job no longer writes once the passes run here.
+     * Asking for it also keeps it made when the backend would otherwise skip
+     * it. 0 when there is none. */
+    u32  (*ssao_half_depth)(void* user);
     /* Optional. Persistent vertex buffers: the engine keeps the decoded
      * vertices of geometry that did not change since the last frame and draws
      * from them instead of fetching and staging it again. vbuf_create copies

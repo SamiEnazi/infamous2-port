@@ -5975,7 +5975,9 @@ static struct {
     u8 consts[512]; u32 bytes, fw, fh, hw, hh;
     int have;
     u32 out, out_seq;
-} s_gs = { -1 };
+    int hd_on;          /* (ripples) PS3RECOMP_ENG_GPU_SSAO_HD; -1 not read yet */
+    u32 hd, hd_seq;     /* the backend's half depth and the run it was asked after */
+} s_gs = { -1, .hd_on = -1 };
 
 void rsx_draw_engine_gpu_ssao_data(const void* consts, u32 bytes, u32 full_w, u32 full_h,
                                    u32 half_w, u32 half_h)
@@ -5988,7 +5990,7 @@ void rsx_draw_engine_gpu_ssao_data(const void* consts, u32 bytes, u32 full_w, u3
     pthread_mutex_unlock(&s_gl_lock);
 }
 
-static u32 eng_gpu_ssao_texture(const rsx_dsp_texture* t)
+static int eng_gpu_ssao_on(void)
 {
     if (s_gs.on < 0) {
         const char* e = getenv("PS3RECOMP_ENG_GPU_SSAO");
@@ -5996,7 +5998,13 @@ static u32 eng_gpu_ssao_texture(const rsx_dsp_texture* t)
         if (s_gs.on) { s_gs.off = (u32)strtoul(e, 0, 16);
                        fprintf(stderr, "[rsx engine] GPU SSAO: AO texture at local 0x%08X\n", s_gs.off); }
     }
-    if (!s_gs.on || t->location != RSX_LOCATION_LOCAL || t->offset != s_gs.off) return 0;
+    return s_gs.on;
+}
+
+/* The passes for this sequence of light inputs, run once per sequence (by
+ * whichever reader comes first). 1 when s_gs.out is this sequence's. */
+static int eng_gpu_ssao_run(void)
+{
     if (!eng_gpu_light_on() || !g.be->ssao_pass || !s_gl.in_seq || !s_gl.n_tex || !s_gl.z_tex) return 0;
     if (s_gs.out_seq != s_gl.in_seq) {
         u8 c[512]; u32 bytes, fw, fh, hw, hh;
@@ -6010,7 +6018,55 @@ static u32 eng_gpu_ssao_texture(const rsx_dsp_texture* t)
         if (!out) return 0;
         s_gs.out = out; s_gs.out_seq = s_gl.in_seq;
     }
-    return s_gs.out;
+    return 1;
+}
+
+static u32 eng_gpu_ssao_texture(const rsx_dsp_texture* t)
+{
+    if (!eng_gpu_ssao_on() || t->location != RSX_LOCATION_LOCAL || t->offset != s_gs.off) return 0;
+    return eng_gpu_ssao_run() ? s_gs.out : 0;
+}
+
+/* (ripples, GitHub #18 "missing water ripples") The SSAO job's first pass
+ * leaves a half-res linear depth in main memory (f32, half_w x half_h, label
+ * 136: notes/ssao, ssao_gpu.h pass E), and the title samples that buffer
+ * outside the SSAO too: the water-ripple particles (FX_PARTICLE_WATER_RIPPLE,
+ * FP 28d0265d451f8cc9, drawn with FUNC_ADD_SIGNED into the 320x180 offset
+ * map the water reads) compare it with their own depth and KIL where the
+ * scene is nearer. With the SSAO on the GPU the job does no tile work, so the
+ * buffer kept what it held at boot (0 under most of the screen): every ripple
+ * fragment was killed and a bolt into the water left no rings. The backend's
+ * passes make the same depth (ssao_half_depth); a unit that samples the
+ * job's buffer -- main memory, X32_FLOAT, the passes' half size and pitch --
+ * gets that instead. PS3RECOMP_ENG_GPU_SSAO_HD=0: the guest buffer (old). */
+static int eng_gpu_ssao_hd_match(const rsx_dsp_texture* t)
+{
+    if (t->location != RSX_LOCATION_MAIN || (t->format & RSX_TEX_FMT_BASE_MASK) != RSX_TEX_FMT_X32_FLOAT) return 0;
+    if (!eng_gpu_ssao_on()) return 0;
+    if (s_gs.hd_on < 0) {
+        const char* e = getenv("PS3RECOMP_ENG_GPU_SSAO_HD");
+        s_gs.hd_on = e ? atoi(e) != 0 : 1;
+    }
+    if (!s_gs.hd_on || !g.be->ssao_half_depth) return 0;
+    const u32 hw = __atomic_load_n(&s_gs.hw, __ATOMIC_RELAXED), hh = __atomic_load_n(&s_gs.hh, __ATOMIC_RELAXED);
+    return hw && t->width == hw && t->height == hh && (!t->pitch || t->pitch == hw * 4u);
+}
+static u32 eng_gpu_ssao_half_depth(const rsx_dsp_texture* t)
+{
+    if (!eng_gpu_ssao_hd_match(t) || !eng_gpu_ssao_run()) return 0;
+    if (s_gs.hd_seq != s_gs.out_seq || !s_gs.hd) {
+        s_gs.hd = g.be->ssao_half_depth(g.be->user);
+        s_gs.hd_seq = s_gs.out_seq;
+    }
+    if (s_gs.hd) {   /* once per (program, address): which effects read it */
+        static u64 seen[8]; static u32 ns;
+        const u64 key = eng_current_fp_structural() ^ t->offset;
+        u32 k = 0; while (k < ns && seen[k] != key) k++;
+        if (k == ns && ns < 8) { seen[ns++] = key;
+            fprintf(stderr, "[rsx engine] GPU SSAO: the half depth at main 0x%08X (%ux%u, fp %016llx) reads the GPU passes' (h%u)\n",
+                    t->offset, t->width, t->height, (unsigned long long)eng_current_fp_structural(), s_gs.hd); }
+    }
+    return s_gs.hd;
 }
 
 /* The texture a composite unit gets instead of the guest buffer, or 0. */
@@ -6420,6 +6476,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
          * cache key like the crossbar itself. */
         if ((textures[u] = eng_gpu_light_texture(&t)) != 0) { s_tex_volatile = 1; continue; }
         if ((textures[u] = eng_gpu_ssao_texture(&t)) != 0) { s_tex_volatile = 1; continue; }
+        if ((textures[u] = eng_gpu_ssao_half_depth(&t)) != 0) { s_tex_volatile = 1; continue; }   /* (ripples) */
         textures[u] = eng_texture_slot(t.location, t.offset, t.format,
                                        t.width, t.height, t.mipmaps, t.pitch,
                                        (int)t.cubemap, t.remap & 0x1FFFFu,
@@ -6431,7 +6488,8 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
          * same registers, so that binding must not be reused (PS3RECOMP_ENG_DELTA) */
         else if ((t.location == RSX_LOCATION_MAIN && eng_gpu_light_on() &&
                   (t.offset == s_gl.diff_off || t.offset == s_gl.spec_off)) ||
-                 (s_gs.on > 0 && t.location == RSX_LOCATION_LOCAL && t.offset == s_gs.off))
+                 (s_gs.on > 0 && t.location == RSX_LOCATION_LOCAL && t.offset == s_gs.off) ||
+                 eng_gpu_ssao_hd_match(&t))
             s_tex_volatile = 1;
         /* PS3_MODS_DUMP: the effects draws' textures (fx_textures.txt). */
         if (__builtin_expect(s_mods.dump_dir[0] != 0, 0) && textures[u] && n_targets &&

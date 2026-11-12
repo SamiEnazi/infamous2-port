@@ -8766,6 +8766,10 @@ static struct {
     VkFramebuffer         light_fb;
     vk_image              ssao_hd, ssao_a, ssao_b; /* R32F half depth, two R8 AO planes */
     u32                   ssao_out, ssao_dims[4];
+    /* (ripples) ssao_hd as an engine TEXTURE (a second view of its image,
+     * vk_eng_ssao_half_depth), and whether the engine has asked for it */
+    u32                   ssao_hd_tex;
+    int                   ssao_hd_want;
     VkFramebuffer         ssao_fb[4];              /* hd, a, b, out */
     vk_image              zr32;                    /* the depth decode's R32F copy */
     vk_image              zs8;                     /* ... and its stencil (R8), same size */
@@ -9396,12 +9400,60 @@ static int vk_pass_make_lfx(VkRenderPass rp_hd, VkRenderPass rp_ao, u32 w, u32 h
     return 0;
 }
 
+/* (ripples, GitHub #18) The SSAO job's first pass writes a half-res linear
+ * depth (f32 640x360, label 136) into main memory, and the title reads that
+ * buffer elsewhere too: the water-ripple particles (FX_PARTICLE_WATER_RIPPLE)
+ * test it against their own depth and discard themselves where the scene is
+ * nearer. With the SSAO on the GPU the job does no tile work, the buffer
+ * stays as it was (0 over most of the screen), every ripple fragment was
+ * discarded and the rings never reached the water's offset map. ssao_hd is
+ * the same depth (kVkSsaoHdFS reproduces the job's pass), so the engine binds
+ * it there: a TEXTURE object holding a second view of ssao_hd's image (the
+ * object owns only the view; the image stays the pass's). */
+static void vk_pass_drop_ssao_hd_tex(void)
+{
+    const u32 t = s_lp.ssao_hd_tex;
+    if (t && t < VK_ENG_MAX_OBJ && s_eobj[t].kind == VK_ENG_TEXTURE && s_eobj[t].tag == VK_TAG_PASS)
+        vk_eng_release(NULL, t);
+    s_lp.ssao_hd_tex = 0;
+}
+static u32 vk_pass_make_ssao_hd_tex(u32 hw, u32 hh)
+{
+    if (s_lp.ssao_hd_tex) return s_lp.ssao_hd_tex;
+    if (!s_lp.ssao_hd.img) return 0;
+    const u32 t = vk_eng_alloc();
+    if (!t) return 0;
+    vk_eng_obj* o = &s_eobj[t];
+    memset(o, 0, sizeof *o);
+    const VkComponentMapping id = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                    VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+    if (vk_eng_make_view(s_lp.ssao_hd.img, VK_FORMAT_R32_SFLOAT, 1, 1, id, &o->im.view)) {
+        memset(o, 0, sizeof *o); return 0;
+    }
+    o->kind = VK_ENG_TEXTURE; o->fmt = VK_FORMAT_R32_SFLOAT; o->bpp = 4;
+    o->w = o->gw = hw; o->h = o->gh = hh;
+    o->tag = VK_TAG_PASS;
+    s_lp.ssao_hd_tex = t;
+    return t;
+}
+/* rsx_draw_backend.ssao_half_depth: the last ssao_pass's ssao_hd (the image
+ * is filled by every SSAO run: the game's five passes write it first, and the
+ * Lighting page's full-res chain, which has its own depth, also runs that one
+ * pass once this has been asked for). */
+static u32 vk_eng_ssao_half_depth(void* user)
+{
+    (void)user;
+    s_lp.ssao_hd_want = 1;
+    return s_lp.ssao_dims[2] ? s_lp.ssao_hd_tex : 0;   /* made with the pass's images (vk_eng_ssao_pass) */
+}
+
 static void vk_pass_drop_ssao(void)
 {
     for (u32 k = 0; k < 4; k++) {
         if (s_lp.ssao_fb[k]) { vk_batch_flush(); vk_fif_wait_other(); pvkDestroyFramebuffer(s_vk.device, s_lp.ssao_fb[k], NULL); }
         s_lp.ssao_fb[k] = VK_NULL_HANDLE;
     }
+    vk_pass_drop_ssao_hd_tex();
     vk_destroy_image(&s_lp.ssao_hd);
     vk_destroy_image(&s_lp.ssao_a);
     vk_destroy_image(&s_lp.ssao_b);
@@ -9461,6 +9513,7 @@ static u32 vk_eng_ssao_pass(void* user, u32 depth, u32 normals, const void* cons
             vk_pass_drop_ssao(); return 0;
         }
         s_lp.ssao_dims[0] = fw; s_lp.ssao_dims[1] = fh; s_lp.ssao_dims[2] = hw; s_lp.ssao_dims[3] = hh;
+        vk_pass_make_ssao_hd_tex(hw, hh);   /* (ripples) 0 = the engine keeps the guest buffer */
     }
     /* Batched: recorded into the frame's batch, as the light pass (one UBO,
      * five sets: a second SSAO in one batch flushes first). */
@@ -9510,6 +9563,10 @@ static u32 vk_eng_ssao_pass(void* user, u32 depth, u32 normals, const void* cons
             for (u32 k = 0; k < 4; k++)
                 vk_pass_write_set(sset[ls[k].set], subo, ls[k].t0, ls[k].t1, VK_NULL_HANDLE);
             if (vk_begin()) return 0;
+            /* (ripples) the game's half depth as well, for vk_eng_ssao_half_depth
+             * (same set: it reads the same depth through the same block) */
+            if (s_lp.ssao_hd_want)
+                vk_pass_record(rp_hd, s_lp.ssao_fb[0], p_hd, sset[VK_PASS_SSAO_HD], hw, hh);
             for (u32 k = 0; k < 4; k++)
                 vk_pass_record(ls[k].rp, ls[k].fb, ls[k].pipe, sset[ls[k].set], ow, oh);
             if (s_batch.recording) { s_batch.ssao_pending = (int)sk + 1; return s_lp.ssao_out; }
@@ -9722,6 +9779,7 @@ static void vk_eng5_shutdown(void)
         vk_destroy_image(&s_lp.lfx_hd);
         vk_destroy_image(&s_lp.lfx_a);
         vk_destroy_image(&s_lp.lfx_b);
+        vk_pass_drop_ssao_hd_tex();   /* (ripples) its view before the image */
         vk_destroy_image(&s_lp.ssao_hd);
         vk_destroy_image(&s_lp.ssao_a);
         vk_destroy_image(&s_lp.ssao_b);
@@ -9811,6 +9869,7 @@ static const rsx_draw_backend s_vk_engine_backend = {
     .depth_snapshot_rgba8 = vk_eng_depth_snapshot_rgba8,
     .light_pass           = vk_eng_light_pass,
     .ssao_pass            = vk_eng_ssao_pass,
+    .ssao_half_depth      = vk_eng_ssao_half_depth,   /* (ripples) */
     .pipeline_create      = vk_eng_pipeline_create,
     .pipeline_release     = vk_eng_pipeline_release,
     .bind_targets         = vk_eng_bind_targets,

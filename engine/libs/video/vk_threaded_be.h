@@ -155,6 +155,9 @@ static u32 bt_light_pass(void* u, u32 normals, u32 depth, u32 w, u32 h, const vo
 static u32 bt_ssao_pass(void* u, u32 depth, u32 normals, const void* consts, u32 const_bytes,
                         u32 full_w, u32 full_h, u32 half_w, u32 half_h)
 { (void)u; bt_forget(); vk_tq_sync(); return s_bt_real.ssao_pass(s_bt_real.user, depth, normals, consts, const_bytes, full_w, full_h, half_w, half_h); }
+/* (ripples) reads a handle the last ssao_pass (synchronous, this thread) made: no drain */
+static u32 bt_ssao_half_depth(void* u)
+{ (void)u; return s_bt_real.ssao_half_depth(s_bt_real.user); }
 /* (rsx-par2) image_load / image_save are file + PNG code that touch no backend
  * state, and the texture-pack preload thread calls image_load: straight
  * through, from whatever thread (no drain -- see vk_tq_sync -- and no touch of
@@ -517,7 +520,7 @@ static const rsx_draw_backend* vk_bt_install(const rsx_draw_backend* real)
     BT_SET(bind_textures) BT_SET(bind_vertex_textures) BT_SET(set_viewport) BT_SET(set_scissor)
     BT_SET(set_stencil_ref) BT_SET(draw) BT_SET(clear_color) BT_SET(clear_depth_stencil) BT_SET(present)
     BT_SET(readback) BT_SET(bind_vs_constants_range) BT_SET(texture_create_3d) BT_SET(texture_upload_3d)
-    BT_SET(light_pass) BT_SET(ssao_pass) BT_SET(vbuf_create) BT_SET(vbuf_release) BT_SET(draw_vbuf)
+    BT_SET(light_pass) BT_SET(ssao_pass) BT_SET(ssao_half_depth) BT_SET(vbuf_create) BT_SET(vbuf_release) BT_SET(draw_vbuf)
     BT_SET(image_load) BT_SET(image_save) BT_SET(set_hud) BT_SET(set_depth_bias) BT_SET(set_depth_clamp)
     BT_SET(draw_vbuf_ib) BT_SET(vbuf_prefetch) BT_SET(vs_constants_gen)
 #undef BT_SET
