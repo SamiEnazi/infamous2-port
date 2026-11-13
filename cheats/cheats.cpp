@@ -752,7 +752,15 @@ uint32_t fctiwz(double v)   /* the lift's ppu_f2i32(v, 0) */
     const int32_t i = _mm_cvttsd_si32(_mm_set_sd(v));
     return (i == INT32_MIN && v > 0.0) ? 0x7FFFFFFFu : (uint32_t)i;
 }
+void mouse_tally(uint32_t lr, uint32_t arg, float v);   /* [mouse] PS3_MOUSE_PROBE=1 (below) */
+void hook_ring_max_body(struct ppu_context* ctx, ppu_hook_body body);
 void hook_ring_max(struct ppu_context* ctx, ppu_hook_body body)
+{
+    const uint32_t lr = (uint32_t)ctx->lr;
+    hook_ring_max_body(ctx, body);
+    mouse_tally(lr, 0x100, (float)ctx->fpr[1]);   /* who asks for the right stick's recent magnitude */
+}
+void hook_ring_max_body(struct ppu_context* ctx, ppu_hook_body body)
 {
     const uint32_t obj = (uint32_t)ctx->gpr[3];
     const uint32_t head = vm_read32(obj + 0x240);
@@ -807,12 +815,25 @@ void hook_ring_max(struct ppu_context* ctx, ppu_hook_body body)
  * where the mouse moved instead of 0, in those frames only (and while a carried turn is still being
  * followed): a turn rate of ~4e-6 rad/s, nothing on screen, but the game's own bookkeeping of
  * "the player turns the camera" runs as for a stick.
+ * The rest of the game keeps the mouse as a right stick (GitHub #27, 2026-11-13; cellPad's "tee",
+ * provider 2): cellPad turns the mouse into right-stick deflection exactly as in stick mode, for every
+ * reader, and these two cameras alone do not see it: where the free and the aim camera read the right
+ * stick (func_0019609C from 0x7E538 / 0x98CAC) the axes the mouse drove in that pad packet are zeroed
+ * (cellPad_host_mouse_stick_axes) while the hook takes the motion. So whatever waits for the stick to
+ * move (the opening's "look up" step; the pad's own "right stick last moved" time pad+0xB0 and its
+ * magnitude ring pad+0x240) sees it move, a camera that is not one of these two turns as in stick mode,
+ * and these two turn by the mouse alone (no stick speed on top). PS3_MOUSE_TEE=0: the old claim (the
+ * mouse moves no stick at all while a camera hook takes it). And a free-camera axis the game switched
+ * off for the stick (D+0x270, zeroed by func_0007ACE4 in its manual branch: the opening's tutorial locks
+ * the camera so between its "look" steps) does not turn by the mouse either.
  * Exact when the mouse is not used: with no motion the hooks only call the game's code and write
  * nothing, so a controller or the keys see the game as before. PS3_MOUSE_CAM_HOOK=0: no hooks at all;
  * PS3_MOUSE_PROBE=1 (tests): one [mouse] line per camera frame with the angles. */
 constexpr uint32_t kFnFreeCam = 0x0007E0A4, kFnAimCam = 0x00098A00, kFnCamRate = 0x0008D7C8, kFnCamStick = 0x0019609C;
 constexpr uint32_t kLrFreeRate = 0x0007E718, kLrAimRate = 0x000993EC, kLrFreeStick = 0x0007E53C;
+constexpr uint32_t kLrAimStick = 0x00098CB0;            /* the aim camera's stick read (both sticks, r4) */
 constexpr uint32_t kDYaw = 0x1C0, kDPitch = 0x1C4, kDManual = 0x1A8, kDViewYaw = 0x180, kDViewPitch = 0x184;
+constexpr uint32_t kDAxesOff = 0x270;   /* the stick axes the game switched off (bit 0 x, 1 y; func_0007ACE4) */
 constexpr uint32_t kAYaw = 0x254, kAPitch = 0x258, kAPitchMin = 0x150, kAPitchMax = 0x154;
 constexpr uint32_t kFreePitchLimits = 0x007442B0;          /* (min, max) floats, read-only data */
 constexpr uint32_t kGameInvX = kG + 0x640, kGameInvY = kG + 0x641;
@@ -824,6 +845,12 @@ constexpr float kRadPerCount = 0.0008f, kAimViewRatio = 0.2553f / 0.4831f;
 constexpr float kStickEps = 1e-6f;
 enum { CAM_NONE, CAM_FREE, CAM_AIM };
 bool s_mouse_hook = true;
+#ifdef PS3_MOUSE_CAMERA_HAVE_TEE
+bool s_mouse_tee = true;         /* the tee (cellPad provider 2): the mouse stays the stick for the rest of the game */
+#else
+bool s_mouse_tee = false;        /* a toolkit without it: the claim alone */
+#endif
+int s_mt_mask;                   /* the camera step running now hides the mouse from its stick read (CAM_FREE/AIM) */
 int s_mouse_probe;               /* 1: a line per camera frame that moved + a summary every 10 s; 2: the summary only */
 int s_mt_cam;                    /* the camera step running now (guest main thread) */
 float s_mt_dx, s_mt_dy;          /* its mouse motion, counts (the player's and the game's inverts applied) */
@@ -875,6 +902,36 @@ void mouse_probe(const char* cam, uint32_t o, uint32_t fy, uint32_t fp, float y0
             (double)y0, (double)y1, (double)y2, (double)p0, (double)p1, (double)p2, (double)vy, (double)vp);
 }
 
+/* PS3_MOUSE_PROBE=1: who reads the camera stick (0x19609C: caller, stick, |x|+|y| it returned), who asks for the
+ * right stick's recent magnitude (0x196508, arg 100), how the camera steps ran (7E0A4: bit 1 manual, 2 mouse
+ * camera on, 4 epsilon stick, 0x10 D+0x1A8 "the stick turns", 0x20/0x40 the axes the game disabled (D+0x270:
+ * x/y, func_0007ACE4), bits 8.. the state byte D+0x1E0; 98A00: 1 manual) -- one "[mouse] reads" line a second. */
+struct MouseTally { uint32_t lr, arg; long long n, nz; float mx; };
+MouseTally s_tally[24];
+int s_tally_n;
+double s_tally_t;
+std::mutex s_tally_mu;
+void mouse_tally(uint32_t lr, uint32_t arg, float v)
+{
+    if (s_mouse_probe != 1) return;
+    std::lock_guard<std::mutex> g(s_tally_mu);
+    MouseTally* e = nullptr;
+    for (int i = 0; i < s_tally_n && !e; i++)
+        if (s_tally[i].lr == lr && s_tally[i].arg == arg) e = &s_tally[i];
+    if (!e && s_tally_n < 24) { e = &s_tally[s_tally_n++]; *e = MouseTally{lr, arg, 0, 0, 0.0f}; }
+    if (e) { e->n++; if (v != 0.0f) e->nz++; if (v > e->mx) e->mx = v; }
+    const double t = now_s();
+    if (t - s_tally_t < 1.0) return;
+    s_tally_t = t;
+    char buf[2048];
+    int k = snprintf(buf, sizeof buf, "[mouse] reads t=%.4f:", t);
+    for (int i = 0; i < s_tally_n && k < (int)sizeof buf - 80; i++)
+        k += snprintf(buf + k, sizeof buf - k, " %06X/%X n=%lld nz=%lld max=%.4g;", s_tally[i].lr, s_tally[i].arg,
+                      s_tally[i].n, s_tally[i].nz, (double)s_tally[i].mx);
+    fprintf(stderr, "%s\n", buf);
+    s_tally_n = 0;
+}
+
 /* [spot] Go to saved spot with a saved camera (spot_go sets s_tpc_*): the camera is turned to the saved
  * target yaw/pitch with the mouse turn's own mechanism below, whatever the player plays with. Each free
  * camera frame the turn owed is the saved angle minus the camera's target now (absolute, so nothing is
@@ -923,9 +980,12 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
     const bool moved = on && (s_mt_dx != 0.0f || s_mt_dy != 0.0f);
     const float y0 = gptr(d) ? rdf(d + kDYaw) : 0.0f, p0 = gptr(d) ? rdf(d + kDPitch) : 0.0f;
     const float vy0 = gptr(d) ? rdf(d + kDViewYaw) : 0.0f, vp0 = gptr(d) ? rdf(d + kDViewPitch) : 0.0f;   /* the probe */
-    if (!cellPad_host_mouse_direct_ready()) {   /* the menu's Mouse entry: direct mode works here */
-        cellPad_host_mouse_direct_provider(1);
-        fprintf(stderr, "[mouse] direct mouse camera: the free camera hook runs\n");
+    if (cellPad_host_mouse_direct_ready() != (s_mouse_tee ? 2 : 1)) {   /* the menu's Mouse entry: direct mode works */
+        static int said;
+        cellPad_host_mouse_direct_provider(s_mouse_tee ? 2 : 1);
+        if (said++ < 4)
+            fprintf(stderr, "[mouse] direct mouse camera: the free camera hook runs%s\n",
+                    s_mouse_tee ? "; the mouse stays the right stick for the rest of the game" : "");
     }
     const bool tp = gptr(d) && tpc_frame(d, y0, p0, vy0, vp0, moved);   /* [spot] (false when no Go is turning it) */
     /* The turn owed: the game's view follows the target (D+0x1C0) only so fast, and after the step
@@ -946,13 +1006,23 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
     const bool keep = (on || tp) && (s_owe_yaw != 0.0f || s_owe_pitch != 0.0f || s_free_hold > 0);
     if (s_free_hold > 0) s_free_hold--;
     s_mt_cam = keep ? CAM_FREE : CAM_NONE;
+    s_mt_mask = on && s_mouse_tee ? CAM_FREE : CAM_NONE;   /* the motion is this camera's: not its stick too */
     s_mt_rate = s_mt_eps = false;
     s_aim_manual = false;            /* the aim camera starts again from its own next frame */
     ppu_hook_call(ctx, body);
     s_mt_cam = CAM_NONE;
+    s_mt_mask = CAM_NONE;
     if (!gptr(d)) return;
     const float y1 = rdf(d + kDYaw), p1 = rdf(d + kDPitch);
     const bool manual = keep && s_mt_rate && vm_read32(d + kDManual) == 1;
+    if (manual) {
+        /* GitHub #27: an axis the game switched off (its manual branch zeroes that stick axis, func_0007ACE4:
+         * the opening's tutorial locks the camera this way between and after its "look up/left/right" steps)
+         * does not turn by the mouse either -- as for a stick, the turn on it is gone */
+        const uint32_t off = vm_read32(d + kDAxesOff);
+        if (off & 1u) s_owe_yaw = 0.0f;
+        if (off & 2u) s_owe_pitch = 0.0f;
+    }
     if (!manual) {
         s_owe_yaw = s_owe_pitch = 0.0f;             /* no player camera control now: as for a stick, nothing */
         s_free_hold = 0;
@@ -986,6 +1056,11 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
       memcpy(&b, &cp, 4); s_cam_pitch_bits.store(b, std::memory_order_relaxed);
       s_cam_t.store(now_s(), std::memory_order_release); }
     if (s_mouse_probe) mouse_probe("free", d, kDYaw, kDPitch, y0, p0, y1, p1, vy0, vp0);
+    if (s_mouse_probe == 1)
+        mouse_tally(kFnFreeCam, (manual ? 1u : 0u) | (on ? 2u : 0u) | (s_mt_eps ? 4u : 0u) |
+                    (vm_read32(d + kDManual) == 1 ? 0x10u : 0u) | ((vm_read32(d + 0x270) & 3u) << 5) |
+                    ((uint32_t)vm_read8(d + 0x1E0) << 8),
+                    fabsf(s_mt_dx) + fabsf(s_mt_dy));
 }
 
 /* func_00098A00, the aim camera (r3 = aim camera A), once a frame while aiming. It makes the aim (and
@@ -1012,12 +1087,15 @@ void hook_aim_cam(struct ppu_context* ctx, ppu_hook_body body)
     }
     const float y1 = rdf(a + kAYaw), p1 = rdf(a + kAPitch);
     s_mt_cam = CAM_AIM;              /* watch for its manual path whether or not the mouse moved */
+    s_mt_mask = on && s_mouse_tee ? CAM_AIM : CAM_NONE;
     s_mt_rate = s_mt_eps = false;
     ppu_hook_call(ctx, body);
     s_mt_cam = CAM_NONE;
+    s_mt_mask = CAM_NONE;
     s_aim_manual = s_mt_rate;
     s_mt_frames.fetch_add(1, std::memory_order_relaxed);
     if (s_mouse_probe) mouse_probe("aim", a, kAYaw, kAPitch, y0, p0, y1, p1);
+    mouse_tally(kFnAimCam, (s_aim_manual ? 1u : 0u) | (on ? 2u : 0u), fabsf(s_mt_dx) + fabsf(s_mt_dy));
 }
 
 /* func_0008D7C8 (stick -> target turn rates): called by a camera's manual path only. */
@@ -1034,6 +1112,17 @@ void hook_cam_stick(struct ppu_context* ctx, ppu_hook_body body)
     const uint32_t lr = (uint32_t)ctx->lr, which = (uint32_t)ctx->gpr[4];
     const uint32_t px = (uint32_t)ctx->gpr[5], py = (uint32_t)ctx->gpr[6];
     ppu_hook_call(ctx, body);
+    if (s_mouse_probe == 1 && gptr(px) && gptr(py)) mouse_tally(lr, which, fabsf(rdf(px)) + fabsf(rdf(py)));
+#ifdef PS3_MOUSE_CAMERA_HAVE_TEE
+    /* the tee: the camera that turns by the mouse itself does not get it as stick deflection too; the axes
+     * the mouse did not drive (a pad, the keys) stay as the game read them */
+    if (which == 1 && gptr(px) && gptr(py) &&
+        ((s_mt_mask == CAM_FREE && lr == kLrFreeStick) || (s_mt_mask == CAM_AIM && lr == kLrAimStick))) {
+        const int ax = cellPad_host_mouse_stick_axes();
+        if (ax & 1) wrf(px, 0.0f);
+        if (ax & 2) wrf(py, 0.0f);
+    }
+#endif
     if (s_mt_cam == CAM_FREE && lr == kLrFreeStick && which == 1 && gptr(px) && gptr(py) &&
         (rdf(px) != 0.0f || rdf(py) != 0.0f) && s_tpc_on.load(std::memory_order_relaxed))
         s_tpc_cancel = true;                    /* [spot] the player's own stick: the saved camera's turn ends */
@@ -1874,6 +1963,13 @@ void timeline_poll(struct ppu_context* ctx, uint32_t c)
             fprintf(stderr, "[cheats] karmatest %+g: karma %g -> %g, xp %lld -> %u\n", e.v, before, rdf(kKarma),
                     xp0, gptr(s_xp) ? vm_read32(s_xp) : 0);
         }
+        else if (!strcmp(e.id, "mousetee")) {       /* [mouse] tests: the tee (1) / the old claim (0) */
+#ifdef PS3_MOUSE_CAMERA_HAVE_TEE
+            s_mouse_tee = e.v != 0.0;
+#endif
+            cellPad_host_mouse_direct_provider(s_mouse_tee ? 2 : 1);
+            fprintf(stderr, "[mouse] tee %s\n", s_mouse_tee ? "on" : "off (the claim)");
+        }
         else if (!strcmp(e.id, "mousemode")) {      /* [mouse] tests: direct (1) / stick (0) mode */
             cellPad_host_set_mouse_mode(e.v != 0.0);
             fprintf(stderr, "[mouse] mode %s (turns so far %lld in %lld camera frames)\n", e.v != 0.0 ? "direct" : "stick",
@@ -2028,6 +2124,9 @@ struct Init {
          * that first update every slot is empty again. */
         if (const char* e = getenv("PS3_FIX_RING_LAP")) { s_fix_ring = e[0] != '0'; s_fix_ring_force = !strcmp(e, "force"); }
         if (const char* e = getenv("PS3_MOUSE_CAM_HOOK")) s_mouse_hook = e[0] != '0';   /* [mouse] */
+#ifdef PS3_MOUSE_CAMERA_HAVE_TEE
+        if (const char* e = getenv("PS3_MOUSE_TEE")) s_mouse_tee = e[0] != '0';         /* [mouse] GitHub #27 */
+#endif
         s_mouse_probe = getenv("PS3_MOUSE_PROBE") ? atoi(getenv("PS3_MOUSE_PROBE")) : 0;
         if (!getenv("PS3_CHEATS")) s_env_done = true;
         hooks_update();

@@ -1336,7 +1336,12 @@ volatile uint32_t g_pad_host_keys[4];
  *                            mouse moved -- no stick, no speed cap, no stick
  *                            acceleration; whenever it does not (menus, map,
  *                            cutscenes, a build without the title's hook) the
- *                            mouse is the right stick as in "stick" mode
+ *                            mouse is the right stick as in "stick" mode. A
+ *                            title that hides the mouse from its own camera's
+ *                            stick read (provider 2, the tee) keeps the mouse
+ *                            the right stick for everything else in the game
+ *                            meanwhile (another camera, a tutorial waiting for
+ *                            the stick: GitHub #27)
  *   PS3_MOUSE_AIM_SENS=<f>   aim_sensitivity: direct mode while aiming (the
  *                            title says when), a multiplier like the one above
  *                            (default 1.0); PS3_MOUSE_SENS is the rest of the time
@@ -1378,7 +1383,22 @@ static float s_mouse_sens;
  * the title has a camera that takes the motion; the claim (cellPad_host_mouse_direct_take). */
 static volatile int s_mouse_mode = 1, s_mouse_direct_provider;
 static volatile float s_mouse_aim_sens = 1.0f;
-static PmdClaim s_mouse_claim;
+/* The claim and, for a provider 2 title, the tee's two shares (pad_mouse_direct.h); the pad poll and the
+ * title's camera may run on different threads: s_mouse_tee_lock (a few loads and adds inside). */
+static PmdTee s_mouse_tee;
+static volatile int s_mouse_tee_lock;
+static void mouse_tee_lock(void)   { while (__atomic_exchange_n(&s_mouse_tee_lock, 1, __ATOMIC_ACQUIRE)) { } }
+static void mouse_tee_unlock(void) { __atomic_store_n(&s_mouse_tee_lock, 0, __ATOMIC_RELEASE); }
+/* Provider 2: the raw motion so far into the two shares (call locked). */
+static void mouse_tee_drain(unsigned long long now_us)
+{
+    const int32_t mx = __atomic_exchange_n(&g_pad_mouse_dx, 0, __ATOMIC_RELAXED);
+    const int32_t my = __atomic_exchange_n(&g_pad_mouse_dy, 0, __ATOMIC_RELAXED);
+    pmd_tee_add(&s_mouse_tee, s_mouse_mode, now_us, mx, my);
+}
+/* Which axes of port 0's right stick the mouse drove (pmd_mouse_axes): in the latest poll, and in the latest
+ * packet port 0 handed to the title (cellPadGetData) -- the one its camera reads, whatever polls came after. */
+static volatile int s_mouse_stick_axes_poll, s_mouse_stick_axes;
 static int pad_mouse_mode_from(const char* v, int def)
 {
     if (!v || !*v) return def;
@@ -1409,9 +1429,20 @@ int   cellPad_host_mouse_mode(void) { pad_mouse_settings_load(); return s_mouse_
 void  cellPad_host_set_mouse_mode(int direct) { pad_mouse_settings_load(); s_mouse_mode = direct != 0; }
 float cellPad_host_mouse_aim_sens(void) { pad_mouse_settings_load(); return s_mouse_aim_sens; }
 void  cellPad_host_set_mouse_aim_sens(float s) { pad_mouse_settings_load(); if (s > 0.0f) s_mouse_aim_sens = s; }
-/* The title: its camera can take the mouse (it calls ..._take while its camera runs). */
-void  cellPad_host_mouse_direct_provider(int on) { s_mouse_direct_provider = on != 0; }
+/* The title: its camera can take the mouse (it calls ..._take while its camera runs); 2 = it also hides the
+ * mouse from its camera's own stick read, so the mouse stays the right stick for the rest of the game (the tee,
+ * pad_mouse_direct.h). A change of level starts both shares empty. */
+void  cellPad_host_mouse_direct_provider(int level)
+{
+    level = level >= 2 ? 2 : level > 0 ? 1 : 0;
+    if (level == s_mouse_direct_provider) return;
+    mouse_tee_lock();
+    s_mouse_tee.stick_x = s_mouse_tee.stick_y = s_mouse_tee.title_x = s_mouse_tee.title_y = 0;
+    s_mouse_direct_provider = level;
+    mouse_tee_unlock();
+}
 int   cellPad_host_mouse_direct_ready(void) { return s_mouse_direct_provider; }
+int   cellPad_host_mouse_stick_axes(void) { return s_mouse_stick_axes; }
 /* The in-game menu (ps3_overlay.mm): mouse camera sensitivity and inversion. */
 void cellPad_host_mouse_settings(int* on, float* sens, int* invert_x, int* invert_y)
 {
@@ -1492,8 +1523,10 @@ extern volatile int g_pad_overlay_open;
  * sensitivities. Returns 0 and takes nothing when the mouse is not the camera's
  * now (stick mode, the mouse camera off, controller-only input, a menu or a system
  * dialog open): the title then leaves its camera to the game. A call that returns
- * 1 keeps the claim: the pad poll leaves the motion to the title and moves no stick
- * from the mouse (pad_mouse_direct.h). */
+ * 1 keeps the claim: for a provider 1 title the pad poll then leaves the motion to
+ * it and moves no stick from the mouse; a provider 2 title gets its own share and
+ * the mouse is still the right stick for everything else (the tee,
+ * pad_mouse_direct.h). */
 int cellPad_host_mouse_direct_take(float* dx, float* dy, float* sens, float* aim_sens)
 {
     *dx = *dy = 0.0f;
@@ -1501,9 +1534,18 @@ int cellPad_host_mouse_direct_take(float* dx, float* dy, float* sens, float* aim
     *sens = s_mouse_sens; *aim_sens = s_mouse_aim_sens;
     if (!s_mouse_on || !s_mouse_mode || cellPad_host_input_mode() == PAD_MODE_CONTROLLER || g_pad_overlay_open)
         return 0;
-    pmd_take(&s_mouse_claim, pad_now_us());
-    const int32_t mx = __atomic_exchange_n(&g_pad_mouse_dx, 0, __ATOMIC_RELAXED);
-    const int32_t my = __atomic_exchange_n(&g_pad_mouse_dy, 0, __ATOMIC_RELAXED);
+    const unsigned long long now = pad_now_us();
+    int32_t mx, my;
+    mouse_tee_lock();
+    pmd_take(&s_mouse_tee.claim, now);
+    if (s_mouse_direct_provider >= 2) {
+        mouse_tee_drain(now);
+        pmd_tee_take(&s_mouse_tee.title_x, &s_mouse_tee.title_y, &mx, &my);
+    } else {
+        mx = __atomic_exchange_n(&g_pad_mouse_dx, 0, __ATOMIC_RELAXED);
+        my = __atomic_exchange_n(&g_pad_mouse_dy, 0, __ATOMIC_RELAXED);
+    }
+    mouse_tee_unlock();
     *dx = (float)mx / 16.0f * (s_mouse_invert_x ? -1.0f : 1.0f);
     *dy = (float)my / 16.0f * (s_mouse_invert_y ? -1.0f : 1.0f);
     return 1;
@@ -1564,12 +1606,24 @@ static void pad_poll_mouse(uint32_t* ctl, int* mrx, int* mry)
     if (b)
         for (int c = 0; c < PIM_N_CONTROLS; c++)
             if (map->mouse[c] & b) *ctl |= 1u << c;
-    /* [mouse] direct mode: while the title's camera takes the motion, it is the
-     * title's (no stick from the mouse; I/J/K/L still move it). When the claim
-     * lapses, what piled up is dropped once and the mouse is a stick again. In
-     * stick mode the claim is never held and nothing here changes anything. */
-    { int drop;
-      if (pmd_poll(&s_mouse_claim, s_mouse_mode, now_us, &drop)) {
+    /* [mouse] direct mode, provider 1: while the title's camera takes the motion,
+     * it is the title's (no stick from the mouse; I/J/K/L still move it). When the
+     * claim lapses, what piled up is dropped once and the mouse is a stick again.
+     * Provider 2 (the tee): the stick's share of the motion, the stick exactly as
+     * in stick mode; the title hides it from its own camera. In stick mode the
+     * claim is never held and nothing here changes anything. */
+    int32_t dx = 0, dy = 0;
+    { int drop = 0, held = 0;
+      mouse_tee_lock();
+      const int tee = s_mouse_direct_provider >= 2;
+      if (tee) {
+          mouse_tee_drain(now_us);
+          pmd_tee_take(&s_mouse_tee.stick_x, &s_mouse_tee.stick_y, &dx, &dy);
+      } else {
+          held = pmd_poll(&s_mouse_tee.claim, s_mouse_mode, now_us, &drop);
+      }
+      mouse_tee_unlock();
+      if (held) {
           sx = sy = 0.0f; last = now_us;
           return;
       }
@@ -1577,9 +1631,11 @@ static void pad_poll_mouse(uint32_t* ctl, int* mrx, int* mry)
           __atomic_store_n(&g_pad_mouse_dx, 0, __ATOMIC_RELAXED);
           __atomic_store_n(&g_pad_mouse_dy, 0, __ATOMIC_RELAXED);
           sx = sy = 0.0f; last = now_us;
+      }
+      if (!tee) {
+          dx = __atomic_exchange_n(&g_pad_mouse_dx, 0, __ATOMIC_RELAXED);
+          dy = __atomic_exchange_n(&g_pad_mouse_dy, 0, __ATOMIC_RELAXED);
       } }
-    const int32_t dx = __atomic_exchange_n(&g_pad_mouse_dx, 0, __ATOMIC_RELAXED);
-    const int32_t dy = __atomic_exchange_n(&g_pad_mouse_dy, 0, __ATOMIC_RELAXED);
     /* The time since the last read, in ms from the performance counter (it
      * was GetTickCount64: 15.6 ms steps on Windows, so a 16.7 ms frame read
      * as 15 or 31 ms and the camera speed jumped by 2x from frame to frame). */
@@ -1880,7 +1936,7 @@ static void pad_poll_keys(int merge)
     if (keys[0] | keys[1] | keys[2] | keys[3])
         for (int c = 0; c < PIM_N_CONTROLS; c++)
             if (pim_keys_hit(map, c, keys)) ctl |= 1u << c;
-    int mrx, mry;
+    int mrx, mry, mouse_axes = 0;
     pad_poll_mouse(&ctl, &mrx, &mry);   /* drained in every mode: no jump when the mouse comes back */
     if (cellPad_host_input_mode() == PAD_MODE_CONTROLLER) { ctl = 0; mrx = mry = -1; }
     else if ((ctl || mrx >= 0 || mry >= 0) && g_ps3_pad_icons.source != 0)
@@ -1901,8 +1957,15 @@ static void pad_poll_keys(int merge)
       if (flx != 128) lx = flx;
       if (fly != 128) ly = fly;
       if (frx != 128) rx = frx;
-      if (fry != 128) ry = fry; }
+      if (fry != 128) ry = fry;
+      /* [mouse] the tee: which right-stick axes are the mouse's in this packet (the title hides them from
+       * its own camera's stick read, cellPad_host_mouse_stick_axes); the mouse wins an axis over the keys
+       * and a pad, a PS3_PAD_FILE axis over the mouse */
+      mouse_axes = pmd_mouse_axes(mrx, mry, frx, fry); }
     PadHostState* hs = &s_host_state[0];
+    /* ... and with them the other axis when nothing moves it (a pad merged below fills a centred axis) */
+    s_mouse_stick_axes_poll = pmd_mouse_axes_hide(mouse_axes, merge && rx == 128 ? hs->analog_rx : rx,
+                                                  merge && ry == 128 ? hs->analog_ry : ry);
     /* With a real pad on port 0 (SDL filled hs this poll), the keyboard and
      * mouse add to it instead of being switched off: buttons are OR-ed, and
      * an axis the keys or mouse move wins over the pad's. A paired DualSense
@@ -2039,6 +2102,9 @@ void cellPad_host_set_mouse_captured(int on)
     __atomic_store_n(&g_pad_mouse_dx, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_pad_mouse_dy, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_pad_mouse_wheel, 0, __ATOMIC_RELAXED);
+    mouse_tee_lock();   /* the tee's shares too: nothing from before turns anything after */
+    s_mouse_tee.stick_x = s_mouse_tee.stick_y = s_mouse_tee.title_x = s_mouse_tee.title_y = 0;
+    mouse_tee_unlock();
 #if defined(_WIN32) && PAD_BACKEND_SDL2
     __atomic_store_n(&g_pad_mouse_captured, on ? 1 : 0, __ATOMIC_RELEASE);
 #else
@@ -2847,6 +2913,7 @@ emit:
             else                        s_data_fresh[port_no] = 0;
         }
     }
+    if (port_no == 0 && data->len) s_mouse_stick_axes = s_mouse_stick_axes_poll;   /* [mouse] the tee: this packet's */
     if (port_no < PAD_MAX_HOST_PORTS && pad_stats_on()) {
         s_ps.reads[port_no]++;
         if (data->len) s_ps.packets[port_no]++;

@@ -1,7 +1,10 @@
 /* The mouse camera's direct mode and the synthetic mouse (libs/input/pad_mouse_direct.h):
  * the claim holds while the title takes motion and lapses PMD_CLAIM_US after the
- * last take, dropping once; stick mode never holds; the script feeds whole counts
- * whose totals are exact, spread over a duration, from the anchor or the start.
+ * last take, dropping once; stick mode never holds; the tee (provider 2) gives the
+ * stick every count and the title its own copy only while it holds the claim,
+ * emptied once when the claim lapses; the mouse's stick axes; the script feeds
+ * whole counts whose totals are exact, spread over a duration, from the anchor or
+ * the start.
  *
  *   cc -std=gnu17 libs/input/tests/test_pad_mouse_direct.c -o /tmp/t && /tmp/t
  *   (Windows: clang -std=gnu17 libs\input\tests\test_pad_mouse_direct.c -o t.exe && t.exe)
@@ -40,6 +43,79 @@ static void test_claim(void)
     PmdClaim b = {0};
     pmd_take(&b, 50000);
     CHECK(pmd_poll(&b, 1, 40000, &drop) == 0);
+}
+
+static void test_tee(void)
+{
+    PmdTee t = {0};
+    int32_t x, y;
+    /* nobody took yet: everything to the stick, nothing to the title */
+    pmd_tee_add(&t, 1, 1000, 160, -32);
+    CHECK(t.stick_x == 160 && t.stick_y == -32 && t.title_x == 0 && t.title_y == 0);
+    pmd_tee_take(&t.stick_x, &t.stick_y, &x, &y);
+    CHECK(x == 160 && y == -32 && t.stick_x == 0 && t.stick_y == 0);
+    /* a camera at 60 fps that takes: every count to both, totals equal; the stick's share is the pad
+     * poll's (it polls between the camera's frames), the title's the camera's */
+    unsigned long long now = 100000;
+    long long st = 0, ti = 0, raw = 0;
+    for (int f = 0; f < 120; f++, now += 16667) {
+        const int32_t m1 = 16 * (f % 7), m2 = -16 * (f % 3);
+        pmd_tee_add(&t, 1, now + 1000, m1, 0);          /* the pad poll drains ... */
+        raw += m1;
+        pmd_tee_take(&t.stick_x, &t.stick_y, &x, &y);  /* ... and takes the stick's share */
+        st += x;
+        pmd_take(&t.claim, now + 5000);                 /* the title's camera takes: drain, its share */
+        pmd_tee_add(&t, 1, now + 5000, m2, 0);
+        raw += m2;
+        pmd_tee_take(&t.title_x, &t.title_y, &x, &y);
+        ti += x;
+    }
+    pmd_tee_take(&t.stick_x, &t.stick_y, &x, &y);
+    st += x;
+    /* the first poll drained before the first take (frame 0: no motion yet): the title got every count */
+    CHECK(st == raw);
+    CHECK(ti == raw);
+    /* the title stops taking (a menu): its share fills until the claim lapses, then is emptied once;
+     * the stick keeps every count */
+    const unsigned long long last_take = now - 16667 + 5000;
+    pmd_tee_add(&t, 1, last_take + 1000, 320, 48);
+    CHECK(t.title_x == 320 && t.title_y == 48 && t.stick_x == 320);
+    pmd_tee_add(&t, 1, last_take + PMD_CLAIM_US, 16, 16);
+    CHECK(t.title_x == 0 && t.title_y == 0);           /* lapsed: emptied, nothing new for the title */
+    CHECK(t.stick_x == 336 && t.stick_y == 64);
+    pmd_tee_add(&t, 1, last_take + PMD_CLAIM_US + 9000, 16, 0);
+    CHECK(t.title_x == 0 && t.stick_x == 352);
+    /* taking again: the title's share starts from what comes after the take */
+    pmd_take(&t.claim, last_take + 1000000);
+    pmd_tee_add(&t, 1, last_take + 1000000, 32, 0);
+    CHECK(t.title_x == 32 && t.stick_x == 384);
+    /* stick mode (direct off): the title never gets a share, even right after a take */
+    PmdTee s = {0};
+    pmd_take(&s.claim, 5000);
+    pmd_tee_add(&s, 0, 5000, 64, 64);
+    CHECK(s.title_x == 0 && s.title_y == 0 && s.stick_x == 64 && s.stick_y == 64);
+    /* a share bigger than an int32 comes out clamped, not wrapped */
+    PmdTee b = {0};
+    b.stick_x = 0x200000000LL; b.stick_y = -0x200000000LL;
+    pmd_tee_take(&b.stick_x, &b.stick_y, &x, &y);
+    CHECK(x > 0x7FFF0000 && y < -0x7FFF0000 && b.stick_x == 0 && b.stick_y == 0);
+}
+
+static void test_axes(void)
+{
+    CHECK(pmd_mouse_axes(-1, -1, 128, 128) == 0);     /* the mouse is still */
+    CHECK(pmd_mouse_axes(200, -1, 128, 128) == 1);    /* x only */
+    CHECK(pmd_mouse_axes(-1, 20, 128, 128) == 2);     /* y only */
+    CHECK(pmd_mouse_axes(0, 255, 128, 128) == 3);     /* both, full */
+    CHECK(pmd_mouse_axes(200, 20, 0, 128) == 2);      /* a PS3_PAD_FILE x wins over the mouse */
+    CHECK(pmd_mouse_axes(200, 20, 128, 255) == 1);
+    /* hidden from the title's camera: the mouse's axes, and a centred other axis with them */
+    CHECK(pmd_mouse_axes_hide(0, 128, 128) == 0);     /* the mouse is still: nothing hidden */
+    CHECK(pmd_mouse_axes_hide(2, 128, 20) == 3);      /* mouse up, x centred: both */
+    CHECK(pmd_mouse_axes_hide(1, 200, 128) == 3);     /* mouse right, y centred: both */
+    CHECK(pmd_mouse_axes_hide(2, 0, 20) == 2);        /* a key or pad holds x left: x stays */
+    CHECK(pmd_mouse_axes_hide(1, 200, 131) == 1);     /* a pad's y a hair off centre: its own */
+    CHECK(pmd_mouse_axes_hide(3, 0, 255) == 3);
 }
 
 static void test_script(void)
@@ -87,6 +163,8 @@ static void test_script(void)
 int main(void)
 {
     test_claim();
+    test_tee();
+    test_axes();
     test_script();
     printf("%s (%d failure(s))\n", s_fail ? "FAIL" : "PASS", s_fail);
     return s_fail != 0;

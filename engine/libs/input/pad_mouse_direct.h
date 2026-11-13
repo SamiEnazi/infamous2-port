@@ -13,6 +13,19 @@
  * stick again, as in "stick" mode; the motion that piled up meanwhile is
  * dropped once, so nothing lands on the stick as one big jump.
  *
+ * The tee (GitHub #27, 2026-11-13): a title that also hides the mouse from
+ * its own camera's stick read (cellPad_host_mouse_direct_provider(2): it
+ * zeroes the right-stick axes the mouse drove, cellPad_host_mouse_stick_axes,
+ * where that camera reads the stick) keeps the mouse a right stick for the
+ * rest of the game while its camera turns by the motion: every count goes to
+ * two shares, the pad poll's (the stick, exactly as in "stick" mode) and the
+ * title's. So another camera that reads the stick turns as in "stick" mode,
+ * and whatever waits for the stick to move (a tutorial prompt, the pad's own
+ * "stick last moved" time and magnitude history) sees it move. The title's
+ * share fills only while the claim is held and is emptied once when it
+ * lapses, so the motion of a menu or a cutscene never turns the camera later.
+ * Provider 1 (a title that only takes): the claim alone, as above.
+ *
  * Synthetic mouse (PS3_MOUSE_SCRIPT, tests only: a harness window gets no real
  * mouse): "<t>:<dx>:<dy>[:<dur>],..." -- dx, dy mouse counts (pixels of raw
  * motion), at t seconds, or spread evenly over dur seconds from t. "w<t>" =
@@ -52,6 +65,50 @@ static inline int pmd_poll(PmdClaim* c, int on, unsigned long long now_us, int* 
     }
     if (c->held) { c->held = 0; *drop = 1; }
     return 0;
+}
+
+/* ---- the tee (provider 2) ------------------------------------------------- */
+typedef struct {
+    PmdClaim claim;
+    long long stick_x, stick_y;   /* 1/16 counts for the pad poll's stick */
+    long long title_x, title_y;   /* 1/16 counts for the title's camera */
+} PmdTee;
+
+/* Raw motion (1/16 counts) drained at now_us, direct mode `on`: all of it to
+ * the stick; to the title too while the claim is held (a take within
+ * PMD_CLAIM_US); the title's share is emptied once when the claim lapses. */
+static inline void pmd_tee_add(PmdTee* t, int on, unsigned long long now_us, int32_t dx, int32_t dy)
+{
+    int drop;
+    const int feed = pmd_poll(&t->claim, on, now_us, &drop);
+    if (drop) t->title_x = t->title_y = 0;
+    t->stick_x += dx; t->stick_y += dy;
+    if (feed) { t->title_x += dx; t->title_y += dy; }
+}
+/* Take a share (the stick's or the title's): its counts, the share emptied. */
+static inline void pmd_tee_take(long long* x, long long* y, int32_t* ox, int32_t* oy)
+{
+    const long long lim = 0x7FFFFFF0LL;
+    *ox = (int32_t)(*x > lim ? lim : *x < -lim ? -lim : *x);
+    *oy = (int32_t)(*y > lim ? lim : *y < -lim ? -lim : *y);
+    *x = *y = 0;
+}
+/* Which axes of port 0's right stick the mouse drove in a poll (bit 0 x,
+ * bit 1 y): mouse axis mrx/mry (-1 = the mouse left it alone); a PS3_PAD_FILE
+ * axis frx/fry off centre (128) wins over the mouse. */
+static inline int pmd_mouse_axes(int mrx, int mry, int frx, int fry)
+{
+    return (mrx >= 0 && frx == 128 ? 1 : 0) | (mry >= 0 && fry == 128 ? 2 : 0);
+}
+/* The axes the title hides from its camera: the mouse's (`axes`, above) and, with
+ * them, the other axis when nothing else moves it (rx / ry = the packet's final
+ * values, 128 = centred). The game normalises the stick as a whole, so a centred
+ * axis next to a deflected one reads a hair off centre (~0.004): left in, the
+ * title's camera would see a stick that is not quite centred. */
+static inline int pmd_mouse_axes_hide(int axes, int rx, int ry)
+{
+    if (!axes) return 0;
+    return axes | (rx == 128 ? 1 : 0) | (ry == 128 ? 2 : 0);
 }
 
 /* ---- the synthetic mouse (tests) ----------------------------------------- */

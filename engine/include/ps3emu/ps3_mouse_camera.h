@@ -22,17 +22,28 @@
  *
  * cellPad_host_mouse_direct_provider(1): the title has such a camera (the
  * menu's Mouse entry shows whether direct mode can work in this build).
+ *
+ * cellPad_host_mouse_direct_provider(2) (GitHub #27, the tee): the title also
+ * hides the mouse from its own camera's stick read -- where that camera reads
+ * the right stick it zeroes the axes cellPad_host_mouse_stick_axes() names
+ * (bit 0 x, bit 1 y: the mouse drove them in the latest pad packet). The mouse
+ * then stays the right stick for everything else in the game, exactly as in
+ * stick mode (another camera, a tutorial waiting for the stick, the game's own
+ * "stick last moved" bookkeeping), while that camera turns by the motion
+ * alone; take() hands out the title's own share of the motion.
  */
 #ifndef PS3EMU_PS3_MOUSE_CAMERA_H
 #define PS3EMU_PS3_MOUSE_CAMERA_H
+#define PS3_MOUSE_CAMERA_HAVE_TEE 1   /* cellPad_host_mouse_stick_axes, provider 2 */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 int   cellPad_host_mouse_direct_take(float* dx, float* dy, float* sens, float* aim_sens);
-void  cellPad_host_mouse_direct_provider(int on);
-int   cellPad_host_mouse_direct_ready(void);
+void  cellPad_host_mouse_direct_provider(int level);   /* 0 none, 1 takes, 2 takes + hides (the tee) */
+int   cellPad_host_mouse_direct_ready(void);           /* the level */
+int   cellPad_host_mouse_stick_axes(void);
 int   cellPad_host_mouse_mode(void);                 /* 1 direct, 0 stick */
 void  cellPad_host_set_mouse_mode(int direct);
 float cellPad_host_mouse_aim_sens(void);

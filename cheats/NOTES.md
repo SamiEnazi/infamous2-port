@@ -320,6 +320,50 @@ option does not scale the mouse (the port's sensitivities do); the game's invert
 PS3_MOUSE_CAM_HOOK=0: no hooks; PS3_MOUSE_PROBE=1 a [mouse] line per moving camera frame (2: summary only);
 PS3_CHEATS_AT=t:mousemode=0|1 switches the mode (tests).
 
+### GitHub #27 (2026-11-13, inf2-cheats mouse27): the opening's "look up" with the mouse in direct mode
+Report: the opening tutorial's "Use the right stick to look up." does not pass with mouse = direct; it does
+in stick mode. Runs native\recordings\m27-* (game-derived scratch in work\mouse27).
+- It was B, not A. With the old claim the mouse DID turn the free camera (m27-probe2: manual branch and
+  epsilon stick every frame, target pitch 0.89 -> -0.55 -> -1.41, the view followed), the prompt stayed.
+- What the tutorial reads (m27-diag: x86 data breakpoints on pad 0, controller route): the joystick script
+  properties X2 / Y2 = func_00196C2C (pad+0x10, right x) / func_00196C38 (pad+0x14, right y) (reflection
+  getters at +0x24 of the entries 0x9715AC / 0x9715E0). Y2 is read only while "look up" is up, X2 from
+  then until "look left" passes. Under the claim the mouse moved no stick: X2 = Y2 = 0, never passes. The
+  third camera (0x97B70/0x97BE4) and the ring max 0x196508 are not called at all here (probe tallies).
+- Second half (m27-g1, the tee alone): the tutorial locks the free camera through D+0x270, the stick axes
+  it switched off (bit 0 x, bit 1 y; func_0007ACE4 zeroes them inside the manual branch, after 0x7AD94):
+  both off while a prompt comes up, x off during "look up", both off after it, y off during "look left",
+  none from "look right" on. The direct path writes the target itself and ignored that: after "look up"
+  passed it kept turning to pitch -1.12 (a controller stops at -0.25), and "look left" then swept the sky
+  and never passed although X2 was -1 for 3 s. Data breakpoints on D+0x1D0/0x1E4/0x1E8/0x1C0 (m27-diag2):
+  only the camera's own code reads them (D = 0x4961B5E0 in 4 of 5 runs).
+- Fix. Toolkit (cellPad, "the tee", provider 2): the mouse stays the right stick for the whole game (the
+  stick-mode path with its own share of the motion), so X2/Y2, pad+0xB0 ("right stick last deflected",
+  written by 0x1963DC) and the magnitude ring see it; the title's camera takes its own share and hides the
+  mouse's axes from its own stick read (cellPad_host_mouse_stick_axes, latched per packet cellPadGetData
+  hands out) -- and a centred companion axis with them: the game normalises the stick as a whole, a centred
+  axis next to a full one reads ~0.004 and that blocked the epsilon stick (m27-g1: arg 0x13, no eps).
+  PS3_MOUSE_TEE=0 = the old claim. Title: provider 2; hook_cam_stick zeroes those axes at the free (lr
+  0x7E53C) and aim (lr 0x98CB0) stick reads; hook_free_cam drops the owed turn on an axis D+0x270 switched
+  off, as for a stick.
+- Gates: m27-g1b = tools\fast_combat.steps with every camera move (up, up, left, right, up) made by the
+  synthetic mouse, direct mode, default settings: look up / left / right pass, the route goes on to the aim, the
+  walk and the second aim as the controller route. m27-g2 = mouse-t5 again (city save, flicks and drags, direct
+  then stick): free 0.000800 rad/count, aim 0.0004228, the 4000-count flicks -1.53376 / +2.82747 at the limits
+  (t5: -1.53375 / +2.82747), stick mode as t5. m27-g3 = the controller fight route: complete, same shots as
+  mouse-t6, 0 errors, 25855 camera frames, 0 mouse turns.
+- #27b (black blotches on Cole's face, a player's screenshot): the same frame here (the bus cutscene,
+  fast_combat anchor + 7.1 s) is clean on the RTX 2070 Super, with the player defaults (1080p + extras,
+  m27-probe2 shot_f71) and with the test defaults (720p PS3 look, m27-probe shot_a05/a08).
+- Probe: PS3_MOUSE_PROBE=1 now also prints "[mouse] reads" (a tally a second): camera-stick reads by caller
+  lr / stick / |x|+|y| before the hiding; ring-max calls (arg 100, the result); free camera frames by bits
+  (1 manual, 2 mouse camera on, 4 epsilon, 0x10 D+0x1A8, 0x20/0x40 D+0x270 x/y off, <<8 state byte D+0x1E0);
+  aim frames (1 manual, 2 on).
+- Test timing: fast_combat's anchor (the cityfalls subtitle + 17.9 s) is ~14.3 s BEFORE the "look up" prompt;
+  "look left" from ~w17, "look right" ~w28; Cole's face close-up w5-8.5. Gotcha: the cheats timeline
+  (PS3_CHEATS_AT) runs from Cole's per-frame hook, which does not run while these prompts are up -- switches
+  timed there never fire (m27-probe2).
+
 ## Saved spots: Save this spot / Go to saved spot (2026-11-11 night, inf2-cheats; static only, NOT run)
 
 Sami: load a save and jump to an exact place (the cathedral spire slow view, x -43695 y -22816 z 7786) to
