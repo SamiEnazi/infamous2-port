@@ -41,15 +41,15 @@ function Invoke-Native([scriptblock]$Cmd) {
     try { & $Cmd 2>&1 | ForEach-Object { "    $_" } } finally { $ErrorActionPreference = $eap }
 }
 function Copy-Tree([string]$Src, [string]$Dst, [string]$What) {
-    if (Test-Path $Dst) {
-        $i = Get-Item $Dst -Force
+    if (Test-Path -LiteralPath $Dst) {
+        $i = Get-Item -LiteralPath $Dst -Force
         if ($i.LinkType -eq "Junction") { cmd /c rmdir "$Dst" | Out-Null }   # an older Setup linked it
     }
     "  copying $What"
     Invoke-Native { robocopy $Src $Dst /E /NFL /NDL /NJH /NJS /NP } | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "copying $Src failed (robocopy $LASTEXITCODE)" }
 }
-$Disc = (Resolve-Path $Disc).Path.TrimEnd('\'); $Rpcs3 = (Resolve-Path $Rpcs3).Path.TrimEnd('\')
+$Disc = (Resolve-Path -LiteralPath $Disc).Path.TrimEnd('\'); $Rpcs3 = (Resolve-Path -LiteralPath $Rpcs3).Path.TrimEnd('\')
 # The disc folder given as a junction (e.g. this port's own game\disc from an earlier Setup): use
 # the folder it points to, or step 3 would replace the link with a link to itself.
 $di = Get-Item -LiteralPath $Disc -Force
@@ -60,7 +60,7 @@ Step 1 "checking"
 # submodules any more). A git clone has them with LF line ends too (.gitattributes: the patches in
 # patches\port are LF, as base\'s files are).
 foreach ($sub in @(@("engine", "CMakeLists.txt"), @("base", "infamous2-lle\CMakeLists.txt"))) {
-    if (-not (Test-Path (Join-Path (Join-Path $root $sub[0]) $sub[1]))) {
+    if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $root $sub[0]) $sub[1]))) {
         throw "$($sub[0])\$($sub[1]) is missing: download the port again with Setup.exe (or 'git clone')"
     }
     "  $($sub[0]): ok"
@@ -100,7 +100,7 @@ if ($rows | Where-Object { $_.Ok -eq $false }) { throw "fix the MISS items first
 $title = (Read-Sfo (Join-Path $Disc "PS3_GAME\PARAM.SFO"))["TITLE_ID"]
 $cfgPath = Join-Path $root "config.local.json"
 $cfg = [ordered]@{}
-if (Test-Path $cfgPath) { (Get-Content $cfgPath -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } }
+if (Test-Path -LiteralPath $cfgPath) { (Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json).psobject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } }
 $cfg["rpcs3"] = $Rpcs3
 [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json))
 
@@ -113,13 +113,14 @@ Step 3 "your game: the disc linked, the update, firmware files and HDD install c
 $game = Join-Path $root "game"
 New-Item -ItemType Directory -Force (Join-Path $game "dev_hdd0\game"), (Join-Path $game "gamedata") | Out-Null
 $discLink = Join-Path $game "disc"
-if (Test-Path $discLink) {
-    $i = Get-Item $discLink -Force
+if (Test-Path -LiteralPath $discLink) {
+    $i = Get-Item -LiteralPath $discLink -Force
     if ($i.LinkType -eq "Junction" -and -not (@($i.Target) -contains $Disc)) { cmd /c rmdir "$discLink" | Out-Null }
 }
-if (-not (Test-Path $discLink)) {
+if (-not (Test-Path -LiteralPath $discLink)) {
     # GitHub issue #2: on FAT32/exFAT or a network drive Windows says only "Incorrect function"
-    try { New-Item -ItemType Junction -Path $discLink -Target $Disc -ErrorAction Stop | Out-Null }
+    # mklink, not New-Item: Windows PowerShell 5.1 reads [ ] in -Target as a wildcard ("inFamous 2 [BCES01229]", GitHub #19)
+    try { $mk = cmd /c mklink /J "$discLink" "$Disc" 2>&1; if ($LASTEXITCODE -or -not (Test-Path -LiteralPath $discLink)) { throw ($mk -join " ") } }
     catch {
         throw ("could not link your game folder into the port ($($_.Exception.Message)). The port's folder must be on a " +
                "local NTFS drive and your game folder on a drive in this PC: put Setup.exe in a folder on your internal drive, " +
@@ -133,25 +134,25 @@ Copy-Tree (Join-Path $Rpcs3 "dev_flash") (Join-Path $game "dev_flash") "the PS3 
 # one, else the port's first boot does the install itself.
 $inst = Join-Path $Rpcs3 "dev_hdd0\game\${title}_INSTALL"
 $instDst = Join-Path $game "dev_hdd0\game\${title}_INSTALL"
-if ((Test-Path $inst) -and -not (Test-Path $instDst)) { Copy-Tree $inst $instDst "the game's HDD install (2.4 GB)" }
-elseif (-not (Test-Path $instDst)) { "  note: no ${title}_INSTALL in RPCS3 -- the port's first boot installs it (if that fails: start the game once in RPCS3)" }
+if ((Test-Path -LiteralPath $inst) -and -not (Test-Path -LiteralPath $instDst)) { Copy-Tree $inst $instDst "the game's HDD install (2.4 GB)" }
+elseif (-not (Test-Path -LiteralPath $instDst)) { "  note: no ${title}_INSTALL in RPCS3 -- the port's first boot installs it (if that fails: start the game once in RPCS3)" }
 
 Step 4 "decrypting the game's 1.04 EBOOT with RPCS3"
 $eb = Join-Path $root "eboot"
 New-Item -ItemType Directory -Force $eb | Out-Null
 $elf = Join-Path $eb "EBOOT_upd104.elf"
-if (-not (Test-Path $elf)) {
+if (-not (Test-Path -LiteralPath $elf)) {
     if (Get-Process rpcs3 -ErrorAction SilentlyContinue) { throw "close RPCS3 first (it decrypts one file per start)" }
     $bin = Join-Path $eb "EBOOT_upd104.BIN"
-    Copy-Item (Join-Path $Rpcs3 "dev_hdd0\game\$title\USRDIR\EBOOT.BIN") $bin -Force
+    Copy-Item -LiteralPath (Join-Path $Rpcs3 "dev_hdd0\game\$title\USRDIR\EBOOT.BIN") -Destination $bin -Force
     Start-Process -FilePath (Join-Path $Rpcs3 "rpcs3.exe") -ArgumentList "--decrypt", "`"$bin`"" -Wait -WindowStyle Hidden
-    if (-not (Test-Path $elf)) { throw "RPCS3 did not write $elf (is the firmware installed in RPCS3?)" }
+    if (-not (Test-Path -LiteralPath $elf)) { throw "RPCS3 did not write $elf (is the firmware installed in RPCS3?)" }
 }
 "  $elf"
 
 Step 5 "Python tools (work\venv)"
 $venvPy = Join-Path $root "work\venv\Scripts\python.exe"
-if (Test-Path $venvPy) {
+if (Test-Path -LiteralPath $venvPy) {
     # a venv whose base Python was deleted (an earlier cleanup) does not start, and one a kept build made with
     # another Python version has its packages in the wrong place: make it again
     $pyMm = "$(Invoke-Native { & $py -c "import sys; print('%d.%d' % sys.version_info[:2])" } | Select-Object -Last 1)".Trim()
@@ -161,7 +162,7 @@ if (Test-Path $venvPy) {
     Invoke-Native { & $venvPy -c "import sys" } | Out-Null
     if ($LASTEXITCODE -or ($pyMm -match '^\d+\.\d+$' -and $venvMm -and $venvMm -ne $pyMm)) { cmd /c rd /s /q (Join-Path $root "work\venv") | Out-Null }
 }
-if (-not (Test-Path $venvPy)) {
+if (-not (Test-Path -LiteralPath $venvPy)) {
     Invoke-Native { & $py -m venv (Join-Path $root "work\venv") }
     if ($LASTEXITCODE) { throw "python -m venv failed" }
 }
@@ -170,16 +171,16 @@ if ($LASTEXITCODE) { throw "pip install failed" }
 
 Step 6 "SDL2, Vulkan headers and glslang (download, then build glslang: a few minutes)"
 & (Join-Path $PSScriptRoot "fetch_deps.ps1")
-if (-not (Test-Path (Join-Path $root "deps\SDL2-2.30.10\cmake"))) { throw "fetching the libraries failed (see above)" }
+if (-not (Test-Path -LiteralPath (Join-Path $root "deps\SDL2-2.30.10\cmake"))) { throw "fetching the libraries failed (see above)" }
 # built again when its sources are another version than the kept build (deps\glslang-install\.source)
 $gSrc = Join-Path $root "deps\glslang-src\.source"
 $gMark = Join-Path $root "deps\glslang-install\.source"
-$gWant = if (Test-Path $gSrc) { (Get-Content $gSrc -Raw).Trim() } else { "" }
-$gHave = if (Test-Path $gMark) { (Get-Content $gMark -Raw).Trim() } else { "" }
-if (-not (Test-Path (Join-Path $root "deps\glslang-install\lib\cmake\glslang")) -or ($gWant -and $gHave -and $gWant -ne $gHave)) {
+$gWant = if (Test-Path -LiteralPath $gSrc) { (Get-Content -LiteralPath $gSrc -Raw).Trim() } else { "" }
+$gHave = if (Test-Path -LiteralPath $gMark) { (Get-Content -LiteralPath $gMark -Raw).Trim() } else { "" }
+if (-not (Test-Path -LiteralPath (Join-Path $root "deps\glslang-install\lib\cmake\glslang")) -or ($gWant -and $gHave -and $gWant -ne $gHave)) {
     Invoke-Native { cmd /c "`"$(Join-Path $PSScriptRoot 'build_deps.cmd')`"" }
     if ($LASTEXITCODE) { throw "building glslang failed" }
-    if ($gWant) { Set-Content -Path $gMark -Value $gWant }
+    if ($gWant) { Set-Content -LiteralPath $gMark -Value $gWant }
 }
 
 Step 7 "the exe's icon (from your copy's ICON0.PNG)"
@@ -192,7 +193,7 @@ $env:PORT_LIFT_REUSE = "1"
 Invoke-Native { & $venvPy -I (Join-Path $PSScriptRoot "rebuild_win.py") }
 if ($LASTEXITCODE) { throw "the build failed: see work\logs\ (python -I tools\build_errors.py work\logs\compile.log)" }
 $exe = Join-Path $root "work\port\build\Infamous2Recomp.exe"
-if (-not (Test-Path $exe)) { throw "no $exe after the build" }
+if (-not (Test-Path -LiteralPath $exe)) { throw "no $exe after the build" }
 
 Step 9 "desktop shortcut"
 if (-not $NoShortcut) {

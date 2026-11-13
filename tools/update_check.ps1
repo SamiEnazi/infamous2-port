@@ -303,7 +303,7 @@ function Get-UpdateSetup {
         $b = Join-Path $setupDir "src"
         if (Test-Path -LiteralPath $b) { cmd /c rd /s /q "$b" | Out-Null }
         New-Item -ItemType Directory -Force (Join-Path $b "tools\setup_exe") | Out-Null
-        Copy-Item -Path (Join-Path $src "*") -Destination (Join-Path $b "tools\setup_exe") -Recurse -Force
+        Get-ChildItem -LiteralPath $src | Copy-Item -Destination (Join-Path $b "tools\setup_exe") -Recurse -Force
         if (Test-Path -LiteralPath $ico) { Copy-Item -LiteralPath $ico -Destination (Join-Path $b "tools") }
         Write-Host "  building Setup.exe from tools\setup_exe (the C# compiler that comes with Windows)"
         $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"

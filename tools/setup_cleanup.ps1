@@ -16,7 +16,7 @@
 param([switch]$Force, [switch]$KeepBuildCache)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-if ((Test-Path (Join-Path $root "PLAN.md")) -and -not $Force) { "  not cleaning up: this is the development folder (it has PLAN.md)"; exit 0 }
+if ((Test-Path -LiteralPath (Join-Path $root "PLAN.md")) -and -not $Force) { "  not cleaning up: this is the development folder (it has PLAN.md)"; exit 0 }
 
 # Bytes under a folder, without following links (game\disc is a junction to the player's disc).
 function Get-TreeSize([string]$Path) {
@@ -50,7 +50,7 @@ if ($KeepBuildCache) {
     foreach ($d in "tools-cache\downloads", "tools-cache\msvc.unpack", "tools-cache\sdk.unpack", "deps\sdl2-dl", "deps\glslang-build", "work\port-keep") {
         Remove-Tree (Join-Path $root $d)
     }
-    foreach ($l in Get-ChildItem (Join-Path $root "work\logs") -Filter "compile*.log" -ErrorAction SilentlyContinue) {
+    foreach ($l in Get-ChildItem -LiteralPath (Join-Path $root "work\logs") -Filter "compile*.log" -ErrorAction SilentlyContinue) {
         try { Remove-Item -LiteralPath $l.FullName -Force -ErrorAction Stop } catch { "  could not delete $($l.Name)" }
     }
     $kept = 0L
@@ -65,7 +65,7 @@ if ($KeepBuildCache) {
 }
 "  cleaning up: the build tools and what only the build needed"
 foreach ($d in "tools-cache", "deps", "work\venv", "build") { Remove-Tree (Join-Path $root $d) }
-foreach ($l in Get-ChildItem (Join-Path $root "work\logs") -Filter "compile*.log" -ErrorAction SilentlyContinue) {
+foreach ($l in Get-ChildItem -LiteralPath (Join-Path $root "work\logs") -Filter "compile*.log" -ErrorAction SilentlyContinue) {
     try { Remove-Item -LiteralPath $l.FullName -Force -ErrorAction Stop } catch { "  could not delete $($l.Name)" }
 }
 
@@ -77,10 +77,10 @@ if (Test-Path -LiteralPath (Join-Path $bld "Infamous2Recomp.exe")) {
     $save = Join-Path $root "work\port-keep"
     Remove-Tree $save
     New-Item -ItemType Directory -Force $save | Out-Null
-    foreach ($f in $keep) { if (Test-Path (Join-Path $bld $f)) { Move-Item (Join-Path $bld $f) $save } }
+    foreach ($f in $keep) { if (Test-Path -LiteralPath (Join-Path $bld $f)) { Move-Item -LiteralPath (Join-Path $bld $f) $save } }
     Remove-Tree $port
     New-Item -ItemType Directory -Force $bld | Out-Null
-    foreach ($f in $keep) { if (Test-Path (Join-Path $save $f)) { Move-Item (Join-Path $save $f) $bld } }
+    foreach ($f in $keep) { if (Test-Path -LiteralPath (Join-Path $save $f)) { Move-Item -LiteralPath (Join-Path $save $f) $bld } }
     Remove-Tree $save
 } else { Remove-Tree $port }
 

@@ -41,13 +41,13 @@ function Get-PortTool([string]$Key) {
     $v = [Environment]::GetEnvironmentVariable("PORT_" + $Key.ToUpper())
     if (-not $v -and $env:PORT_ONLY_CACHE -ne "1") {
         $cfg = Join-Path $root "config.local.json"
-        if (Test-Path $cfg) { try { $v = (Get-Content $cfg -Raw | ConvertFrom-Json).$Key } catch {} }
+        if (Test-Path -LiteralPath $cfg) { try { $v = (Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).$Key } catch {} }
     }
     if (-not $v) {
         $cache = @{ python = "python\python.exe"; cmake = "cmake\bin\cmake.exe"; ninja = "ninja\ninja.exe"; llvm = "llvm"; msvc = "msvc"; sdk = "sdk" }[$Key]
         if ($cache) {
             $dir = Join-Path (Join-Path $root "tools-cache") ($cache -split '\\')[0]
-            if (Test-Path (Join-Path $dir ".ready")) { $v = Join-Path (Join-Path $root "tools-cache") $cache }
+            if (Test-Path -LiteralPath (Join-Path $dir ".ready")) { $v = Join-Path (Join-Path $root "tools-cache") $cache }
         }
     }
     $v
@@ -76,10 +76,10 @@ function Save-Url([string]$Url, [string]$Out, [string]$What, [string]$Sha256 = "
                 }
             } finally { $fs.Close(); $in.Close(); $resp.Close() }
             if ($Sha256) {
-                $h = (Get-FileHash "$Out.part" -Algorithm SHA256).Hash
-                if ($h -ne $Sha256) { Remove-Item "$Out.part"; throw "$What has the wrong SHA-256 ($h)" }
+                $h = (Get-FileHash -LiteralPath "$Out.part" -Algorithm SHA256).Hash
+                if ($h -ne $Sha256) { Remove-Item -LiteralPath "$Out.part"; throw "$What has the wrong SHA-256 ($h)" }
             }
-            Move-Item -Force "$Out.part" $Out
+            Move-Item -Force -LiteralPath "$Out.part" -Destination $Out
             return
         } catch {
             if ($try -eq 2) { throw "downloading $What failed: $($_.Exception.Message). Check the internet connection and try again." }
@@ -154,7 +154,7 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     Add $avx2 "CPU with AVX2" $(if ($avx2) { "yes" } else { "the port is built for AVX2 CPUs (Intel 4th gen / AMD Ryzen or newer)" })
     $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
     Add $(if ($ram -ge 16) { $true } else { $null }) "Memory" "$ram GB$(if ($ram -lt 16) { ' (16 GB or more recommended: the build is large)' })"
-    $drive = (Get-Item $root).PSDrive
+    $drive = (Get-Item -LiteralPath $root).PSDrive
     $free = [math]::Round($drive.Free / 1GB)
     Add $(if ($free -ge 30) { $true } else { $null }) "Free disk space on $($drive.Name):" "$free GB (the build needs about 15 GB while it runs, about 7 GB after: 4 GB of game files, 3 GB of build files kept for quick updates)"
     # The port's folder must hold a junction (game\disc -> your game folder): a local NTFS or ReFS
@@ -162,7 +162,7 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     # function" when step 3 makes the link (GitHub issue #2) -- say so before 1.3 GB of downloads.
     $fsProblem = Get-DriveProblem $root
     Add $(if (-not $fsProblem) { $true } else { $false }) "Port folder's drive" $(if (-not $fsProblem) { "can hold the link to your game folder" } else { "the port's folder is on $fsProblem, which cannot hold the link to your game folder. Put Setup.exe in a folder on your PC's internal drive (NTFS), for example C:\Games\inFAMOUS2, and run it again" })
-    $vk = Test-Path (Join-Path $env:WINDIR "System32\vulkan-1.dll")
+    $vk = Test-Path -LiteralPath (Join-Path $env:WINDIR "System32\vulkan-1.dll")
     Add $vk "Vulkan graphics driver" $(if ($vk) { "found" } else { "update your graphics driver (NVIDIA, AMD or Intel)" })
 
     # --- the build tools: downloaded into tools-cache\ during the build (tools\fetch_tools.ps1) and
@@ -183,13 +183,13 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     # a game kept as an .iso (players' comments 2026-11-13): the port needs the files, not the image
     $iso = $null
     if ($Disc -and (Test-Path -LiteralPath $Disc -PathType Leaf) -and $Disc -match '\.iso$') { $iso = $Disc }
-    elseif ($Disc -and (Test-Path -LiteralPath $Disc -PathType Container) -and -not (Test-Path (Join-Path $Disc "PS3_GAME\PARAM.SFO"))) {
+    elseif ($Disc -and (Test-Path -LiteralPath $Disc -PathType Container) -and -not (Test-Path -LiteralPath (Join-Path $Disc "PS3_GAME\PARAM.SFO"))) {
         $iso = Get-ChildItem -LiteralPath $Disc -Filter *.iso -File -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
     }
     if (-not $Disc) { Add $false "Game disc folder" "choose the folder that holds PS3_GAME" }
     elseif ($iso) { Add $false "Game disc folder" "your game is an .iso file ($iso). Extract it into a folder first (7-Zip can open it: right-click > 7-Zip > Extract to), then choose that folder: the one with PS3_GAME in it" }
-    elseif (-not (Test-Path (Join-Path $Disc "PS3_GAME\PARAM.SFO"))) {
-        $deeper = Get-ChildItem -LiteralPath $Disc -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName "PS3_GAME\PARAM.SFO") } | Select-Object -First 1 -ExpandProperty FullName
+    elseif (-not (Test-Path -LiteralPath (Join-Path $Disc "PS3_GAME\PARAM.SFO"))) {
+        $deeper = Get-ChildItem -LiteralPath $Disc -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "PS3_GAME\PARAM.SFO") } | Select-Object -First 1 -ExpandProperty FullName
         Add $false "Game disc folder" $(if ($deeper) { "PS3_GAME is one folder deeper: choose $deeper" } else { "no PS3_GAME folder in ${Disc}: choose the folder that has PS3_GAME in it (with PARAM.SFO inside PS3_GAME)" })
     }
     elseif ((Get-DriveProblem $Disc) -eq "a network drive") {
@@ -208,19 +208,19 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
         }
     }
     if (-not $Rpcs3) { Add $false "RPCS3 folder" "choose the folder that holds rpcs3.exe" }
-    elseif (-not (Test-Path (Join-Path $Rpcs3 "rpcs3.exe"))) { Add $false "RPCS3 folder" "no rpcs3.exe in $Rpcs3" }
+    elseif (-not (Test-Path -LiteralPath (Join-Path $Rpcs3 "rpcs3.exe"))) { Add $false "RPCS3 folder" "no rpcs3.exe in $Rpcs3" }
     else {
         Add $true "RPCS3" $Rpcs3
-        $fw = Test-Path (Join-Path $Rpcs3 "dev_flash\sys\external\liblv2.sprx")
+        $fw = Test-Path -LiteralPath (Join-Path $Rpcs3 "dev_flash\sys\external\liblv2.sprx")
         Add $fw "PS3 firmware in RPCS3" $(if ($fw) { "installed" } else { "install it in RPCS3: File > Install Firmware (PS3UPDAT.PUP from playstation.com)" })
         if ($title) {
             $upd = Join-Path $Rpcs3 "dev_hdd0\game\$title"
             $ver = $null
-            if (Test-Path (Join-Path $upd "PARAM.SFO")) { $ver = (Read-Sfo (Join-Path $upd "PARAM.SFO"))["APP_VER"] }
+            if (Test-Path -LiteralPath (Join-Path $upd "PARAM.SFO")) { $ver = (Read-Sfo (Join-Path $upd "PARAM.SFO"))["APP_VER"] }
             # The digital (PSN) game is its own folder in RPCS3, and its last version, 01.03, carries the
             # same code as the discs' 1.04 update (RPCS3 lists them under one PPU hash): no update to install.
             $digital = $title -like "NP*"
-            $ok = ($ver -eq "01.04" -or ($digital -and $ver -eq "01.03")) -and (Test-Path (Join-Path $upd "USRDIR\EBOOT.BIN"))
+            $ok = ($ver -eq "01.04" -or ($digital -and $ver -eq "01.03")) -and (Test-Path -LiteralPath (Join-Path $upd "USRDIR\EBOOT.BIN"))
             if ($digital) {
                 Add $ok "Digital game in RPCS3" $(if ($ok) { $upd } elseif ($ver) { "found version $ver in $upd; this port needs 01.03" } else { "not installed: install the game's package and its license in RPCS3 (File > Install Packages/Raps/Edats)" })
                 if ($ok -and $Disc) {

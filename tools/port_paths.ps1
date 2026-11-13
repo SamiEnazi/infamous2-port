@@ -7,7 +7,7 @@ function Get-PortPath([string]$Key, [switch]$Optional) {
     $v = if ($envName) { [Environment]::GetEnvironmentVariable($envName) } else { $null }
     if (-not $v) {
         $cfg = Join-Path (Split-Path -Parent $PSScriptRoot) "config.local.json"
-        if (Test-Path $cfg) { $v = (Get-Content $cfg -Raw | ConvertFrom-Json).$Key }
+        if (Test-Path -LiteralPath $cfg) { $v = (Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).$Key }
     }
     if (-not $v -and -not $Optional) {
         throw "no '$Key' path set: run Setup.cmd (or set $envName, or `"$Key`" in config.local.json)"
@@ -19,6 +19,6 @@ function Get-PortPath([string]$Key, [switch]$Optional) {
 # game\dev_flash (then RPCS3 is no longer needed), else RPCS3's own dev_flash.
 function Get-DevFlash {
     $own = Join-Path (Split-Path -Parent $PSScriptRoot) "game\dev_flash"
-    if (Test-Path (Join-Path $own "sys")) { return $own }
+    if (Test-Path -LiteralPath (Join-Path $own "sys")) { return $own }
     Join-Path (Get-PortPath rpcs3) "dev_flash"
 }

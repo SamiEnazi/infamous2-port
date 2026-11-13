@@ -57,7 +57,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "port_paths.ps1")   # Get-PortPath rpcs3 (config.local.json, written by Setup.cmd)
 if (-not $Exe) { $Exe = Join-Path $root "work\port\build\Infamous2Recomp.exe" }
-if (-not (Test-Path $Exe)) { throw "not built yet: $Exe (python -I tools\rebuild_win.py)" }
+if (-not (Test-Path -LiteralPath $Exe)) { throw "not built yet: $Exe (python -I tools\rebuild_win.py)" }
 $game = Join-Path $root "game"
 
 # --- your game folder (GitHub issue #13) ------------------------------------------------
@@ -80,7 +80,7 @@ if ($discItem -and $discItem.LinkType -eq "Junction" -and -not (Test-Path -Liter
     }
     if ($found) {
         cmd /c rmdir "$discLink" | Out-Null                          # the link only, never your game
-        New-Item -ItemType Junction -Path $discLink -Target $found | Out-Null
+        cmd /c mklink /J "$discLink" "$found" | Out-Null              # not New-Item: [ ] in -Target are a wildcard there
         "Your game folder moved (it was $old): game\disc links to $found now."
     } else {
         "Your game folder is not where it was: game\disc still points to $old, and that folder is gone."
@@ -135,19 +135,19 @@ New-Item -ItemType Directory -Force $out, "$game\gamedata" | Out-Null
 $saves = Join-Path $game "gamedata\dev_hdd0\home\00000001\savedata"
 $bk = Join-Path $root "saves-backup"
 try {
-    $now = @(Get-ChildItem $saves -Recurse -File -ErrorAction SilentlyContinue)
+    $now = @(Get-ChildItem -LiteralPath $saves -Recurse -File -ErrorAction SilentlyContinue)
     if ($now.Count) {
         $sig = ($now | Sort-Object FullName | ForEach-Object { "{0}|{1}|{2}" -f $_.FullName.Substring($saves.Length), $_.Length, $_.LastWriteTimeUtc.Ticks }) -join "`n"
-        $last = Get-ChildItem $bk -Directory -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
-        $lastSig = if ($last -and (Test-Path "$($last.FullName)\files.txt")) { [System.IO.File]::ReadAllText("$($last.FullName)\files.txt") } else { "" }
+        $last = Get-ChildItem -LiteralPath $bk -Directory -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
+        $lastSig = if ($last -and (Test-Path -LiteralPath "$($last.FullName)\files.txt")) { [System.IO.File]::ReadAllText("$($last.FullName)\files.txt") } else { "" }
         if ($sig -ne $lastSig) {
             $dst = Join-Path $bk (Get-Date -Format "yyyyMMdd-HHmmss")
             New-Item -ItemType Directory -Force $dst | Out-Null
-            Copy-Item "$saves\*" $dst -Recurse -Force
+            Get-ChildItem -LiteralPath $saves | Copy-Item -Destination $dst -Recurse -Force
             [System.IO.File]::WriteAllText("$dst\files.txt", $sig)
             "Saves backed up to $dst"
-            Get-ChildItem $bk -Directory | Sort-Object Name -Descending | Select-Object -Skip 20 |
-                ForEach-Object { Remove-Item $_.FullName -Recurse -Force }
+            Get-ChildItem -LiteralPath $bk -Directory | Sort-Object Name -Descending | Select-Object -Skip 20 |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
         }
     }
 } catch { "save backup failed (the game still starts): $_" }
@@ -177,16 +177,16 @@ if ($pyCmd) {
 
 # controls file: input.toml in the project folder (survives rebuilds), first made from the example
 $inputToml = Join-Path $root "input.toml"
-if (-not (Test-Path $inputToml)) {
+if (-not (Test-Path -LiteralPath $inputToml)) {
     $ex = Join-Path $root "engine\docs\input.example.toml"
-    if (Test-Path $ex) { Copy-Item $ex $inputToml; "Made input.toml (your controls) from the example." }
+    if (Test-Path -LiteralPath $ex) { Copy-Item -LiteralPath $ex -Destination $inputToml; "Made input.toml (your controls) from the example." }
 }
 
 # game mods: the "mods" folder (F2 > Mods), made on the first start with a note on what goes in it
 $modsDir = Join-Path $root "mods"
-if (-not (Test-Path $modsDir)) { New-Item -ItemType Directory $modsDir | Out-Null }
+if (-not (Test-Path -LiteralPath $modsDir)) { New-Item -ItemType Directory $modsDir | Out-Null }
 $modsNote = Join-Path $modsDir "README.txt"
-if (-not (Test-Path $modsNote)) {
+if (-not (Test-Path -LiteralPath $modsNote)) {
     Set-Content -LiteralPath $modsNote -Encoding utf8 -Value @(
         "inFAMOUS 2 mods go here: one folder per mod, the folder with the mod's mod.json in it.",
         "",
@@ -232,12 +232,12 @@ $vars = @{
     # 81 -> 60 fps with the extras (lows 58), other views 81-91; F2 > Graphics sets 720p back.
     PS3_OVERLAY_DEFAULTS        = ("PS3RECOMP_FPS_CAP=60;PS3_AUDIO_VOLUME=100;PS3RECOMP_RENDER_SCALE=1.5;PS3RECOMP_SOFT_SHADOWS=2;PS3RECOMP_SSAO=2;" +
                                    "PS3RECOMP_SSAO_STRENGTH=125;PS3RECOMP_LIGHT_DITHER=1;PS3RECOMP_FX_RES=full;PS3RECOMP_SHARPEN=0.1" +
-                                   $(if (Test-Path (Join-Path $root "work\texpacks\fire-smoke-hd")) { ";PS3_MODS=fire-smoke-hd" } else { "" }))
+                                   $(if (Test-Path -LiteralPath (Join-Path $root "work\texpacks\fire-smoke-hd")) { ";PS3_MODS=fire-smoke-hd" } else { "" }))
     # Buttons by position (a Nintendo-layout pad's bottom button is Cross, not Circle), and
     # controller input even when the game window does not have focus: SDL otherwise drops it,
     # and a game started from a console window often starts without focus.
     SDL_GAMECONTROLLER_USE_BUTTON_LABELS = "0"
-    PS3_INPUT_MAP               = $(if (Test-Path $inputToml) { $inputToml } else { "" })
+    PS3_INPUT_MAP               = $(if (Test-Path -LiteralPath $inputToml) { $inputToml } else { "" })
 }
 # portable.txt in the project folder (the sign RecompLauncher and other launchers know): the menu's settings.ini,
 # the mods.ini beside it and the saved spots stay in this folder, as the saves, input.toml and the session logs do.
@@ -271,8 +271,8 @@ if (-not $NoLog) { $vars["PS3RECOMP_PLAYLOG"] = "$out\playlog.tsv" }
 $updDir = Join-Path $root "work\update"
 $updBy = if ($RecordRoute) { "test" }
          elseif ($env:PS3_PORT_LAUNCHER -or $env:RECOMPLAUNCHER_VERSION) { "recomplauncher" }
-         elseif (Test-Path (Join-Path $root ".git")) { "git" }
-         elseif (-not (Test-Path (Join-Path $root "port-version.txt"))) { "none" }
+         elseif (Test-Path -LiteralPath (Join-Path $root ".git")) { "git" }
+         elseif (-not (Test-Path -LiteralPath (Join-Path $root "port-version.txt"))) { "none" }
          else { "" }
 $updAuto = $true
 if (-not $updBy) {
@@ -302,16 +302,16 @@ $lockInfo = Join-Path $root "work\game.lock.owner"
 $qdir = Join-Path $root "work\game.lock.queue"
 New-Item -ItemType Directory -Force $qdir | Out-Null
 $myTicket = Join-Path $qdir ("00000000000000000_{0}.t" -f $PID)
-Set-Content -Path $myTicket -Value "Sami (play.ps1)"
+Set-Content -LiteralPath $myTicket -Value "Sami (play.ps1)"
 while (-not $lockFs) {
     try { $lockFs = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
     catch {
-        $o = if (Test-Path $lockInfo) { Get-Content $lockInfo -ErrorAction SilentlyContinue } else { "?" }
+        $o = if (Test-Path -LiteralPath $lockInfo) { Get-Content -LiteralPath $lockInfo -ErrorAction SilentlyContinue } else { "?" }
         "A test run is going ($o) -- the game starts when it ends (a few minutes)..."
         Start-Sleep -Seconds 5
     }
 }
-Set-Content -Path $lockInfo -Value ("Sami playing since {0:HH:mm:ss}" -f (Get-Date))
+Set-Content -LiteralPath $lockInfo -Value ("Sami playing since {0:HH:mm:ss}" -f (Get-Date))
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $Exe
@@ -330,12 +330,12 @@ if ($RecordRoute) {
     $rdir = Join-Path $root "work\routes"
     New-Item -ItemType Directory -Force $rdir | Out-Null
     $rgd = Join-Path $rdir "$RecordRoute.gamedata"; $rdrv = Join-Path $rdir "$RecordRoute.driver"
-    foreach ($d in $rgd, $rdrv) { if (Test-Path $d) { Remove-Item -Recurse -Force $d } }
+    foreach ($d in $rgd, $rdrv) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force } }
     New-Item -ItemType Directory -Force $rdrv | Out-Null
-    if ($From -eq "city") { Copy-Item -Recurse (Join-Path $root "work\saves\first-save\gamedata") $rgd }
+    if ($From -eq "city") { Copy-Item -Recurse -LiteralPath (Join-Path $root "work\saves\first-save\gamedata") -Destination $rgd }
     else { New-Item -ItemType Directory -Force "$rgd\dev_hdd0\home\00000001\savedata" | Out-Null }   # opening: no save, a new game
     $fm = Join-Path $root "work\fastmovies"
-    if (-not (Test-Path "$fm\disc\PS3_GAME\USRDIR\movies\cutscene")) { & powershell -NoProfile -File (Join-Path $PSScriptRoot "make_fastmovies.ps1") | Out-Host }
+    if (-not (Test-Path -LiteralPath "$fm\disc\PS3_GAME\USRDIR\movies\cutscene")) { & powershell -NoProfile -File (Join-Path $PSScriptRoot "make_fastmovies.ps1") | Out-Host }
     $vars["PS3_GAMEDATA_ROOT"] = $rgd
     $vars["PS3_VFS_ROOT"] = "$fm\disc"; $vars["PS3_HDD0_ROOT"] = "$fm\dev_hdd0"
     $vars["PS3_PAD_RECORD"] = Join-Path $rdir "$RecordRoute.pad"
@@ -402,13 +402,13 @@ do {
         "Restarting inFAMOUS 2 for the new mods (restart $($run - 1)): it comes back at the title screen -- choose Continue to go on from your last save."
         $mark = "=== {0:HH:mm:ss} restart {1} (F2 > Mods: Restart to apply) ===" -f (Get-Date), ($run - 1)
         $so.WriteLine($mark); $so.Flush(); $se.WriteLine($mark); $se.Flush()
-        if (-not $NoLog -and (Test-Path "$out\playlog.tsv")) { Move-Item -Force "$out\playlog.tsv" "$out\playlog.$($run - 1).tsv" }
+        if (-not $NoLog -and (Test-Path -LiteralPath "$out\playlog.tsv")) { Move-Item -Force -LiteralPath "$out\playlog.tsv" -Destination "$out\playlog.$($run - 1).tsv" }
         # the hitch catcher's stacks of that run's frozen frames (same clock as its playlog)
-        if (-not $NoLog -and (Test-Path "$out\hitches.tsv")) { Move-Item -Force "$out\hitches.tsv" "$out\hitches.$($run - 1).tsv" }
+        if (-not $NoLog -and (Test-Path -LiteralPath "$out\hitches.tsv")) { Move-Item -Force -LiteralPath "$out\hitches.tsv" -Destination "$out\hitches.$($run - 1).tsv" }
     }
     $p = [System.Diagnostics.Process]::Start($psi)
     if ($RecordRoute) {
-        "" | Set-Content (Join-Path $rdrv "live.tsv")
+        "" | Set-Content -LiteralPath (Join-Path $rdrv "live.tsv")
         $routeDrv = Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile', '-File', (Join-Path $PSScriptRoot "fast_driver.ps1"),
             '-Steps', (Join-Path $PSScriptRoot $(if ($From -eq 'opening') { 'record_route_opening.steps' } else { 'record_route.steps' })), '-Rec', $rdrv, '-GamePid', $p.Id,
             '-LiveLog', $(if ($From -eq 'opening') { "$out\stderr.log" } else { (Join-Path $rdrv "live.tsv") })   # opening: the session's live stderr (cutscene events)
@@ -444,7 +444,7 @@ if ($updWatch) { try { [void]$updWatch.PS.BeginStop($null, $null) } catch {} }
 if ($tw) { $tw.Close() }
 $so.Close(); $se.Close()
 $lockFs.Close()   # agents may run the game again
-Remove-Item $myTicket -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $myTicket -ErrorAction SilentlyContinue
 "Exited (code 0x{0:X}) after {1:F0} min. Logs: $out" -f $p.ExitCode, ((Get-Date) - $t0).TotalMinutes
 # F2 > Update ("Update when I quit" / "Quit and update now"): the game ended with 0x55504454 ("UPDT").
 # Setup.exe --update installs the new version in its own window (the saves, settings, mods and
@@ -452,7 +452,7 @@ Remove-Item $myTicket -ErrorAction SilentlyContinue
 if ($p.ExitCode -eq 0x55504454 -and $vars["PS3_UPDATE_DIR"]) {
     try { & (Join-Path $PSScriptRoot "update_check.ps1") -Root $root -StartUpdate } catch { "Could not start the update: $_ (run Setup.exe in $root)" }
 }
-if (-not $NoLog -and (Test-Path "$out\playlog.tsv")) {
+if (-not $NoLog -and (Test-Path -LiteralPath "$out\playlog.tsv")) {
     # the cap the session ended at: the menu can change it while playing
     $cap = 60
     $capLine = Select-String -Path "$out\stderr.log" -Pattern 'frame cap (off|[\d.]+)' -ErrorAction SilentlyContinue | Select-Object -Last 1
