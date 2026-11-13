@@ -393,6 +393,37 @@ namespace Inf2Setup
             return stderr != null && (stderr.Contains("PSSecurityException") || stderr.Contains("UnauthorizedAccess"));
         }
 
+        // The fix the player would do by hand (Properties > Unblock), done for the port's own folder only: the
+        // "downloaded from the internet" mark is the file's Zone.Identifier stream. Folders that hold no files
+        // from the ZIP (game\ with its links to the player's disc, the build tools, builds, git) are not entered,
+        // nor any linked folder. Returns how many files lost the mark.
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool DeleteFileW(string path);
+        public static int UnblockTree(string root)
+        {
+            int n = 0;
+            Stack<string> dirs = new Stack<string>();
+            dirs.Push(root);
+            while (dirs.Count > 0)
+            {
+                string d = dirs.Pop();
+                try
+                {
+                    foreach (string f in Directory.GetFiles(d))
+                        if (DeleteFileW(f + ":Zone.Identifier")) n++;
+                    foreach (string sub in Directory.GetDirectories(d))
+                    {
+                        string name = Path.GetFileName(sub).ToLowerInvariant();
+                        if (d == root && (name == "game" || name == "tools-cache" || name == "work" || name == "deps" || name == ".git")) continue;
+                        if (name.StartsWith("build")) continue;
+                        if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) continue;
+                        dirs.Push(sub);
+                    }
+                }
+                catch (Exception) { }
+            }
+            return n;
+        }
+
         public const string BlockedHelp = "Windows marked the port's files as downloaded from the internet, so PowerShell won't run its " +
             "scripts. Right-click the ZIP you downloaded, choose Properties, tick Unblock, press OK and unpack it again " +
             "(or use Setup.exe on its own: it downloads the port itself)";
@@ -909,8 +940,23 @@ namespace Inf2Setup
         // The last Run could not start the scripts because Windows marked them as downloaded (error = BlockedHelp).
         public static volatile bool Blocked;
 
+        // Files Setup unblocked itself (the ZIP was unpacked with Explorer): said once in the log.
+        public static volatile int Unblocked;
+
         // Get-SetupChecks of tools\setup_common.ps1, as JSON (tools\setup_checks.ps1), in a hidden PowerShell.
+        // Scripts refused for the "downloaded" mark: the port folder is unblocked and the checks run once more.
         public static List<Row> Run(string repo, string disc, string rpcs3, out string error)
+        {
+            List<Row> rows = RunOnce(repo, disc, rpcs3, out error);
+            if (Blocked)
+            {
+                int n = Util.UnblockTree(repo);
+                if (n > 0) { Unblocked += n; rows = RunOnce(repo, disc, rpcs3, out error); }
+            }
+            return rows;
+        }
+
+        static List<Row> RunOnce(string repo, string disc, string rpcs3, out string error)
         {
             error = null;
             Blocked = false;
@@ -1583,7 +1629,9 @@ namespace Inf2Setup
                 Log("RPCS3: " + rpcs3);
                 Log("game: " + disc);
                 string err;
+                int before = Checker.Unblocked;
                 List<Row> rows = Checker.Run(dir, disc, rpcs3, out err);
+                if (Checker.Unblocked > before) Log("unblocked " + (Checker.Unblocked - before) + " files Windows had marked as downloaded");
                 if (err != null) return Stop(Checker.Blocked ? ScriptsBlocked : BuildFailed, "the checks could not run: " + err);
                 foreach (Row r in rows) Log(string.Format("  {0,-5} {1}: {2}", r.Ok == true ? "ok" : r.Ok == false ? "MISS" : "note", r.Name, r.Detail));
                 foreach (Row r in rows)
@@ -2557,8 +2605,14 @@ namespace Inf2Setup
             ThreadPool.QueueUserWorkItem(delegate
             {
                 string err;
+                int before = Checker.Unblocked;
                 List<Row> rows = Checker.Run(root, d1, r1, out err);
-                Post(delegate { Checked(rows, err); });
+                int unblocked = Checker.Unblocked - before;
+                Post(delegate
+                {
+                    if (unblocked > 0) AddLog("Windows had marked " + unblocked + " of the port's files as downloaded from the internet: unblocked them");
+                    Checked(rows, err);
+                });
             });
         }
 
