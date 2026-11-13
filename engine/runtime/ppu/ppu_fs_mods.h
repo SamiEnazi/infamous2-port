@@ -293,11 +293,15 @@ struct J {
     int t = 0;   /* 0 null, 1 bool, 2 number, 3 string, 4 array, 5 object */
     std::string s;
     std::vector<J> a;
-    std::vector<std::pair<std::string, J>> o;
+    /* An object's keys and values, in order. Two vectors, not one of pair<string, J>: a pair holding a J
+     * inside J is a cycle GCC 15's C++ library rejects ("incomplete type ... used in type trait expression",
+     * GitHub #24); a vector of J inside J is fine (C++17). */
+    std::vector<std::string> ok;
+    std::vector<J> ov;
     const J* get(const char* k) const
     {
         if (t != 5) return nullptr;
-        for (const auto& kv : o) if (kv.first == k) return &kv.second;
+        for (size_t i = 0; i < ok.size(); i++) if (ok[i] == k) return &ov[i];
         return nullptr;
     }
     /* The Manager's ReadString: the trimmed string, else the fallback. */
@@ -396,7 +400,8 @@ struct JParse {
                 p++;
                 J x;
                 if (!val(x, depth + 1)) return false;
-                v.o.emplace_back(std::move(k), std::move(x));
+                v.ok.push_back(std::move(k));
+                v.ov.push_back(std::move(x));
                 ws();
                 if (p < e && *p == ',') { p++; continue; }
                 if (p < e && *p == '}') { p++; return true; }
