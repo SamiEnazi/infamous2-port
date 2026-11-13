@@ -256,7 +256,7 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 
 | | |
 |---|---|
-| ✅ Tested copies | Played and confirmed by players: the **Europe** disc (**BCES01143**) and the **US** disc (**BCUS98125**), each with the **1.04** update, and the **digital (PSN)** version 01.03. |
+| ✅ Tested copies | Played and confirmed by players: the **Europe** disc (**BCES01143**), the **Turkey** disc (**BCES01229**) and the **US** disc (**BCUS98125**), each with the **1.04** update, and the **digital (PSN)** version 01.03. |
 | 🖥️ Tested PCs | The test PC: i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p to 4K. Players: Windows 10 and 11 PCs, up to an RTX 5070 at 1440p. Linux: Ubuntu 22.04 with an AMD GPU (experimental). |
 | ⚠️ Known issues | • The Beast fight can drop into the 40s.<br>• Views over a big part of the city (the top of the cathedral spire) run at 75–85 fps: the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them. |
 

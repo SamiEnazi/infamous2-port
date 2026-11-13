@@ -25,12 +25,12 @@ if (-not ("PortSetup.Cpu" -as [type])) {
 
 # The game's title IDs whose 1.04 code is the one this port translates (same PPU hash).
 $script:KnownTitles = @{
-    "BCES01143" = "Europe disc"; "BCES01144" = "Europe disc"; "BCES01229" = "disc";
+    "BCES01143" = "Europe disc"; "BCES01144" = "Europe disc"; "BCES01229" = "Turkey disc";
     "BCUS98125" = "USA disc"; "NPUA80638" = "USA PSN (digital)"; "NPEA00318" = "Europe PSN (digital)"
 }
-# Players have built and played these (README: EU disc, US disc, the PSN version 01.03); the others
+# Players have built and played these (README: EU disc, US disc, Turkey disc, the PSN version 01.03); the others
 # have the same code but nobody has reported on them yet.
-$script:TestedTitles = @("BCES01143", "BCUS98125", "NPUA80638")
+$script:TestedTitles = @("BCES01143", "BCES01229", "BCUS98125", "NPUA80638")
 
 # A build tool's path, the way tools\port_paths.py finds it for Setup: environment variable
 # (PORT_PYTHON ...), then config.local.json, then tools-cache\ (fetch_tools.ps1). PORT_ONLY_CACHE=1:
