@@ -161,6 +161,53 @@ fi
 # clang picks the newest GCC folder; a system with a newer GCC runtime than its C++ headers (Ubuntu
 # 22.04 + gcc-12-base) then finds no <vector>: name the folder that has them.
 for d in clang clang++; do echo "--gcc-install-dir=$gccdir" > "$cache/llvm/bin/$d.cfg"; done
+# The LLVM release's linker was built against libxml2.so.2 (used only to merge Windows manifests, never here).
+# Ubuntu 25.10 and later ship only libxml2.so.16, so the linker would not start (GitHub #24): it gets a small
+# stand-in libxml2.so.2 in its own lib folder (found through its RUNPATH, $ORIGIN/../lib), made here once,
+# linked by the system's GNU linker or, without one, by lld itself started against the system's newer libxml2.
+if ! "$cache/llvm/bin/ld.lld" --version >/dev/null 2>&1 && "$cache/llvm/bin/ld.lld" --version 2>&1 | grep -q "libxml2\.so\.2"; then
+    xs="$cache/xml2stub"; rm -rf "$xs"; mkdir -p "$xs"
+    cat > "$xs/stub.c" <<'XEOF'
+/* Stand-in for libxml2.so.2: lld names these for COFF manifest merging only. Each one fails softly. */
+static void nofree(void* p) { (void)p; }
+void (*xmlFree)(void*) = nofree;
+void* xmlReadMemory(void) { return 0; }
+void* xmlDocGetRootElement(void) { return 0; }
+void* xmlNewDoc(void) { return 0; }
+void* xmlDocSetRootElement(void) { return 0; }
+void xmlDocDumpFormatMemoryEnc(void) {}
+void xmlSetGenericErrorFunc(void) {}
+void xmlUnlinkNode(void) {}
+void xmlFreeNode(void) {}
+void* xmlAddChild(void) { return 0; }
+void* xmlNewProp(void) { return 0; }
+void* xmlNewNs(void) { return 0; }
+void* xmlStrdup(void) { return 0; }
+void* xmlCopyNamespace(void) { return 0; }
+void xmlFreeNs(void) {}
+void xmlFreeDoc(void) {}
+XEOF
+    cat > "$xs/stub.map" <<'XEOF'
+LIBXML2_2.4.30 { global: xmlFree; xmlDocGetRootElement; xmlNewDoc; xmlDocSetRootElement; xmlDocDumpFormatMemoryEnc;
+    xmlSetGenericErrorFunc; xmlUnlinkNode; xmlFreeNode; xmlAddChild; xmlNewProp; xmlNewNs; xmlStrdup;
+    xmlCopyNamespace; xmlFreeNs; xmlFreeDoc; local: *; };
+LIBXML2_2.6.0 { global: xmlReadMemory; } LIBXML2_2.4.30;
+XEOF
+    "$cache/llvm/bin/clang" -c -fPIC -O1 "$xs/stub.c" -o "$xs/stub.o"
+    lnk=(-shared -soname libxml2.so.2 --version-script "$xs/stub.map" "$xs/stub.o" -o "$xs/libxml2.so.2")
+    if command -v ld >/dev/null 2>&1 && ld "${lnk[@]}" > "$xs/log" 2>&1; then :
+    else
+        sys=$(ls /usr/lib/x86_64-linux-gnu/libxml2.so.[1-9]* /usr/lib64/libxml2.so.[1-9]* /usr/lib/libxml2.so.[1-9]* 2>/dev/null | head -n 1 || true)
+        if [ -n "$sys" ]; then
+            ln -sf "$sys" "$cache/llvm/lib/libxml2.so.2"
+            "$cache/llvm/bin/ld.lld" "${lnk[@]}" >> "$xs/log" 2>&1 || true
+            rm -f "$cache/llvm/lib/libxml2.so.2"
+        fi
+    fi
+    [ -f "$xs/libxml2.so.2" ] && cp -f "$xs/libxml2.so.2" "$cache/llvm/lib/libxml2.so.2"
+    "$cache/llvm/bin/ld.lld" --version >/dev/null 2>&1 || fail "LLVM's linker cannot start: it needs libxml2.so.2. Install the GNU linker (sudo apt install binutils) or libxml2 (sudo apt install libxml2-16 on Ubuntu 25.10 and later), then run setup.sh again"
+    echo "  LLVM's linker: made a stand-in libxml2.so.2 (this system has a newer libxml2)"
+fi
 "$cache/llvm/bin/clang" --version | sed -n '1s/^/  /p'
 export PORT_LLVM="$cache/llvm"
 cmv=$(cmake --version 2>/dev/null | head -1 | awk '{print $3}' || true)
@@ -327,6 +374,7 @@ EOF
 printf 'set(PACKAGE_VERSION "2.30.10")\nset(PACKAGE_VERSION_COMPATIBLE TRUE)\n' > "$deps/sdl2-cmake/sdl2-config-version.cmake"
 export PORT_SDL2_DIR="$deps/sdl2-cmake"
 if [ ! -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ]; then
+    rm -rf "$deps/glslang-build-linux"   # (a failed try leaves CMake's compiler checks cached)
     "$PORT_CMAKE" -S "$deps/glslang-src" -B "$deps/glslang-build-linux" -G Ninja -DCMAKE_MAKE_PROGRAM="$PORT_NINJA" \
         -DCMAKE_C_COMPILER="$PORT_LLVM/bin/clang" -DCMAKE_CXX_COMPILER="$PORT_LLVM/bin/clang++" -DCMAKE_BUILD_TYPE=Release \
         -DPython3_EXECUTABLE="$venv/bin/python" -DCMAKE_INSTALL_PREFIX="$deps/glslang-install-linux" -DBUILD_SHARED_LIBS=OFF \
