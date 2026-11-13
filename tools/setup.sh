@@ -205,8 +205,23 @@ elif [ ! -d "$game/dev_hdd0/game/${title}_INSTALL" ]; then echo "  note: no ${ti
 # RPCS3 decrypts one file per start, without a window (Qt offscreen). An AppImage is unpacked once and its
 # AppRun started (no FUSE needed: libfuse2 is missing on many current systems; and APPIMAGE_EXTRACT_AND_RUN
 # races with the previous start's clean-up when started again at once).
+# First "--headless" (no Qt screen plugin at all). Newer RPCS3 AppImages ship no "offscreen" Qt plugin (only
+# wayland, wayland-egl, xcb), so when RPCS3 says it has no such plugin the next way is tried: the desktop's
+# Wayland, its X11, then a hidden X server (xvfb-run).
+# A missing system library is named with the Ubuntu/Debian package that has it (retrying cannot help there).
+rpcs3_libpkg() {
+    case "$1" in
+        libOpenGL.so.0) echo libopengl0 ;; libEGL.so.1) echo libegl1 ;; libGLX.so.0) echo libglx0 ;;
+        libGL.so.1) echo libgl1 ;; libxcb-cursor.so.0) echo libxcb-cursor0 ;; libxkbcommon.so.0) echo libxkbcommon0 ;;
+        libxkbcommon-x11.so.0) echo libxkbcommon-x11-0 ;; libfuse.so.2) echo libfuse2 ;; libSDL2-2.0.so.0) echo libsdl2-2.0-0 ;;
+        libasound.so.2) echo libasound2 ;; libpulse.so.0) echo libpulse0 ;; libfontconfig.so.1) echo libfontconfig1 ;;
+        libwayland-client.so.0) echo libwayland-client0 ;; libwayland-egl.so.1) echo libwayland-egl1 ;;
+        *) echo "" ;;
+    esac
+}
 rpcs3_decrypt() {
-    local f="$1" out="${1%.*}"
+    local f="$1" out="${1%.*}" log="$root/work/logs/rpcs3_decrypt.log" one="$root/work/logs/rpcs3_decrypt.last"
+    local plats="headless offscreen" p try lib pkg
     case "$rpcs3bin" in
         *.AppImage|*.appimage)
             if [ ! -x "$cache/rpcs3-appimage/squashfs-root/AppRun" ]; then
@@ -215,13 +230,38 @@ rpcs3_decrypt() {
             fi
             [ -x "$cache/rpcs3-appimage/squashfs-root/AppRun" ] && rpcs3bin="$cache/rpcs3-appimage/squashfs-root/AppRun" ;;
     esac
-    for try in 1 2 3; do
-        mkdir -p "$root/work/logs"
-        echo "== $(date) try $try: $rpcs3bin --decrypt $f" >> "$root/work/logs/rpcs3_decrypt.log"
-        QT_QPA_PLATFORM=offscreen timeout 300 "$rpcs3bin" --decrypt "$f" >> "$root/work/logs/rpcs3_decrypt.log" 2>&1 || true
-        [ -f "$out.elf" ] || [ -f "$out.prx" ] && return 0
-        sleep 2
+    mkdir -p "$root/work/logs"
+    [ -n "${WAYLAND_DISPLAY:-}" ] && plats="$plats wayland"
+    [ -n "${DISPLAY:-}" ] && plats="$plats xcb"
+    command -v xvfb-run >/dev/null 2>&1 && plats="$plats xvfb"
+    for p in $plats; do
+        for try in 1 2 3; do
+            echo "== $(date) $p try $try: $rpcs3bin --decrypt $f" >> "$log"
+            case "$p" in
+                headless) timeout 300 "$rpcs3bin" --headless --decrypt "$f" > "$one" 2>&1 || true ;;
+                xvfb) QT_QPA_PLATFORM=xcb timeout 300 xvfb-run -a "$rpcs3bin" --decrypt "$f" > "$one" 2>&1 || true ;;
+                *) QT_QPA_PLATFORM=$p timeout 300 "$rpcs3bin" --decrypt "$f" > "$one" 2>&1 || true ;;
+            esac
+            cat "$one" >> "$log"
+            if [ -f "$out.elf" ] || [ -f "$out.prx" ]; then return 0; fi
+            lib=$(sed -n 's/.*error while loading shared libraries: \([^:]*\):.*/\1/p' "$one" | head -1)
+            if [ -n "$lib" ]; then
+                pkg=$(rpcs3_libpkg "$lib")
+                echo "  RPCS3 needs the system library $lib, and this system does not have it."
+                [ -n "$pkg" ] && echo "  On Ubuntu/Debian (also inside Distrobox): sudo apt install $pkg   then run setup.sh again."
+                return 0
+            fi
+            [ "$p" = headless ] && break   # (one try: RPCS3 builds without --headless, or it failed: go on)
+            grep -qiE "platform plugin|connect to display|open display" "$one" && break   # not this way here: try the next
+            sleep 2
+        done
     done
+    if grep -qi "xcb-cursor" "$one" 2>/dev/null; then
+        echo "  RPCS3's X11 mode needs libxcb-cursor0. On Ubuntu/Debian: sudo apt install libxcb-cursor0   then run setup.sh again."
+    elif grep -qiE "platform plugin|connect to display|open display" "$one" 2>/dev/null; then
+        echo "  RPCS3 could not start without a screen. Run setup.sh from the desktop (not over SSH), or install xvfb (sudo apt install xvfb) and run it again."
+    fi
+    return 0
 }
 step 4 "the game's 1.04 EBOOT decrypted"
 mkdir -p "$root/eboot"
