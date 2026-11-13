@@ -31,6 +31,12 @@ No emulator while you play.
 
 ## 🆕 What's new
 
+**v0.5.4**
+- 🧊 **Far fewer freezes the first time you play:** new graphics shaders are now built in the background instead
+  of stopping the game. In first-session tests, freezes over 50 ms dropped from 13–25 per scene to one (the first
+  frame after loading). While a shader is being built, the last picture can stay on screen for a moment; the game,
+  sound and controls keep running.
+
 **v0.5.3**
 - 🎥 **Field of view slider:** F2 → Display → Camera → *Field of view*, 70–130% of the game's. Aiming, the mouse
   and widescreen stay right, and cutscenes keep their framing.

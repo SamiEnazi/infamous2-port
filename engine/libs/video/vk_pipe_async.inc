@@ -121,6 +121,15 @@ static struct {
     int  mode, xlate, prewarm, recipes;
     u32  nthreads;
     u64  wait_ns;                   /* PS3RECOMP_VK_PIPE_WAIT_US                      */
+    int  skipw;                     /* PS3RECOMP_VK_PIPE_SKIP_STENCIL                 */
+    int  skipb;                     /* PS3RECOMP_VK_PIPE_SKIP_BLEND                   */
+    u64  hold_t0;                   /* backend thread: the first pass left out since the last whole frame */
+    unsigned long long hold_cls[5]; /* passes left out, by vk_pa_hold_class           */
+    u64  hold_ns;                   /* PS3RECOMP_VK_PIPE_HOLD_MS (0 = off)            */
+    int  hold_flag;                 /* backend thread: this frame left a pass out     */
+    u64  last_shown;                /* backend thread: when the last whole frame went */
+    u32  hold_run;                  /* frames held since then                         */
+    unsigned long long hold_frames, hold_runs, hold_ns_sum, hold_worst, hold_skips;
     int  started;                   /* vk_pa_start ran                                */
     volatile int quit;
     volatile int nrun;              /* workers alive                                  */
@@ -528,6 +537,19 @@ static void vk_pa_enqueue_locked(vk_eng_pipe* P)
     P->pa_job = 1;
     vk_pa_wake(0);
 }
+static void vk_pa_unqueue_locked(vk_eng_pipe* P);
+/* (freeze) to the front: a frame is being held for this one */
+static void vk_pa_enqueue_front_locked(vk_eng_pipe* P)
+{
+    const u32 me = vk_pa_idx(P) + 1u;
+    if (P->pa_job == 1) vk_pa_unqueue_locked(P);
+    P->pa_prev = 0;
+    P->pa_next = s_pa.qhead;
+    if (s_pa.qhead) s_epipe[s_pa.qhead - 1u].pa_prev = me; else s_pa.qtail = me;
+    s_pa.qhead = me;
+    P->pa_job = 1;
+    vk_pa_wake(0);
+}
 static void vk_pa_unqueue_locked(vk_eng_pipe* P)
 {
     if (P->pa_prev) s_epipe[P->pa_prev - 1u].pa_next = P->pa_next; else s_pa.qhead = P->pa_next;
@@ -694,6 +716,15 @@ static void vk_pa_cfg_read(void)
     s_pa.prewarm = s_pa.recipes && !(e && *e == '0');
     e = getenv("PS3RECOMP_VK_PIPE_WAIT_US");
     s_pa.wait_ns = (u64)((e && *e) ? atoi(e) : 2000) * 1000ull;
+    e = getenv("PS3RECOMP_VK_PIPE_SKIP_STENCIL");
+    s_pa.skipw = !(e && *e == '0');
+    e = getenv("PS3RECOMP_VK_PIPE_SKIP_BLEND");
+    s_pa.skipb = !(e && *e == '0');
+    e = getenv("PS3RECOMP_VK_PIPE_HOLD_MS");
+    { int ms = (e && *e) ? atoi(e) : 300;
+      if (ms < 0) ms = 0;
+      if (ms > 5000) ms = 5000;
+      s_pa.hold_ns = s_pa.mode == 1 ? (u64)ms * 1000000ull : 0; }
     e = getenv("PS3RECOMP_VK_PIPE_THREADS");
     u32 n = (e && *e) ? (u32)atoi(e) : vk_pa_cpus() / 4u;
     if (!(e && *e) && n > 4u) n = 4u;
@@ -755,6 +786,10 @@ static void vk_pa_start(void)
            "budget %llu us/frame, translations %s); prewarm %s (%u recipes)\n",
            s_pa.nrun, s_pa.mode ? "on" : "off", s_pa.mode, (unsigned long long)(s_pa.wait_ns / 1000u),
            s_pa.xlate ? "on the workers" : "here", s_pa.prewarm ? "on" : "off", s_pw.npw);
+    VK_LOG("pipelines: objects that write stencil may be left out a frame: %s (PS3RECOMP_VK_PIPE_SKIP_STENCIL); "
+           "blended draws without a depth test too: %s (PS3RECOMP_VK_PIPE_SKIP_BLEND); "
+           "a frame missing a pass is held back for at most %llu ms (PS3RECOMP_VK_PIPE_HOLD_MS)\n",
+           s_pa.skipw ? "yes" : "no", s_pa.skipb ? "yes" : "no", (unsigned long long)(s_pa.hold_ns / 1000000ull));
 }
 
 /* Draws that can be left out a frame without leaving garbage behind. */
@@ -763,7 +798,22 @@ static int vk_pa_skippable(const vk_eng_pipe* P, int neg)
     if (s_pa.mode < 1 || neg || P->sblend || P->fbf_in || P->fbf_mask) return 0;
     if (s_pa.mode >= 2) return 1;
     const rsx_be_render_state* rs = &P->rs;
+    /* (freeze) A blended draw without a depth test -- the HUD, a glow, a light
+     * added onto the frame -- lays itself over what its target already holds
+     * this frame: left out, that is still a whole picture without it. A
+     * "blend" of ONE, ZERO replaces what is there (a full-screen pass) and
+     * waits like one. PS3RECOMP_VK_PIPE_SKIP_BLEND=0: all of them wait. */
+    if (s_pa.skipb && (!rs->depth_test || vk_gcm_compare(rs->depth_func) == VK_COMPARE_OP_ALWAYS) &&
+        rs->blend_enable && (rs->color_mask & 0x00FFFFFFu) && !(rs->stencil_enable && rs->s_write_mask) &&
+        !(vk_gcm_blend_factor(rs->sf_rgb) == VK_BLEND_FACTOR_ONE && vk_gcm_blend_factor(rs->df_rgb) == VK_BLEND_FACTOR_ZERO))
+        return 1;
     if (!rs->depth_test || vk_gcm_compare(rs->depth_func) == VK_COMPARE_OP_ALWAYS) return 0;
+    /* (freeze) An object that also marks the stencil -- depth-tested, writing
+     * colour: 40% of this game's pipelines, its whole G-buffer -- is as absent
+     * for a frame as any other object: no colour, no depth, no mark. Only a
+     * mark without colour (a light volume's) has to be there for the pass that
+     * reads it. PS3RECOMP_VK_PIPE_SKIP_STENCIL=0: any stencil write waits. */
+    if (s_pa.skipw && (rs->color_mask & 0x00FFFFFFu)) return 1;
     if (rs->stencil_enable && rs->s_write_mask &&
         (vk_gcm_stencil_op(rs->s_fail) != VK_STENCIL_OP_KEEP || vk_gcm_stencil_op(rs->s_zfail) != VK_STENCIL_OP_KEEP ||
          vk_gcm_stencil_op(rs->s_zpass) != VK_STENCIL_OP_KEEP ||
@@ -773,6 +823,62 @@ static int vk_pa_skippable(const vk_eng_pipe* P, int neg)
         return 0;
     return 1;
 }
+
+/* (freeze) A draw that may not be left out (a full-screen pass, the HUD, a
+ * stencil mark) used to wait for its pipeline right here: 30 ms each on a
+ * driver that has never seen it, one after the other, on the thread the whole
+ * frame waits for -- 71 of them in the first frame of the world. Now it is
+ * left out like any other, its pipeline goes to the FRONT of the workers'
+ * queue, and the frame it belongs to is submitted but not shown: the window
+ * keeps the last whole picture while the game, the sound and the input run
+ * on, and the workers build in parallel. A picture is never held for longer
+ * than PS3RECOMP_VK_PIPE_HOLD_MS (default 300; 0 = off, the old waiting):
+ * past that the draws wait as before, so a frame always completes.
+ * Only frames that end in vk_present_async are held (vk_pa_hold_ok). */
+static int vk_pa_may_hold(void)
+{
+    if (!s_pa.hold_ns || !vk_pa_hold_ok || !s_pa.last_shown) return 0;
+    /* from the first pass left out, not from the last picture: a frame that is
+     * long by itself (the first of the world: 640 textures) has its passes
+     * built by the workers all the same */
+    return !s_pa.hold_t0 || ps3_ft_now() - s_pa.hold_t0 < s_pa.hold_ns;
+}
+/* why a draw may not be left out: 0 opaque without depth test, 1 blended
+ * without depth test, 2 depth ALWAYS, 3 a stencil mark, 4 signed blend /
+ * framebuffer fetch */
+static u32 vk_pa_hold_class(const vk_eng_pipe* P, int neg)
+{
+    const rsx_be_render_state* rs = &P->rs;
+    if (neg || P->sblend || P->fbf_in || P->fbf_mask) return 4u;
+    if (!rs->depth_test) return rs->blend_enable ? 1u : 0u;
+    if (vk_gcm_compare(rs->depth_func) == VK_COMPARE_OP_ALWAYS) return 2u;
+    return 3u;
+}
+/* At the present: 1 = do not show this frame. */
+static int vk_pa_hold_take(void)
+{
+    const u64 now = ps3_ft_now();
+    if (s_pa.hold_flag) {
+        s_pa.hold_flag = 0;
+        s_pa.hold_frames++;
+        s_pa.hold_run++;
+        return 1;
+    }
+    if (s_pa.hold_run) {
+        const u64 d = s_pa.last_shown ? now - s_pa.last_shown : 0;
+        s_pa.hold_runs++;
+        s_pa.hold_ns_sum += d;
+        if (d > s_pa.hold_worst) s_pa.hold_worst = d;
+        if (d >= 50000000ull)
+            VK_LOG("pipelines: HOLD the picture stood for %.1f ms (%u frames went on behind it)\n",
+                   (double)d / 1e6, s_pa.hold_run);
+        s_pa.hold_run = 0;
+    }
+    s_pa.hold_t0 = 0;
+    s_pa.last_shown = now;
+    return 0;
+}
+static void vk_pa_enqueue_front_locked(vk_eng_pipe* P);
 
 /* A draw waited t0..now for its pipeline. */
 static void vk_pa_waited(u64 t0)
@@ -858,12 +964,13 @@ static VkPipeline vk_pa_variant(vk_eng_pipe* P, u32 t, u32 k, int neg, VkPipelin
     if (__atomic_load_n(&P->pa_fail, __ATOMIC_ACQUIRE)) return VK_NULL_HANDLE;
     const u64 bit = 1ull << vk_pa_bit(t, k, neg);
     const int skippable = vk_pa_skippable(P, neg);
+    const int hold = !skippable && vk_pa_may_hold();      /* (freeze) left out, the frame not shown */
     vk_pa_lock();
     if (__atomic_load_n(&P->pa_done, __ATOMIC_ACQUIRE) & bit) {      /* tried: it failed */
         vk_pa_unlock();
         return __atomic_load_n(slotp, __ATOMIC_ACQUIRE);
     }
-    if (!P->pa_job && !skippable) {                       /* nothing in flight: the old way */
+    if (!P->pa_job && !skippable && !hold) {              /* nothing in flight: the old way */
         vk_pa_unlock();
         r = vk_eng_variant_now(P, t, k, neg, slotp);
         s_pa.inline_n++;
@@ -872,20 +979,27 @@ static VkPipeline vk_pa_variant(vk_eng_pipe* P, u32 t, u32 k, int neg, VkPipelin
         return r;
     }
     P->pa_want |= bit;
-    if (!P->pa_job) vk_pa_enqueue_locked(P);
+    if (hold) { if (P->pa_job <= 1) vk_pa_enqueue_front_locked(P); }
+    else if (!P->pa_job) vk_pa_enqueue_locked(P);
     vk_pa_unlock();
-    if (!skippable) vk_pa_steal(P);                       /* still queued: run it here */
+    if (!skippable && !hold) vk_pa_steal(P);              /* still queued: run it here */
     for (;;) {
         if (__atomic_load_n(&P->pa_done, __ATOMIC_ACQUIRE) & bit) {
             r = __atomic_load_n(slotp, __ATOMIC_ACQUIRE);
             vk_pa_waited(t0);
             return r;
         }
-        if (skippable && s_pa.spent_ns + (ps3_ft_now() - t0) >= s_pa.wait_ns) break;
+        if ((skippable || hold) && s_pa.spent_ns + (ps3_ft_now() - t0) >= s_pa.wait_ns) break;
         vk_pa_yield();
     }
     s_pa.spent_ns += ps3_ft_now() - t0;
-    s_pa.skip_n++;
+    if (hold) {
+        s_pa.hold_flag = 1;
+        s_pa.hold_skips++;
+        s_pa.hold_cls[vk_pa_hold_class(P, neg)]++;
+        if (!s_pa.hold_t0) s_pa.hold_t0 = ps3_ft_now();
+    }
+    else s_pa.skip_n++;
     return VK_NULL_HANDLE;
 }
 
@@ -979,6 +1093,13 @@ static void vk_pa_stats(void)
            s_pa.bg_xl, (double)s_pa.bg_xl_ns / 1e6, s_pw.built, s_pw.npw, s_pa.pw_hit,
            g_rsx_tstat.n, (double)g_rsx_tstat.ns / 1e6, (double)g_rsx_tstat.worst_ns / 1e6,
            (double)s_pa.tex_frame_worst / 1e6);
+    if (s_pa.hold_frames)
+        VK_LOG("pipelines: %llu frames not shown for a missing pass (%llu draws), in %llu holds of the picture "
+               "(%.0f ms in all, longest %.1f ms); the draws: %llu opaque full-screen, %llu blended, %llu depth "
+               "ALWAYS, %llu stencil marks, %llu signed blend or framebuffer fetch\n",
+               s_pa.hold_frames, s_pa.hold_skips, s_pa.hold_runs,
+               (double)s_pa.hold_ns_sum / 1e6, (double)s_pa.hold_worst / 1e6, s_pa.hold_cls[0], s_pa.hold_cls[1],
+               s_pa.hold_cls[2], s_pa.hold_cls[3], s_pa.hold_cls[4]);
 }
 
 /* Stop the workers: each finishes the job it is in. */

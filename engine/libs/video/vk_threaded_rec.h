@@ -73,7 +73,7 @@ static int s_tq_nodrain;                                  /* producer: the next 
 static u64 s_tq_pres_sent;                                /* producer: presents queued */
 static __declspec(align(64)) volatile u64 s_tq_pres_done; /* worker: presents submitted */
 typedef struct { tq_hdr h; VkFence fence; VkSemaphore acq;
-                 VkImage img; VkImageView view; u32 w, ht; u64 seq; } tq_present_rec;
+                 VkImage img; VkImageView view; u32 w, ht; u64 seq; u32 hold; } tq_present_rec;
 static void vk_present_exec(const tq_present_rec* r);    /* rsx_vulkan_backend.c */
 
 /* The real entry points (the worker's). */

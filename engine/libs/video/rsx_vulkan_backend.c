@@ -1441,6 +1441,22 @@ static int vk_batch_arena_grow(vk_buffer* b, VkDeviceSize request, int overflowe
     return vk_batch_arena(b, old > request ? old : request, floor_size, usage);
 }
 
+/* (freeze) The staging arena's first size. At 64 MB the first frame of the world
+ * (644 textures, 64-72 MB of uploads in one batch) filled it, and a full arena
+ * mid-batch is a submit-and-wait: 94-152 ms on top of that frame. 128 MB holds
+ * it. PS3RECOMP_VK_STAGE_MB=64: the old size (16..1024). */
+static VkDeviceSize vk_stage_floor(void)
+{
+    static VkDeviceSize v;
+    if (!v) {
+        const char* e = getenv("PS3RECOMP_VK_STAGE_MB");
+        int mb = (e && *e) ? atoi(e) : 128;
+        if (mb < 16) mb = 16;
+        if (mb > 1024) mb = 1024;
+        v = (VkDeviceSize)mb << 20;
+    }
+    return v;
+}
 /* `bytes` of transfer staging that lives until the batch completes: the
  * replacement for a temporary buffer created, used and destroyed per call.
  * Returns the offset into s_batch.sarena, or -1. May flush (before the
@@ -1456,7 +1472,7 @@ static int64_t vk_batch_stage(VkDeviceSize bytes)
         if (pass) break;
         const int was_recording = s_batch.recording;   /* a full arena mid-batch, not a first use */
         vk_batch_flush();
-        if (vk_batch_arena_grow(&s_batch.sarena, bytes, was_recording, 1024ull << 20, 64u << 20,
+        if (vk_batch_arena_grow(&s_batch.sarena, bytes, was_recording, 1024ull << 20, vk_stage_floor(),
                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, "staging"))
             return -1;
     }
@@ -4367,10 +4383,13 @@ static int vk_present_async_ok(void)
     return on && s_tq.running && !s_tq.direct && vk_fif_on() && s_gp.on <= 0 && !vk_overlay_menu_open();
 }
 /* The worker's half (also run on the RSX thread, direct, when no record fits). */
+static int vk_pa_hold_take(void);     /* (freeze) vk_pipe_async.inc */
+static int vk_pa_hold_ok;             /* (freeze) the frame being drawn ends in vk_present_async */
 static void vk_present_finish(VkCommandBuffer cmd, VkFence fence, VkSemaphore acq,
-                              VkImage cimg, VkImageView cview, u32 cw, u32 ch)
+                              VkImage cimg, VkImageView cview, u32 cw, u32 ch, int hold)
 {
     int sc = s_vk.windowed && s_vk.swapchain && !s_sc_minimized;
+    if (hold) sc = 0;                           /* (freeze) submitted, not shown: the last picture stays */
     if (sc && s_present_dirty) {                /* [overlay] present mode / fullscreen changed live */
         s_present_dirty = 0;
         vk_swapchain_lost();
@@ -4479,7 +4498,7 @@ static void vk_present_finish(VkCommandBuffer cmd, VkFence fence, VkSemaphore ac
 }
 static void vk_present_exec(const tq_present_rec* r)
 {
-    vk_present_finish(r->h.cb, r->fence, r->acq, r->img, r->view, r->w, r->ht);
+    vk_present_finish(r->h.cb, r->fence, r->acq, r->img, r->view, r->w, r->ht, (int)r->hold);
 }
 static void vk_present_async(void)
 {
@@ -4491,8 +4510,10 @@ static void vk_present_async(void)
     vk_image* const di = vk_disp_img();     /* [res] the scaled display image when on */
     vk_barrier_image(di->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
     vk_frame_limit();                       /* the cap's beat, before the frame goes to the worker */
+    const int hold = vk_pa_hold_take();     /* (freeze) a pass of this frame had no pipeline yet */
     tq_present_rec* p = (tq_present_rec*)(void*)tq_alloc(TQ_PRESENT, sizeof(tq_present_rec), s_vk.cmd);
     if (p) {
+        p->hold = (u32)hold;
         p->fence = s_vk.fence; p->acq = s_vk.sem_acquire;
         p->img = di->img; p->view = di->view; p->w = vk_disp_w(); p->ht = vk_disp_h();
         p->seq = ++s_tq_pres_sent;
@@ -4503,7 +4524,7 @@ static void vk_present_async(void)
         const int was = s_tq.direct;
         s_tq.direct = 1;
         vk_present_finish(s_vk.cmd, s_vk.fence, s_vk.sem_acquire, di->img, di->view,
-                          vk_disp_w(), vk_disp_h());
+                          vk_disp_w(), vk_disp_h(), hold);
         s_tq.direct = was;
     }
     s_fif_pending[s_fif_cur] = 1;           /* waited for when the slot comes round */
@@ -4514,6 +4535,7 @@ static void vk_present_async(void)
     s_tq_nodrain = 1;
     vk_fif_advance();
     s_tq_nodrain = 0;
+    vk_pa_hold_ok = vk_present_async_ok();  /* (freeze) the next frame: held only if it ends here too */
 }
 #endif
 /* The present records through postfx's and the overlay's own entry points (and
@@ -4527,6 +4549,8 @@ static void vk_present_window(void)
 #ifndef VK_TQ_NO_ASYNC_PRESENT
     if (vk_present_async_ok()) { vk_present_async(); return; }
 #endif
+    vk_pa_hold_ok = 0;                          /* (freeze) this path shows every frame */
+    (void)vk_pa_hold_take();
     if (vk_display_dark()) {                    /* (rsx5) as minimized: submitted, paced, not shown */
         vk_dark_note(1);
         vk_batch_flush();
