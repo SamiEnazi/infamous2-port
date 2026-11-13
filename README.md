@@ -92,6 +92,8 @@ both, as on the PS3. "Picture extras" means soft shadows, full-resolution ambien
 gradients and full-resolution effects.
 </sub>
 
+**v0.5.2 is faster again.** The build Setup makes now has native versions of the game's heaviest SPU jobs. In the same kind of player build on the test PC: **+14% to +26%** across the city, the dock, the opening fight and the cathedral spire, and **+13% to +19%** with the game held to 4 cores (in that fight, frames slower than 60 fps went from 770 to 121). Setup's *Optimise for this PC* adds about **5–11%** more. The table above is from the 10 Nov build; it will be measured again.
+
 ## ✨ What you get
 
 ### 🖥️ Native 1080p and up
@@ -268,7 +270,7 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 |---|---|
 | ✅ Tested copies | Played and confirmed by players: the **Europe** disc (**BCES01143**), the **Turkey** disc (**BCES01229**) and the **US** disc (**BCUS98125**), each with the **1.04** update, and the **digital (PSN)** version 01.03. |
 | 🖥️ Tested PCs | The test PC: i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p to 4K. Players: Windows 10 and 11 PCs, up to an RTX 5070 at 1440p. Linux: Ubuntu 22.04 with an AMD GPU (experimental). |
-| ⚠️ Known issues | • The Beast fight can drop into the 40s.<br>• Views over a big part of the city (the top of the cathedral spire) run at 75–85 fps: the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them. |
+| ⚠️ Known issues | • Views over a big part of the city (the top of the cathedral spire) are the heaviest: about 83 fps there on the test PC with v0.5.2 (it was 67). On 4- and 6-core CPUs the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them.<br>• On AMD graphics cards, close-up faces in cutscenes can show black spots ([#27](../../issues/27)); a fix is being worked on. |
 
 ## 🧰 What you need
 
