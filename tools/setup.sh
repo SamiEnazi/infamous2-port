@@ -216,7 +216,9 @@ rpcs3_decrypt() {
             [ -x "$cache/rpcs3-appimage/squashfs-root/AppRun" ] && rpcs3bin="$cache/rpcs3-appimage/squashfs-root/AppRun" ;;
     esac
     for try in 1 2 3; do
-        QT_QPA_PLATFORM=offscreen timeout 300 "$rpcs3bin" --decrypt "$f" >/dev/null 2>&1 || true
+        mkdir -p "$root/work/logs"
+        echo "== $(date) try $try: $rpcs3bin --decrypt $f" >> "$root/work/logs/rpcs3_decrypt.log"
+        QT_QPA_PLATFORM=offscreen timeout 300 "$rpcs3bin" --decrypt "$f" >> "$root/work/logs/rpcs3_decrypt.log" 2>&1 || true
         [ -f "$out.elf" ] || [ -f "$out.prx" ] && return 0
         sleep 2
     done
@@ -229,7 +231,10 @@ elif [ ! -f "$elf" ]; then
     bin="$root/eboot/EBOOT_upd104.BIN"
     cp -f "$upd/USRDIR/EBOOT.BIN" "$bin"
     rpcs3_decrypt "$bin"
-    [ -f "$elf" ] || fail "RPCS3 did not write $elf (is the firmware installed in RPCS3?)"
+    if [ ! -f "$elf" ]; then
+        echo "  RPCS3's last words (work/logs/rpcs3_decrypt.log):"; tail -n 15 "$root/work/logs/rpcs3_decrypt.log" 2>/dev/null | sed 's/^/    /'
+        fail "RPCS3 did not write $elf. Please post work/logs/rpcs3_decrypt.log in a GitHub issue. (Or decrypt it yourself: RPCS3 > Utilities > Decrypt PS3 Binaries on $bin, then run setup.sh again with --eboot <the .elf it wrote>)"
+    fi
 fi
 echo "  $elf"
 # the three firmware modules the port translates (rebuild.py's inputs step then finds them in work/fw)
@@ -239,7 +244,7 @@ for m in liblv2 libsysmodule libsre; do
     cp -f "$rpcs3/dev_flash/sys/external/$m.sprx" "$root/work/fw/$m.sprx"
     rpcs3_decrypt "$root/work/fw/$m.sprx"
     [ -f "$root/work/fw/$m.elf" ] && mv -f "$root/work/fw/$m.elf" "$root/work/fw/$m.prx"
-    [ -f "$root/work/fw/$m.prx" ] || fail "decrypting $m.sprx gave no work/fw/$m.prx"
+    [ -f "$root/work/fw/$m.prx" ] || { tail -n 15 "$root/work/logs/rpcs3_decrypt.log" 2>/dev/null | sed 's/^/    /'; fail "decrypting $m.sprx gave no work/fw/$m.prx (RPCS3's output: work/logs/rpcs3_decrypt.log)"; }
     echo "  work/fw/$m.prx"
 done
 
