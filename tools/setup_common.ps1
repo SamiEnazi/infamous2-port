@@ -121,6 +121,27 @@ function Get-DigitalCopyGaps([string]$Disc, [string]$GameDir) {
     }
 }
 
+# The game archives every copy has, each starting with "PSAR" (GitHub #9/#13, 2026-11-13: a copy whose disc files
+# were still encrypted, and one without core/music.psarc, both ended in a black screen after the intro). Disc copies
+# also carry the two HDD-install archives. Returns a plain-language problem, or $null.
+function Get-GameFileProblems([string]$Disc, [string]$Title) {
+    $dir = Join-Path $Disc "PS3_GAME\USRDIR\cache\psarc"
+    $need = @("core.psarc", "music.psarc")
+    $opt = @("install1\infamous1.psarc_s", "install2\infamous2.psarc_s")
+    if ($Title -like "BC*") { $need += $opt; $opt = @() }
+    $missing = @(); $bad = @()
+    foreach ($f in $need + $opt) {
+        $p = Join-Path $dir $f
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { if ($need -contains $f) { $missing += $f }; continue }
+        $h = New-Object byte[] 4
+        try { $s = [IO.File]::OpenRead($p); try { [void]$s.Read($h, 0, 4) } finally { $s.Close() } } catch { $bad += $f; continue }
+        if ([Text.Encoding]::ASCII.GetString($h) -ne "PSAR") { $bad += $f }
+    }
+    if ($missing) { return "your game folder is missing some of the game's files ($($missing -join ', ') in PS3_GAME\USRDIR\cache\psarc). Copy the complete game folder again, then run Setup again" }
+    if ($bad) { return "your game's files can't be read ($($bad -join ', ') doesn't start like a game archive): the copy is still encrypted or damaged. The port needs a decrypted copy of the game folder, the same kind RPCS3 uses for a disc game" }
+    $null
+}
+
 # One row per check: Ok (true/false/$null = a note, never blocking), Name, Detail
 function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
     $root = Split-Path -Parent $PSScriptRoot
@@ -181,6 +202,10 @@ function Get-SetupChecks([string]$Disc, [string]$Rpcs3) {
         $tested = $script:TestedTitles -contains $title
         Add $(if ($tested) { $true } elseif ($known) { $null } else { $false }) "Game disc" `
             "$($sfo['TITLE']) [$title] $(if ($known) { $known } else { 'not inFAMOUS 2' })$(if ($tested) { ' (tested)' } elseif ($known) { ' -- untested: please report how it goes' })"
+        if ($known) {
+            $gp = Get-GameFileProblems $Disc $title
+            Add $(if ($gp) { $false } else { $true }) "Game files" $(if ($gp) { $gp } else { "the game's archives are there and readable" })
+        }
     }
     if (-not $Rpcs3) { Add $false "RPCS3 folder" "choose the folder that holds rpcs3.exe" }
     elseif (-not (Test-Path (Join-Path $Rpcs3 "rpcs3.exe"))) { Add $false "RPCS3 folder" "no rpcs3.exe in $Rpcs3" }

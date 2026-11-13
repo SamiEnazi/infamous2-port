@@ -89,6 +89,41 @@ if ($discItem -and $discItem.LinkType -eq "Junction" -and -not (Test-Path -Liter
         exit 1
     }
 }
+# --- the game's files (GitHub #9/#13) ---------------------------------------------------------
+# A copy whose disc files are still encrypted, or one missing core.psarc / music.psarc, used to end in a black
+# screen after the intro. The main archives must be there and start with "PSAR"; so must the HDD-install copies
+# the game reads (dev_hdd0\game\<ID>_INSTALL, which the game makes again by itself when that folder is gone).
+$psarc = Join-Path $discLink "PS3_GAME\USRDIR\cache\psarc"
+function Test-Psar([string]$p) {
+    $h = New-Object byte[] 4
+    try { $s = [IO.File]::OpenRead($p); try { [void]$s.Read($h, 0, 4) } finally { $s.Close() } } catch { return $false }
+    [Text.Encoding]::ASCII.GetString($h) -eq "PSAR"
+}
+if (Test-Path -LiteralPath (Join-Path $discLink "PS3_GAME")) {
+    $missing = @("core.psarc", "music.psarc") | Where-Object { -not (Test-Path -LiteralPath (Join-Path $psarc $_)) }
+    $bad = @("core.psarc", "music.psarc", "install1\infamous1.psarc_s", "install2\infamous2.psarc_s") |
+           Where-Object { (Test-Path -LiteralPath (Join-Path $psarc $_)) -and -not (Test-Psar (Join-Path $psarc $_)) }
+    if ($missing) {
+        "Your game folder is missing some of the game's files: $($missing -join ', ') (in PS3_GAME\USRDIR\cache\psarc)."
+        "Copy the complete game folder again (the one with PS3_GAME), then start the game again."
+        exit 1
+    }
+    if ($bad) {
+        "Your game's files can't be read: $($bad -join ', ') doesn't start like a game archive."
+        "The copy is still encrypted or damaged. The port needs a decrypted copy of the game folder,"
+        "the same kind RPCS3 uses for a disc game."
+        exit 1
+    }
+    foreach ($ins in Get-ChildItem -LiteralPath (Join-Path $game "dev_hdd0\game") -Directory -Filter "*_INSTALL" -ErrorAction SilentlyContinue) {
+        $badIns = @("install1\infamous1.psarc_s", "install2\infamous2.psarc_s") | ForEach-Object { Join-Path $ins.FullName "USRDIR\cache\psarc\$_" } |
+                  Where-Object { (Test-Path -LiteralPath $_) -and -not (Test-Psar $_) }
+        if ($badIns) {
+            "The game's HDD install ($($ins.FullName)) has files that can't be read."
+            "Rename that folder (for example to $($ins.Name).old) and start the game again: it makes a new one by itself."
+            exit 1
+        }
+    }
+}
 $out = Join-Path $root ("play\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 New-Item -ItemType Directory -Force $out, "$game\gamedata" | Out-Null
 

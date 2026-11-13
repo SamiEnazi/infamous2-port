@@ -58,6 +58,26 @@ if [ -L "$game/disc" ] && [ ! -f "$game/disc/PS3_GAME/PARAM.SFO" ]; then
         exit 1
     fi
 fi
+# The game's files (GitHub #9/#13): the main archives must be there and start with "PSAR" (a copy still
+# encrypted, or one missing core/music.psarc, ended in a black screen after the intro).
+psarc="$game/disc/PS3_GAME/USRDIR/cache/psarc"
+if [ -d "$game/disc/PS3_GAME" ]; then
+    for f in core.psarc music.psarc; do
+        if [ ! -f "$psarc/$f" ]; then
+            echo "Your game folder is missing some of the game's files: $f (in PS3_GAME/USRDIR/cache/psarc)."
+            echo "Copy the complete game folder again (the one with PS3_GAME), then start the game again."
+            exit 1
+        fi
+    done
+    for f in core.psarc music.psarc install1/infamous1.psarc_s install2/infamous2.psarc_s; do
+        if [ -f "$psarc/$f" ] && [ "$(head -c 4 "$psarc/$f")" != "PSAR" ]; then
+            echo "Your game's files can't be read: $f doesn't start like a game archive."
+            echo "The copy is still encrypted or damaged. The port needs a decrypted copy of the game folder,"
+            echo "the same kind RPCS3 uses for a disc game."
+            exit 1
+        fi
+    done
+fi
 out="$root/play/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out" "$game/gamedata"
 
