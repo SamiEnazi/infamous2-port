@@ -31,6 +31,16 @@ No emulator while you play.
 
 ## 🆕 What's new
 
+**v0.5.2**
+- ⚡ **Faster on every PC:** native versions of the game's heaviest SPU jobs (+13–19% on 4-core CPUs, up to +26%
+  on fast ones), six job workers on CPUs with 10 or more cores, and less wasted waiting on 4–6 core CPUs.
+- 🚀 **Optimise for this PC:** Setup can train the build on your own PC for a few minutes, then build a faster game
+  (+5–11% more). It's a checkbox in Setup, on by default; it adds 10–25 minutes to the first install.
+- 🎮 **Steam, Playnite and other launchers:** add the game's own `Infamous2Recomp.exe`; Steam Input and the Steam
+  overlay work ([#29](../../issues/29)). [More](#-playing)
+- 🖱️ **Mouse:** "look up" in the opening tutorial works with the direct mouse camera ([#27](../../issues/27)).
+- 📁 Setup accepts game folders with `[ ]` in their name ([#19](../../issues/19)), and the Turkey disc (BCES01229) is tested.
+
 **v0.5.1**
 - ⚡ **Black lightning works:** F2 → Cheats → *Black lightning* now turns Cole's bolts black. Before, it was on but
   changed nothing.
@@ -296,6 +306,10 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
    - 🛠️ downloads the build tools into that folder: Python, CMake, Ninja, LLVM and Microsoft's C++ headers and
      libraries (portable copies, about 1.3 GB)
    - 🏗️ builds the game from your copy: 20–60 minutes, one time only (about 15 minutes on the test PC)
+   - with **Optimise for this PC** ticked (the default), it then trains the build on your PC: the game opens and
+     plays by itself for about 6 minutes (sound off, don't touch it) and is compiled once more with what it
+     learned. That adds 10–25 minutes and gave 5–11% more fps in the city on the test PC. If it doesn't work
+     out, you get the normal build and Setup says why.
    - 🧹 cleans up, keeps the build tools and build files for quick updates, and leaves a desktop shortcut. Its
      icon is taken from your own copy.
 3. 🎮 Press **Play**.

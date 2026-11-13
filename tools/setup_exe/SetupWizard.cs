@@ -7,9 +7,14 @@
 //      is ...?" dialog only when one is not found.
 //   3. The checks of tools\setup_common.ps1; a one-line reason only for what the player must fix
 //      (the PS3 firmware or the 1.04 update missing in RPCS3, a PC that can't run the port).
-//   4. tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup: it downloads its own build tools into
+//   4. tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup [-Pgo]: it downloads its own build tools into
 //      tools-cache\ (portable: nothing is installed, no admin), builds, and deletes the tools again.
-//      Its lines "== [n/10] <step>", "  progress: <n>% <what>", "== FAILED: <why>" drive the bar.
+//      Its lines "== [n/10] <step>" (12 steps with -Pgo), "  progress: <n>% <what>", "== FAILED: <why>"
+//      drive the bar; "  compile log: <file>" names the log whose ninja lines to follow, "  player-note:
+//      <text>" is shown under the bar for that step, "  pgo: used (...)" / "  pgo: not used: <why>" end
+//      the Done line. -Pgo = the "Optimise for this PC" box (on by default, remembered per folder in
+//      work\setup-no-pgo): a training build plays the game by itself for a few minutes (tools\pgo_train.ps1),
+//      then the game is compiled with what it learned; it never makes Setup fail.
 //   5. A big Play button.
 // Pressing Install accepts Microsoft's license for the C++ files (the line under the button says so).
 //
@@ -18,7 +23,8 @@
 // The port's scripts run as "powershell -ExecutionPolicy RemoteSigned -File <script>" (Util.PowerShellFile).
 //
 // Test switches (README.md): --test-build, --rpcs3 <folder>, --disc <folder> (or --game), --folder <folder>,
-// --no-shortcut, --no-cleanup, --only-cache, --exit-when-done, --page done|ask.
+// --no-shortcut, --no-cleanup, --only-cache, --no-pgo, --exit-when-done, --page done|ask; --pgo with --prepare
+// or --update --no-window (they do not train unless asked: the training opens the game's window).
 // The updater (tools\update_check.ps1, F2 > Update in the game): --update --folder <port folder> [--to v0.5.1]
 // = "Update to the latest version" at once, in the window; with --no-window [--dry-run] without one (class Headless).
 
@@ -45,9 +51,9 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("inFAMOUS 2 Native PC Port (unofficial fan project)")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Sami Enazi. MIT license.")]
 [assembly: AssemblyTrademark("inFAMOUS is a trademark of Sony Interactive Entertainment LLC. Not affiliated with Sony or Sucker Punch.")]
-[assembly: AssemblyVersion("0.5.1.0")]
-[assembly: AssemblyFileVersion("0.5.1.0")]
-[assembly: AssemblyInformationalVersion("0.5.1")]
+[assembly: AssemblyVersion("0.5.2.0")]
+[assembly: AssemblyFileVersion("0.5.2.0")]
+[assembly: AssemblyInformationalVersion("0.5.2")]
 
 namespace Inf2Setup
 {
@@ -126,6 +132,7 @@ namespace Inf2Setup
         public List<string> PlayArgs = new List<string>();   // after --play: play.ps1's own options
         public string Page, Disc, Rpcs3, Folder;
         public bool TestBuild, NoShortcut, ExitWhenDone, NoCleanup, OnlyCache, TestFailBuild;
+        public bool NoPgo, Pgo;          // the window's "Optimise for this PC" box off; --prepare / --no-window with it
         public bool Update, NoWindow;    // --update [--no-window]: the newest port over --folder (the updater)
         public string To;                // --to v0.5.1: the version the update brings (only shown)
 
@@ -159,6 +166,8 @@ namespace Inf2Setup
                     case "--no-cleanup": o.NoCleanup = true; break;
                     case "--only-cache": o.OnlyCache = true; break;
                     case "--test-fail-build": o.TestFailBuild = true; break;
+                    case "--no-pgo": o.NoPgo = true; break;
+                    case "--pgo": o.Pgo = true; break;
                     case "--update": o.Update = true; break;
                     case "--no-window": o.NoWindow = true; break;
                     case "--to": o.To = v; i++; break;
@@ -1523,7 +1532,9 @@ namespace Inf2Setup
     //   Setup.exe --prepare --disc <game folder> (or --game) [--rpcs3 <folder>] [--dry-run]
     //     Easy Setup's "prepare" step: Install's checks and tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup
     //     (the setup screen's label says that it accepts Microsoft's license), plus -NoShortcut (the launcher
-    //     is the shortcut), without "Optimise for this PC" (its training run opens the game's window).
+    //     is the shortcut), without "Optimise for this PC" (its training run opens the game's window, and each
+    //     launcher install is a new folder, so there is no earlier training to reuse): --pgo adds -Pgo
+    //     (12 steps; the same exit codes and progress lines, "Training the build on your PC" while it plays).
     //     RPCS3 is found the way Install finds it. No window: "progress <0..1> <text>" lines on stdout, the
     //     whole log in play\setup.log. --dry-run stops before the build (nothing is written but the log).
     //   Setup.exe --play [play.ps1's options]
@@ -1638,7 +1649,9 @@ namespace Inf2Setup
                     if (r.Ok == false) return Stop(CheckCode(r.Name), r.Name + ": " + r.Detail);
                 if (Process.GetProcessesByName("rpcs3").Length > 0) return Stop(Rpcs3Open, "RPCS3 is open: close it (Setup uses it to unlock your game)");
                 string cmd = Util.PowerShellFile(Path.Combine(dir, "tools\\setup_build.ps1"), false) +
-                             " -Disc " + Util.Arg(disc) + " -Rpcs3 " + Util.Arg(rpcs3) + " -AcceptMsvcLicense -NoShortcut -Cleanup";
+                             " -Disc " + Util.Arg(disc) + " -Rpcs3 " + Util.Arg(rpcs3) + " -AcceptMsvcLicense -NoShortcut -Cleanup" +
+                             (opt.Pgo ? " -Pgo" : "");
+                Log("optimise for this PC: " + (opt.Pgo ? "yes (--pgo)" : "no"));
                 if (opt.DryRun)
                 {
                     Log("dry run, nothing built. The build would be: powershell " + cmd);
@@ -1722,19 +1735,25 @@ namespace Inf2Setup
         static string BuiltStamp(string dir) { return Path.Combine(dir, "work\\launcher-built.txt"); }
 
         // setup_build.ps1's lines -> how far it is and one line for the player. The weights are the window's
-        // (MainForm.StepWeight, SubNames, SubWeight) for the 10 steps without "Optimise for this PC".
+        // (MainForm.StepWeight / StepWeightPgo, SubNames, SubWeight): 10 steps, or 12 with -Pgo (--pgo).
         sealed class BuildProgress
         {
             static readonly double[] StepWeight = { 0, 1, 22, 4, 2, 3, 10, 1, 52, 1, 4 };
+            static readonly double[] StepWeightPgo = { 0, 1, 14, 3, 1, 2, 6, 1, 34, 19, 15, 1, 3 };
             static readonly string[] StepText = { "", "Checking your PC and your game", "Downloading the build tools",
                 "Copying the update and the firmware files from RPCS3", "Unlocking your game with RPCS3", "Setting up the build tools",
                 "Getting SDL2, the Vulkan headers and glslang", "Making the game's icon from your copy",
                 "Translating and compiling the game (15-40 minutes)", "Almost done", "Cleaning up" };
+            static readonly string[] StepTextPgo = { "", "Checking your PC and your game", "Downloading the build tools",
+                "Copying the update and the firmware files from RPCS3", "Unlocking your game with RPCS3", "Setting up the build tools",
+                "Getting SDL2, the Vulkan headers and glslang", "Making the game's icon from your copy",
+                "Translating the game and compiling a training build", "Training the build on your PC (the game plays by itself, sound off)",
+                "Compiling the game, optimised for this PC", "Almost done", "Cleaning up" };
             static readonly string[] SubNames = { "inputs", "port", "firmware", "ppu", "spu", "jobs", "compile" };
             static readonly double[] SubWeight = { 2, 3, 10, 22, 4, 9, 50 };
             static readonly string[] SubText = { "reading your game", "the port's code", "the firmware modules",
                 "translating the game's code", "the SPU programs", "the SPU jobs", "compiling" };
-            const int CompileStep = 8;
+            const int CompileStep = 8, PgoSteps = 12, FinalCompileStep = 10;
 
             int step, steps = 10, sub = -1, ninjaDone, ninjaTotal;
             double frac;
@@ -1746,7 +1765,11 @@ namespace Inf2Setup
 
             public BuildProgress(string dir) { repo = dir; compileLog = Path.Combine(dir, "work\\logs\\compile.log"); }
 
-            bool Known() { return steps + 1 == StepWeight.Length; }
+            bool Pgo() { return steps == PgoSteps; }
+            double[] Weights() { return Pgo() ? StepWeightPgo : StepWeight; }
+            bool Known() { return steps + 1 == Weights().Length; }
+            // a step whose "[compile]" line and ninja lines in the compile log move the bar
+            bool Compiling(int st) { return st == CompileStep || (Pgo() && st == FinalCompileStep); }
 
             public void Line(string line)
             {
@@ -1775,12 +1798,13 @@ namespace Inf2Setup
                     string rel = t.Substring(12).Trim();
                     if (rel.Length > 0) { compileLog = Path.Combine(repo, rel); compilePos = -1; }
                 }
-                else if (step == CompileStep && t.Length > 2 && t[0] == '[' && t[t.Length - 1] == ']' &&
+                else if (Compiling(step) && t.Length > 2 && t[0] == '[' && t[t.Length - 1] == ']' &&
                          Array.IndexOf(SubNames, t.Substring(1, t.Length - 2)) >= 0)
                 {
                     sub = Array.IndexOf(SubNames, t.Substring(1, t.Length - 2));
                     if (sub == SubNames.Length - 1)
                     {
+                        ninjaTotal = 0;
                         try { compilePos = File.Exists(compileLog) ? new FileInfo(compileLog).Length : 0; } catch (Exception) { compilePos = 0; }
                     }
                 }
@@ -1790,7 +1814,7 @@ namespace Inf2Setup
             // ninja's [k/N] lines in the compile log (the compile writes there, not to setup_build's output)
             public void TailCompileLog()
             {
-                if (step != CompileStep || sub != SubNames.Length - 1 || compilePos < 0) return;
+                if (!Compiling(step) || sub != SubNames.Length - 1 || compilePos < 0) return;
                 try
                 {
                     using (FileStream fs = new FileStream(compileLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
@@ -1824,11 +1848,14 @@ namespace Inf2Setup
             {
                 if (step < 1) return 0;
                 if (!Known()) return Math.Min(1, (step - 1 + Math.Min(1, frac)) / Math.Max(1, steps));
+                double[] w = Weights();
                 int st = Math.Min(step, steps);
                 double done = 0;
-                for (int i = 1; i < st; i++) done += StepWeight[i];
+                for (int i = 1; i < st; i++) done += w[i];
                 double f = frac;
-                if (st == CompileStep)
+                if (Pgo() && st == FinalCompileStep)
+                    f = sub == SubNames.Length - 1 && ninjaTotal > 0 ? ninjaDone / (double)ninjaTotal : 0;   // only "[compile]" here
+                else if (st == CompileStep)
                 {
                     f = 0;
                     if (sub >= 0)
@@ -1838,14 +1865,18 @@ namespace Inf2Setup
                         f /= 100.0;
                     }
                 }
-                return (done + StepWeight[st] * Math.Min(1, f)) / 100.0;
+                return (done + w[st] * Math.Min(1, f)) / 100.0;
             }
 
             public string Text()
             {
                 if (step < 1) return "Getting ready";
-                string head = Known() && step < StepText.Length ? StepText[step] : scriptText;
-                if (step == CompileStep && sub >= 0)
+                string[] tx = Pgo() ? StepTextPgo : StepText;
+                string head = Known() && step < tx.Length ? tx[step] : scriptText;
+                // with -Pgo, steps 8-10 say what they do this time (an update may compile with the last training)
+                if (Known() && Pgo() && step >= CompileStep && step <= FinalCompileStep && scriptText.Length > 0)
+                    head = char.ToUpperInvariant(scriptText[0]) + scriptText.Substring(1);
+                if (Compiling(step) && sub >= 0)
                     return head + ": " + SubText[sub] + (sub == SubNames.Length - 1 && ninjaTotal > 0 ? " " + ninjaDone + " of " + ninjaTotal : "");
                 return detail.Length > 0 ? head + ": " + detail : head;
             }
@@ -2277,7 +2308,7 @@ namespace Inf2Setup
     sealed class MainForm : Form
     {
         public const string Title = "inFAMOUS 2 PC port - Setup";
-        public const int BaseW = 640, BaseH = 470, LogH = 240;
+        public const int BaseW = 640, BaseH = 500, LogH = 240;
         const string IssuesUrl = "https://github.com/SamiEnazi/infamous2-port/issues/new";
         const string MsvcLicense = "https://go.microsoft.com/fwlink/?LinkId=2179911";
         const string Intro = "Downloads the build tools it needs, builds the game from your copy, then cleans up.";
@@ -2299,6 +2330,8 @@ namespace Inf2Setup
         readonly Bar bar;
         readonly Label status, line;
         readonly LinkLabel license, details, copyLog, again;
+        readonly CheckBox pgoBox;        // "Optimise for this PC": setup_build.ps1 -Pgo
+        readonly Label pgoNote;
         readonly TextBox logBox;
         readonly System.Windows.Forms.Timer pump, anim;
         bool showLog, forceClose;
@@ -2311,9 +2344,9 @@ namespace Inf2Setup
         bool logDirty;
         // progress, from the job's lines
         int jStep, jSteps = 1, bSub = -1, ninjaDone, ninjaTotal;
-        double jFrac;
-        string failReason, compileLog;
-        bool sawDone;
+        double jFrac, shownFrac;
+        string failReason, compileLog, playerNote, pgoWhy;
+        bool sawDone, pgoUsed;
         long compilePos = -1;
 
         static int S(double v) { return Theme.S(v); }
@@ -2358,7 +2391,27 @@ namespace Inf2Setup
             license = Theme.Link("By installing you accept Microsoft's build tools license", Theme.Small);
             license.LinkArea = new LinkArea(license.Text.IndexOf("Microsoft"), license.Text.Length - license.Text.IndexOf("Microsoft"));
             license.LinkClicked += delegate { Util.OpenUrl(MsvcLicense); };
-            license.Location = new Point((cw - license.PreferredWidth) / 2, S(400));
+            license.Location = new Point((cw - license.PreferredWidth) / 2, S(434));
+
+            // "Optimise for this PC" (profile-guided optimisation trained here): on unless it was turned
+            // off for this folder before (work\setup-no-pgo) or --no-pgo
+            pgoBox = new CheckBox();
+            pgoBox.Text = "Optimise for this PC";
+            pgoBox.Font = Theme.Body; pgoBox.ForeColor = Theme.Text; pgoBox.BackColor = Theme.Bg;
+            pgoBox.FlatStyle = FlatStyle.Flat;
+            pgoBox.FlatAppearance.BorderColor = Theme.Dim;
+            pgoBox.FlatAppearance.CheckedBackColor = Theme.Bg;
+            pgoBox.FlatAppearance.MouseOverBackColor = Theme.Bg;
+            pgoBox.FlatAppearance.MouseDownBackColor = Theme.Bg;
+            pgoBox.AutoSize = true; pgoBox.UseMnemonic = false; pgoBox.Cursor = Cursors.Hand;
+            pgoBox.Checked = !o.NoPgo && !(repo != null && File.Exists(NoPgoMark(repo)));
+            pgoNote = new Label();
+            pgoNote.AutoSize = true; pgoNote.UseMnemonic = false; pgoNote.Font = Theme.Small; pgoNote.ForeColor = Theme.Dim;
+            pgoNote.Text = "a faster game; adds 10–25 min: Setup plays it by itself once";
+            int pw = pgoBox.PreferredSize.Width, nw = pgoNote.PreferredWidth, px = Math.Max(S(14), (cw - pw - S(6) - nw) / 2);
+            pgoBox.Location = new Point(px, S(400));
+            pgoNote.Location = new Point(px + pw + S(6), S(400) + (pgoBox.PreferredSize.Height - pgoNote.PreferredHeight) / 2);
+            pgoNote.Click += delegate { pgoBox.Checked = !pgoBox.Checked; };
 
             details = Theme.Link("Details", Theme.Small);
             details.Location = new Point(S(18), S(BaseH) - S(32));
@@ -2379,7 +2432,7 @@ namespace Inf2Setup
             logBox.Location = new Point(S(14), S(BaseH));
             logBox.Size = new Size(cw - S(28), S(LogH) - S(14));
 
-            Controls.AddRange(new Control[] { logo, title, sub, big, bar, status, line, license, details, copyLog, again, logBox });
+            Controls.AddRange(new Control[] { logo, title, sub, big, bar, status, line, pgoBox, pgoNote, license, details, copyLog, again, logBox });
             AcceptButton = big;
 
             pump = new System.Windows.Forms.Timer();
@@ -2441,8 +2494,14 @@ namespace Inf2Setup
             if (s == State.Done) { status.Text = ""; status.Visible = false; }
             line.Visible = s != State.Working;
             if (s == State.Start) { line.Text = Intro; line.ForeColor = Theme.Dim; }
-            if (s == State.Done) { line.Text = gitClone ? "Ready to play. (A git clone: git pull gets the newest code.)" : "Ready to play."; line.ForeColor = Theme.Dim; }
+            if (s == State.Done)
+            {
+                line.Text = (pgoUsed ? "Ready to play, optimised for this PC." : "Ready to play.") + PgoLine() +
+                            (gitClone ? " (A git clone: git pull gets the newest code.)" : "");
+                line.ForeColor = Theme.Dim;
+            }
             license.Visible = s == State.Start || s == State.Failed;
+            pgoBox.Visible = pgoNote.Visible = s == State.Start || s == State.Failed;
             copyLog.Visible = s == State.Failed;
             again.Visible = s == State.Done && !opt.TestBuild;
             Text = Title;
@@ -2450,6 +2509,29 @@ namespace Inf2Setup
         }
 
         void Status(string s) { status.Text = s; }
+
+        // The one plain line when "Optimise for this PC" was on but could not be used (setup_build.ps1's
+        // "  pgo: not used: <why>"): the game is the normal build, Setup did not fail.
+        string PgoLine()
+        {
+            if (pgoUsed || string.IsNullOrEmpty(pgoWhy)) return "";
+            return " Optimise for this PC didn't work this time (" + pgoWhy.TrimEnd('.') + "), so the game was built the normal way.";
+        }
+
+        // The "Optimise for this PC" choice, kept in the game folder for the next Install or Update.
+        static string NoPgoMark(string r) { return Path.Combine(r, "work\\setup-no-pgo"); }
+
+        void RememberPgo(bool on)
+        {
+            if (repo == null) return;
+            string m = NoPgoMark(repo);
+            try
+            {
+                if (on) { if (File.Exists(m)) File.Delete(m); }
+                else { Directory.CreateDirectory(Path.GetDirectoryName(m)); File.WriteAllText(m, "Setup's \"Optimise for this PC\" was off\r\n"); }
+            }
+            catch (Exception) { }
+        }
 
         void Fail(string reason)
         {
@@ -2669,8 +2751,11 @@ namespace Inf2Setup
             }
             else Util.RefreshPath();
             // pressing Install accepts Microsoft's license (the line under the button says so)
+            bool pgo = pgoBox.Checked;
+            RememberPgo(pgo);
             string cmd = Util.PowerShellFile(script, false) + " -Disc " + Util.Arg(disc) + " -Rpcs3 " + Util.Arg(rpcs3) +
-                         (opt.TestFailBuild ? "" : " -AcceptMsvcLicense") + (opt.NoShortcut ? " -NoShortcut" : "") + (opt.NoCleanup ? "" : " -Cleanup");
+                         (opt.TestFailBuild ? "" : " -AcceptMsvcLicense") + (opt.NoShortcut ? " -NoShortcut" : "") + (opt.NoCleanup ? "" : " -Cleanup") +
+                         (pgo ? " -Pgo" : "");
             ResetProgress();
             compileLog = Path.Combine(repo, "work\\logs\\compile.log");
             Status("Getting ready\u2026");
@@ -2679,6 +2764,7 @@ namespace Inf2Setup
             if (opt.TestFailBuild) AddLog("(test: the build fails on purpose at step 2, without the license flag)");
             AddLog("RPCS3: " + rpcs3);
             AddLog("game: " + disc);
+            AddLog("optimise for this PC: " + (pgo ? "yes (-Pgo)" : "no"));
             jobKind = JobKind.Build;
             AddLog("> setup_build.ps1" + (opt.OnlyCache ? " (PORT_ONLY_CACHE=1, Windows-only PATH)" : ""));
             Job j = new Job();
@@ -2691,16 +2777,32 @@ namespace Inf2Setup
 
         // How much of the whole build each step of setup_build.ps1 is (percent, on the test PC).
         static readonly double[] StepWeight = { 0, 1, 22, 4, 2, 3, 10, 1, 52, 1, 4 };
+        // With "Optimise for this PC" (-Pgo, 12 steps): 8 = translate + the training build, 9 = the training
+        // (the game plays by itself), 10 = the final compile.
+        static readonly double[] StepWeightPgo = { 0, 1, 14, 3, 1, 2, 6, 1, 34, 19, 15, 1, 3 };
         static readonly double[] DownloadWeight = { 0, 3, 10, 72, 15 };
         // tools\rebuild_win.py's own steps inside step 8 ("[ppu]", ...), and their share of it.
         static readonly string[] SubNames = { "inputs", "port", "firmware", "ppu", "spu", "jobs", "compile" };
         static readonly double[] SubWeight = { 2, 3, 10, 22, 4, 9, 50 };
-        const int ToolsStep = 2, CompileStep = 8, CleanupStep = 10;
+        const int ToolsStep = 2, CompileStep = 8, PgoSteps = 12, TrainStep = 9, FinalCompileStep = 10;
+
+        bool PgoFlow() { return jSteps == PgoSteps; }
+        // a step whose rebuild_win.py lines ("[compile]") and ninja lines in the compile log move the bar
+        bool Compiling(int st) { return st == CompileStep || (PgoFlow() && st == FinalCompileStep); }
 
         void ResetProgress()
         {
-            jStep = 0; jSteps = 1; jFrac = 0; bSub = -1; ninjaDone = ninjaTotal = 0;
-            failReason = null; sawDone = false; compilePos = -1;
+            jStep = 0; jSteps = 1; jFrac = 0; bSub = -1; ninjaDone = ninjaTotal = 0; shownFrac = 0;
+            failReason = null; sawDone = false; compilePos = -1; playerNote = null; pgoUsed = false; pgoWhy = null;
+        }
+
+        void ShowPlayerNote(string note)
+        {
+            playerNote = note;
+            if (state != State.Working) return;
+            line.Text = note ?? "";
+            line.ForeColor = Theme.Dim;
+            line.Visible = note != null;
         }
 
         void JobLine(string line)
@@ -2713,18 +2815,29 @@ namespace Inf2Setup
                 int slash = t.IndexOf('/'), close = t.IndexOf(']');
                 if (slash > 4 && int.TryParse(t.Substring(4, slash - 4), out n)) { jStep = n; jFrac = 0; bSub = -1; ninjaTotal = 0; }
                 if (slash > 0 && close > slash && int.TryParse(t.Substring(slash + 1, close - slash - 1), out n)) jSteps = n;
+                if (playerNote != null) ShowPlayerNote(null);
             }
             else if (t.StartsWith("== FAILED:", StringComparison.Ordinal)) failReason = t.Substring(10).Trim();
             else if (t.StartsWith("== done", StringComparison.Ordinal)) sawDone = true;
             else if (t.StartsWith("error:", StringComparison.Ordinal)) failReason = t.Substring(6).Trim();
             else if (t.StartsWith("progress:", StringComparison.Ordinal)) { int pct = Util.Percent(t); if (pct >= 0) jFrac = pct / 100.0; }
-            else if (jobKind == JobKind.Build && jStep == CompileStep && t.Length > 2 && t[0] == '[' && t[t.Length - 1] == ']' &&
+            else if (jobKind == JobKind.Build && t.StartsWith("compile log:", StringComparison.Ordinal))
+            {
+                // setup_build.ps1 -Pgo: the training build logs to compile-build-train.log, the game to compile.log
+                string rel = t.Substring(12).Trim();
+                if (rel.Length > 0 && repo != null) { compileLog = Path.Combine(repo, rel); compilePos = -1; }
+            }
+            else if (jobKind == JobKind.Build && t.StartsWith("player-note:", StringComparison.Ordinal)) ShowPlayerNote(t.Substring(12).Trim());
+            else if (jobKind == JobKind.Build && t.StartsWith("pgo: used", StringComparison.Ordinal)) pgoUsed = true;
+            else if (jobKind == JobKind.Build && t.StartsWith("pgo: not used:", StringComparison.Ordinal)) pgoWhy = t.Substring(14).Trim();
+            else if (jobKind == JobKind.Build && Compiling(jStep) && t.Length > 2 && t[0] == '[' && t[t.Length - 1] == ']' &&
                      Array.IndexOf(SubNames, t.Substring(1, t.Length - 2)) >= 0)
             {
                 bSub = Array.IndexOf(SubNames, t.Substring(1, t.Length - 2));
                 if (bSub == SubNames.Length - 1)
                 {
                     // the compile writes to work\logs\compile.log: follow ninja's [k/N] there from here on
+                    ninjaTotal = 0;
                     try { compilePos = File.Exists(compileLog) ? new FileInfo(compileLog).Length : 0; } catch (Exception) { compilePos = 0; }
                 }
             }
@@ -2733,7 +2846,7 @@ namespace Inf2Setup
 
         void TailCompileLog()
         {
-            if (jStep != CompileStep || bSub != SubNames.Length - 1 || compilePos < 0) return;
+            if (!Compiling(jStep) || bSub != SubNames.Length - 1 || compilePos < 0) return;
             try
             {
                 using (FileStream fs = new FileStream(compileLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
@@ -2765,13 +2878,15 @@ namespace Inf2Setup
 
         double JobFraction()
         {
-            double[] w = jobKind == JobKind.Download ? DownloadWeight : StepWeight;
+            double[] w = jobKind == JobKind.Download ? DownloadWeight : PgoFlow() ? StepWeightPgo : StepWeight;
             if (jStep < 1 || jSteps + 1 != w.Length) return 0;
             int st = Math.Min(jStep, jSteps);
             double done = 0;
             for (int i = 1; i < st; i++) done += w[i];
             double f = jFrac;
-            if (jobKind == JobKind.Build && st == CompileStep)
+            if (jobKind == JobKind.Build && PgoFlow() && st == FinalCompileStep)
+                f = bSub == SubNames.Length - 1 && ninjaTotal > 0 ? ninjaDone / (double)ninjaTotal : 0;   // only "[compile]" here
+            else if (jobKind == JobKind.Build && st == CompileStep)
             {
                 f = 0;
                 if (bSub >= 0)
@@ -2791,7 +2906,9 @@ namespace Inf2Setup
             if (jobKind == JobKind.Download) return (updating ? "Getting the newest version\u2026 " : "Downloading the game's build files\u2026 ") + (int)(JobFraction() * 100) + "%";
             if (jStep < ToolsStep) return "Getting ready\u2026";
             if (jStep == ToolsStep) return "Downloading tools\u2026 " + (int)(jFrac * 100) + "%";
-            if (jStep < CleanupStep) return string.Format("Building\u2026 {0} of 7", jStep - ToolsStep);
+            if (PgoFlow() && jStep == TrainStep && playerNote != null) return "Training the build on your PC\u2026 " + (int)(jFrac * 100) + "%";
+            // the last step cleans up (10 of 10, or 12 of 12 with -Pgo); 3 .. last-1 build
+            if (jStep < jSteps) return string.Format("Building\u2026 {0} of {1}", jStep - ToolsStep, jSteps - ToolsStep - 1);
             return "Cleaning up\u2026";
         }
 
@@ -2804,6 +2921,8 @@ namespace Inf2Setup
             while (count < 4000 && j.Lines.TryDequeue(out ln)) { count++; JobLine(ln); }
             if (jobKind == JobKind.Build) TailCompileLog();
             double v = JobFraction();
+            // never backwards in a build (with -Pgo, step 8 may compile twice: with the last training, then a training build)
+            if (jobKind == JobKind.Build) { v = Math.Max(shownFrac, v); shownFrac = v; }
             bar.Value = v;
             status.Text = StatusText();
             if (jobKind == JobKind.Build) Text = (int)(v * 100) + "% - " + Title;
@@ -2828,7 +2947,8 @@ namespace Inf2Setup
                 ExitCode = 0;
                 FinishUpdate(true);
                 SetState(State.Done);
-                if (opt.Update) line.Text = "Updated" + (string.IsNullOrEmpty(opt.To) ? "" : " to " + opt.To) + ". Your saves, settings, mods and controls are kept.";
+                if (opt.Update) line.Text = "Updated" + (string.IsNullOrEmpty(opt.To) ? "" : " to " + opt.To) + (pgoUsed ? ", optimised for this PC" : "") +
+                                            ". Your saves, settings, mods and controls are kept." + PgoLine();
                 if (opt.ExitWhenDone) CloseSoon();
                 return;
             }

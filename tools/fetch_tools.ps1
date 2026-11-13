@@ -4,8 +4,9 @@
 #                           Windows' own tar.exe                                        ~47 MB
 #   2. tools\fetch_tools.py with that Python: CMake, Ninja, LLVM, and Microsoft's MSVC + Windows SDK
 #      (those two only with -AcceptMsvcLicense: https://go.microsoft.com/fwlink/?LinkId=2179911)
-#   tools\fetch_tools.ps1 [-AcceptMsvcLicense]
-param([switch]$AcceptMsvcLicense)
+#   tools\fetch_tools.ps1 [-AcceptMsvcLicense] [-Pgo]
+# -Pgo (setup_build.ps1 -Pgo, "Optimise for this PC"): a kept tools-cache\llvm without llvm-profdata.exe gets it
+param([switch]$AcceptMsvcLicense, [switch]$Pgo)
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "setup_common.ps1")
 $root = Split-Path -Parent $PSScriptRoot
@@ -35,6 +36,7 @@ if (-not $py) {
 # Python writes progress and notes; run it under "Continue" so a line on stderr is not a failure
 $pyArgs = @("-I", (Join-Path $PSScriptRoot "fetch_tools.py"))
 if ($AcceptMsvcLicense) { $pyArgs += "--accept-msvc-license" }
+if ($Pgo) { $pyArgs += "--pgo" }
 $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 $why = $null
 try { & $py @pyArgs 2>&1 | ForEach-Object { $s = "$_"; if ($s.Trim() -and $s -notmatch '^\s*progress:') { $why = $s.Trim() }; $s } }

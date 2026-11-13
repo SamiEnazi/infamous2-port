@@ -5,7 +5,10 @@
 #          finished game, work\logs\compile*.log, build\ (cached compile settings)
 # Keeps:   work\port\build\Infamous2Recomp.exe + SDL2.dll (+ its .pdb, for crash reports),
 #          work\EBOOT.elf (the game reads it), work\icon, game\ (your game's files, firmware files, saves),
-#          config.local.json, eboot\, the desktop shortcut
+#          config.local.json, eboot\, the desktop shortcut, and "Optimise for this PC"'s profile
+#          (work\pgo-setup\setup-*.profdata, ~30 MB, with the training runs' logs): an update compiles with
+#          it instead of training again while it still fits (tools\setup_build.ps1 -Pgo)
+# Both ways delete what a training left behind: work\port\build-train, the runs' save copies and counters.
 # A later update just downloads the tools again. Never runs in the development folder (it has
 # PLAN.md) unless -Force. Prints "freed: <GB>" for Setup.
 #   tools\setup_cleanup.ps1 -KeepBuildCache   (what Setup does after a build, unless told otherwise)
@@ -45,6 +48,12 @@ function Remove-Tree([string]$Path) {
 }
 
 $before = Get-TreeSize $root
+# "Optimise for this PC" (tools\pgo_train.ps1): the training build and what a stopped training left in its runs
+if ($env:PORT_PGO_KEEP_TRAIN -ne "1") { Remove-Tree (Join-Path $root "work\port\build-train") }   # (a test keeps it)
+foreach ($r in Get-ChildItem -LiteralPath (Join-Path $root "work\pgo-setup\runs") -Directory -ErrorAction SilentlyContinue) {
+    Remove-Tree (Join-Path $r.FullName "gamedata")
+    Get-ChildItem -LiteralPath $r.FullName -Filter "*.profraw" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+}
 if ($KeepBuildCache) {
     "  cleaning up: logs and leftovers; the build tools and build files stay for quick updates"
     foreach ($d in "tools-cache\downloads", "tools-cache\msvc.unpack", "tools-cache\sdk.unpack", "deps\sdl2-dl", "deps\glslang-build", "work\port-keep") {

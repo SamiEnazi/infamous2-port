@@ -14,16 +14,30 @@
 #      no tools and rebuilds only what changed, in minutes. -NoBuildCache (or PORT_BUILD_CACHE=0: Setup.exe
 #      --prepare, for RecompLauncher) deletes them too, as before.
 #   tools\setup_build.ps1 -Disc <folder holding PS3_GAME> -Rpcs3 <RPCS3 folder> [-NoShortcut]
-#                         [-AcceptMsvcLicense] [-Cleanup] [-NoBuildCache]
+#                         [-AcceptMsvcLicense] [-Cleanup] [-NoBuildCache] [-Pgo]
 # -AcceptMsvcLicense: Microsoft's MSVC + Windows SDK files are under the Visual Studio Build Tools
 # license (https://go.microsoft.com/fwlink/?LinkId=2179911); Setup asks first.
+# -Pgo ("Optimise for this PC", Setup.exe's checkbox): profile-guided optimisation trained on this PC,
+# 12 steps instead of 10 (steps 1-7 as above):
+#   8. translate the game, then compile a training build (instrumented) -> work\port\build-train
+#   9. train it: the game plays by itself in a window for a few minutes, sound off (tools\pgo_train.ps1)
+#  10. compile the game with what it learned -> work\port\build\Infamous2Recomp.exe
+#  11. a desktop shortcut   12. cleaning up
+# PGO never makes Setup fail: when the training build, the training or the optimised compile fails, the
+# game is compiled the normal way and the line "  pgo: not used: <why>" says why (Setup.exe shows it).
+# Updates: the profile is kept (work\pgo-setup\setup-<time>.profdata, ~30 MB, never published) and the new
+# version is compiled with it in step 8: clang uses it for every function whose code did not change and
+# compiles a changed one without it (it never misapplies counts). When rebuild_win.py then reports that hot
+# code changed since the training (its "retrain" hint), or the profile cannot be read, Setup trains again
+# (steps 8-10, the build made with the old profile stays as the fallback); else the update stays quick.
 param(
     [Parameter(Mandatory = $true)][string]$Disc,
     [Parameter(Mandatory = $true)][string]$Rpcs3,
     [switch]$NoShortcut,
     [switch]$AcceptMsvcLicense,
     [switch]$Cleanup,
-    [switch]$NoBuildCache
+    [switch]$NoBuildCache,
+    [switch]$Pgo
 )
 $ErrorActionPreference = "Stop"
 # Setup.exe reads these lines through a pipe, in UTF-8 (a console keeps its own code page)
@@ -32,7 +46,8 @@ trap { "== FAILED: $_"; exit 1 }   # the reason lands in the log Setup shows
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "setup_common.ps1")
 $sw = [Diagnostics.Stopwatch]::StartNew()
-function Step([int]$n, [string]$text) { "== [$n/10] $text   ($([int]$sw.Elapsed.TotalMinutes) min so far)" }
+$nSteps = if ($Pgo) { 12 } else { 10 }
+function Step([int]$n, [string]$text) { "== [$n/$nSteps] $text   ($([int]$sw.Elapsed.TotalMinutes) min so far)" }
 # Native tools (git, pip, cmd, python, robocopy) write progress and warnings to stderr; under
 # "Stop" with the output redirected to Setup's log, Windows PowerShell would turn the first such
 # line into a failure. Run them under "Continue", keep their lines, judge them by exit code.
@@ -105,7 +120,7 @@ $cfg["rpcs3"] = $Rpcs3
 [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json))
 
 Step 2 "the build tools (a temporary download into tools-cache\, nothing is installed)"
-& (Join-Path $PSScriptRoot "fetch_tools.ps1") -AcceptMsvcLicense:$AcceptMsvcLicense
+& (Join-Path $PSScriptRoot "fetch_tools.ps1") -AcceptMsvcLicense:$AcceptMsvcLicense -Pgo:$Pgo
 $py = Get-PortTool python
 if (-not $py) { throw "no Python after getting the build tools" }
 
@@ -186,16 +201,148 @@ if (-not (Test-Path -LiteralPath (Join-Path $root "deps\glslang-install\lib\cmak
 Step 7 "the exe's icon (from your copy's ICON0.PNG)"
 try { & (Join-Path $PSScriptRoot "make_icon.ps1") -Icon0 (Join-Path $Disc "PS3_GAME\ICON0.PNG") } catch { "  no icon: $_ (the game still builds)" }
 
-Step 8 "translating and compiling the game (the long part: 15-40 minutes)"
 # With the build files of an earlier build (an update): a translation step whose inputs did not change is
 # skipped, and only what changed is compiled again (tools\rebuild_win.py, PORT_LIFT_REUSE)
 $env:PORT_LIFT_REUSE = "1"
-Invoke-Native { & $venvPy -I (Join-Path $PSScriptRoot "rebuild_win.py") }
-if ($LASTEXITCODE) { throw "the build failed: see work\logs\ (python -I tools\build_errors.py work\logs\compile.log)" }
 $exe = Join-Path $root "work\port\build\Infamous2Recomp.exe"
+$buildFailed = "the build failed: see work\logs\ (python -I tools\build_errors.py work\logs\compile.log)"
+if (-not $Pgo) {
+    Step 8 "translating and compiling the game (the long part: 15-40 minutes)"
+    Invoke-Native { & $venvPy -I (Join-Path $PSScriptRoot "rebuild_win.py") }
+    if ($LASTEXITCODE) { throw $buildFailed }
+} else {
+    $rebuild = Join-Path $PSScriptRoot "rebuild_win.py"
+    # rebuild_win.py with PORT_PGO / PORT_BUILD set for this one call; its lines go on to Setup and into $script:rbOut
+    function Invoke-Rebuild([string[]]$RbArgs, [string]$PgoMode, [string]$BuildDir) {
+        $keep = @{ PORT_PGO = $env:PORT_PGO; PORT_BUILD = $env:PORT_BUILD }
+        $script:rbOut = @(); $script:rbRc = 1
+        try {
+            if ($PgoMode) { $env:PORT_PGO = $PgoMode } else { Remove-Item env:PORT_PGO -ErrorAction SilentlyContinue }
+            if ($BuildDir) { $env:PORT_BUILD = $BuildDir } else { Remove-Item env:PORT_BUILD -ErrorAction SilentlyContinue }
+            Invoke-Native { & $venvPy -I $rebuild @RbArgs } | ForEach-Object { $script:rbOut += $_; $_ }
+            $script:rbRc = $LASTEXITCODE
+        } finally {
+            foreach ($k in @($keep.Keys)) {
+                if ($null -ne $keep[$k]) { Set-Item "env:$k" $keep[$k] } else { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+    # llvm-profdata.exe beside the clang-cl that compiles (port_paths.py: tools-cache, config.local.json or this PC's)
+    function Find-LlvmProfdata {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        try { $d = & $venvPy -I (Join-Path $PSScriptRoot "port_paths.py") llvm 2>$null | Select-Object -Last 1 } catch { $d = $null }
+        finally { $ErrorActionPreference = $eap }
+        if (-not $d) { return $null }
+        $p = Join-Path ([string]$d).Trim() "bin\llvm-profdata.exe"
+        if (Test-Path -LiteralPath $p) { $p } else { $null }
+    }
+    function Test-Profile([string]$Path) {   # this LLVM reads it
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        try { & $llvmProf show $Path 2>&1 | Out-Null; $ok = ($LASTEXITCODE -eq 0) } catch { $ok = $false } finally { $ErrorActionPreference = $eap }
+        $ok
+    }
+    function Remove-Tree([string]$Path) {   # rd /s removes a junction itself, never what it points to
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        try { cmd /c rd /s /q "$Path" 2>&1 | Out-Null } finally { $ErrorActionPreference = $eap }
+    }
+    $train = Join-Path $root "work\port\build-train"
+    $trainExe = Join-Path $train "Infamous2Recomp.exe"
+    $pgoDir = Join-Path $root "work\pgo-setup"
+    # tests (tools\setup_exe\README.md): PORT_PGO_TEST=fail:llvm | fail:trainbuild | fail:compile | stale | stopafter:<s>,
+    # PORT_PGO_KEEP_TRAIN=1 keeps the training build; PORT_PGO_TRAIN=opening|save|opening,save picks the runs
+    $test = [string]$env:PORT_PGO_TEST
+    $why = $null; $used = $null; $pd = $null; $fallback = $false
+    $llvmProf = if ($test -eq "fail:llvm") { $null } else { Find-LlvmProfdata }
+    if (-not $llvmProf) { $why = "this LLVM has no llvm-profdata.exe" }
+    # an earlier training's profile (an update): kept when this LLVM reads it
+    $kept = $null
+    if ($llvmProf) {
+        $kept = Get-ChildItem -LiteralPath $pgoDir -Filter "setup-*.profdata" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
+        if ($kept -and -not (Test-Profile $kept.FullName)) {
+            "  the last training's profile ($($kept.Name)) cannot be read by this LLVM: training again"
+            Remove-Item -LiteralPath $kept.FullName -Force -ErrorAction SilentlyContinue; $kept = $null
+        }
+    }
+
+    if ($kept) {
+        Step 8 "translating the game, then compiling it with what the last training on this PC learned (the long part: 15-40 minutes)"
+    } elseif ($why) {
+        Step 8 "translating the game (the long part: 5-15 minutes)"
+    } else {
+        Step 8 "translating the game, then compiling a training build (the long part: 20-50 minutes)"
+    }
+    Invoke-Native { & $venvPy -I $rebuild --only "inputs,port,firmware,ppu,spu,jobs" }
+    if ($LASTEXITCODE) { throw $buildFailed }
+    if ($kept) {
+        "  compile log: work\logs\compile.log"
+        Invoke-Rebuild @("--only", "compile") ("use:" + $kept.FullName) ""
+        if ($script:rbRc -eq 0 -and (Test-Path -LiteralPath $exe)) {
+            $fallback = $true   # a game built with the last training: kept if training again does not work
+            # rebuild_win.py: "PGO: n function(s) changed since the profile ... -- retrain when these are hot"
+            $stale = @($script:rbOut | Where-Object { $_ -match 'PGO WARNING|-- retrain when these are hot' })
+            if (-not $stale.Count -and $test -ne "stale") { $used = "the training of $($kept.LastWriteTime.ToString('yyyy-MM-dd')) still fits this version" }
+            else { "  hot code changed since the last training: training again (the game just built stays if that does not work)" }
+        } else { "  compiling with the last training failed: training again" }
+    }
+    if (-not $used -and -not $why) {
+        Remove-Item -LiteralPath $trainExe -ErrorAction SilentlyContinue   # never train an older one
+        "  compile log: work\logs\compile-build-train.log"
+        Invoke-Rebuild @("--only", "compile") "gen" $train
+        if ($script:rbRc -or -not (Test-Path -LiteralPath $trainExe) -or $test -eq "fail:trainbuild") { $why = "the training build did not compile (work\logs\compile-build-train.log)" }
+    }
+
+    Step 9 $(if ($used) { "training: not needed ($used)" } elseif ($why) { "training: skipped" }
+             else { "training the build on your PC (the game plays by itself in a window: please don't touch it)" })
+    if (-not $used -and -not $why) {
+        New-Item -ItemType Directory -Force $pgoDir | Out-Null
+        # a new name every time: ninja rebuilds nothing when only the content of a profile at the same path changed
+        $pd = Join-Path $pgoDir ("setup-{0:yyyyMMdd-HHmmss}.profdata" -f (Get-Date))
+        $runs = if ($env:PORT_PGO_TRAIN) { $env:PORT_PGO_TRAIN } else { "opening,save" }
+        $stopAfter = if ($test -match '^stopafter:(\d+)$') { [int]$Matches[1] } else { 0 }
+        $psExe = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+        $tOut = @()
+        Invoke-Native { & $psExe -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $PSScriptRoot "pgo_train.ps1") -Exe $trainExe -Profdata $pd -LlvmProfdata $llvmProf -Runs $runs -StopAfter $stopAfter } |
+            ForEach-Object { $tOut += $_; $_ }
+        if ($LASTEXITCODE -or -not (Test-Path -LiteralPath $pd)) {
+            $w = @($tOut | ForEach-Object { if ("$_" -match '^\s*why:\s*(.+)$') { $Matches[1].Trim() } }) | Select-Object -Last 1
+            $why = "the training run gave nothing usable: $(if ($w) { $w } else { 'see the lines above' })"
+            Remove-Item -LiteralPath $pd -ErrorAction SilentlyContinue; $pd = $null
+        }
+    } elseif (-not $used) { "  skipped: $why" }
+    if ($env:PORT_PGO_KEEP_TRAIN -ne "1") { Remove-Tree $train }   # the training build is never the game
+
+    if ($used) { Step 10 "compiling the game, optimised for this PC: done in step 8" }
+    else {
+        Step 10 $(if ($pd) { "compiling the game, optimised for this PC" } else { "compiling the game" })
+        $built = $false
+        if ($pd) {
+            "  compile log: work\logs\compile.log"
+            Invoke-Rebuild @("--only", "compile") ("use:" + $pd) ""
+            if ($script:rbRc -or $test -eq "fail:compile") { $why = "the optimised compile failed (work\logs\compile.log)" }
+            else { $built = $true; $used = "trained on this PC now" }
+        }
+        if (-not $built) {
+            if ($fallback -and -not $pd) { $used = "the last training, partly out of date: $why" }   # the game step 8 built
+            else {
+                "  note: Optimise for this PC did not work this time ($why): compiling the game the normal way"
+                "  compile log: work\logs\compile.log"
+                Invoke-Rebuild @("--only", "compile") "" ""
+                if ($script:rbRc) { throw $buildFailed }
+            }
+        }
+    }
+    if ($used) {
+        "  pgo: used ($used)"
+        if ($pd -and $used -like "trained*") {   # the profile the game was built with stays for updates; older ones go
+            Get-ChildItem -LiteralPath $pgoDir -Filter "setup-*.profdata" -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -ne $pd } | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    } else { "  pgo: not used: $why" }
+}
 if (-not (Test-Path -LiteralPath $exe)) { throw "no $exe after the build" }
 
-Step 9 "desktop shortcut"
+Step ($nSteps - 1) "desktop shortcut"
 if (-not $NoShortcut) {
     $ws = New-Object -ComObject WScript.Shell
     $lnkPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "inFAMOUS 2 (PC port).lnk"
@@ -210,7 +357,7 @@ if (-not $NoShortcut) {
     "  $lnkPath"
 } else { "  skipped (-NoShortcut)" }
 
-Step 10 "cleaning up"
+Step $nSteps "cleaning up"
 if ($Cleanup) { & (Join-Path $PSScriptRoot "setup_cleanup.ps1") -KeepBuildCache:(-not $NoBuildCache -and $env:PORT_BUILD_CACHE -ne "0") }
 else { "  kept the build tools and files (no -Cleanup): tools\setup_cleanup.ps1 deletes them" }
 "== done in $([int]$sw.Elapsed.TotalMinutes) min: play with the desktop shortcut or 'Play inFAMOUS 2.cmd'. RPCS3 is not needed to play (an update reads the game's update and firmware from it again: keep it)."

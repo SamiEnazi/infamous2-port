@@ -43,7 +43,67 @@ What Install does, in order. It asks nothing it can find out itself:
 
    Then it builds the game and deletes the tools and the build's leftovers (`tools\setup_cleanup.ps1`).
    The status line reads "Downloading tools... / Building... 3 of 7 / Cleaning up...".
+   With **Optimise for this PC** ticked (the default) it passes `-Pgo`: see below.
 5. **Play.**
+
+## Optimise for this PC
+
+A checkbox under Install, on by default and remembered per folder (`work\setup-no-pgo` when it was off;
+`--no-pgo` starts with it off). It makes the game faster where the CPU sets the pace, with profile-guided
+optimisation (PGO) trained **on the player's own PC**: the game is compiled once with counters, plays by itself
+for a few minutes, and is compiled again with what the counters saw. A profile comes from running the game,
+so it is never published (`tools\publish_export.ps1` refuses `*.profdata`, `*.profraw` and `work\`): every
+player makes their own. On the test PC (i5-13600K) a clean install took 33 minutes with it and 17 without:
+the training itself is 6.5 minutes, the rest is a second compile. The player build got 5-9% more fps at the
+cathedral spire (a city view the training never visits) on the full CPU, and 6-11% with the game held to 4
+cores / 8 threads. `setup_build.ps1 -Pgo` has 12 steps instead of 10:
+
+1. **Step 8:** the game is translated, then compiled as a *training build* (`rebuild_win.py`, `PORT_PGO=gen`,
+   into `work\port\build-train`, log `work\logs\compile-build-train.log`).
+2. **Step 9, training** (`tools\pgo_train.ps1`). The training build opens in a window and plays by itself:
+   the sound is off, a scripted controller plays, the player's own controller, keyboard and mouse do nothing
+   in it, and the window title says what is going on. The status line reads "Training the build on your
+   PC... 40%"; the line under it says how long it takes and not to touch it. Two runs:
+   - **A new game** (always): the title (START until the opening montage starts), the montage and the opening
+     cutscenes, the tutorial and the fight on the docks with `tools\fast_combat.steps`' inputs, then one more
+     looser round of the same kinds of input. About 6 minutes.
+   - **The newest story save**, when there is one: about 100 s of looking around, walking, jumping and
+     fighting wherever it is. About 3 minutes.
+
+   Each run plays on its **own copy** of the saves (`work\pgo-setup\runs\<run>\gamedata`, deleted after the
+   run) and of the settings file (`%APPDATA%\inFAMOUS2-port\settings.ini`, a portable folder's, or the
+   caller's `PS3_OVERLAY_INI`); the player's files are only read. It uses the game's own shader cache, so the
+   training also warms it for play.
+3. **Step 10:** the runs' counters are merged (`llvm-profdata merge`) into
+   `work\pgo-setup\setup-<time>.profdata` (a new name every time: ninja rebuilds nothing when only the content
+   of a profile at the same path changes), and the game is compiled with it (`PORT_PGO=use:<profile>`).
+
+**Nothing in the training can miss.** It never looks at the screen: the game is driven from its own log lines
+(the menu, the montage, the city-falls cutscene) and its own first world frame (the save). When the city-falls
+line never comes, the scripted inputs start anyway 300 s after the montage, and the looser second round
+answers a tutorial prompt the first round met too early. The game writes its counters every 40 s and each
+complete write is set aside at once, so a run cut short (a crash, the window closed) still counts. Every run
+that reached the game is merged, however far it got. The one run that is **not** merged is one that never got
+past the title screen: all gameplay code would have zero counts in it, and clang compiles zero-count code as
+cold (for size, not inlined), so that game would be *slower* than the normal build.
+
+**PGO never makes Setup fail.** No `llvm-profdata.exe`, the training build does not compile, no run reached
+the game, the merge fails, or the optimised compile fails: step 10 compiles the normal way, the log says
+`  pgo: not used: <why>`, and the Play screen reads "Ready to play. Optimise for this PC didn't work this time
+(<why>), so the game was built the normal way." When it worked: "Ready to play, optimised for this PC."
+
+**Updates** (Install over an install, "Update to the latest version", F2 > Update): the profile stays
+(`work\pgo-setup`, about 30 MB, kept by both cleanups) and step 8 compiles the new version with it. Clang checks
+every function against the profile: unchanged functions get their counts, a changed one compiles without
+them, so a profile is only ever used where it still fits. When `rebuild_win.py` then reports that hot code
+changed since the training (its "retrain" hint), or this LLVM can't read the profile, Setup trains again
+(steps 8-10; the game just built with the old profile stays if the new training does not work). Otherwise
+steps 9 and 10 are skipped and the update stays quick.
+
+Test switches (environment): `PORT_PGO_TRAIN=opening|save|opening,save` picks the runs;
+`PORT_PGO_TEST=fail:llvm|fail:trainbuild|fail:compile` fails that stage, `stale` treats a kept profile as out of
+date, `stopafter:<s>` closes the game window after `<s>` s of each run (as a player closing it would);
+`PORT_PGO_KEEP_TRAIN=1` keeps the training build. `tools\pgo_train.ps1 -StopAfter <s>` does the same on its own.
 
 **Updating:** run the newest `Setup.exe`, either in the game folder or next to it, and press Install
 (or "Update to the latest version" under Play). On a folder that already has the port, Install:
@@ -135,6 +195,7 @@ trust: the workflow keeps that exe as the run's artifact `Setup.exe-signed` and 
 | `--no-shortcut` | pass `-NoShortcut` (no desktop shortcut) |
 | `--no-cleanup` | keep the build tools and files afterwards |
 | `--only-cache` | the build sees only `tools-cache\`: `PORT_ONLY_CACHE=1` and a PATH of Windows folders only |
+| `--no-pgo` | start with "Optimise for this PC" off (no `-Pgo`) |
 | `--exit-when-done` | close after the build. The exit code is 0 for built, 1 for stopped and 2 for closed early. |
 | `--page done` / `--page ask` | show the Play screen / the "Where is RPCS3?" dialog (for screenshots) |
 | `--test-fail-build` | make the build fail on purpose at step 2 (no license flag), to check that the old game and the saves come back |
@@ -154,8 +215,10 @@ switches Setup.exe is exactly as before.
   - runs the same checks
   - backs up an existing game and its saves
   - runs `tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup -NoShortcut`. The launcher's setup screen says that
-    going ahead accepts Microsoft's license. There is no "Optimise for this PC": its training run opens the
-    game's window, which a setup step must not.
+    going ahead accepts Microsoft's license. There is no "Optimise for this PC" unless `--pgo` is given: its
+    training opens the game's window for a few minutes, which the launcher's setup step does not announce, and
+    each launcher install is a new folder, so there is never an earlier training to reuse. With `--pgo` the build
+    has 12 steps; the progress lines and exit codes are the same (a training that does not work never fails it).
 
   It prints `progress <0..1> <text>` lines, writes the whole log to `play\setup.log`, and after a build writes
   `work\launcher-built.txt` (a copy of `port-version.txt`).
@@ -173,7 +236,7 @@ The updater (F2 > Update in the game, `tools\update_check.ps1`, which builds its
   window and does at once what "Update to the latest version" does: saves backed up, the newest port over the
   folder, the build, the saves reapplied; the last line says "Updated to v0.5.1", then Play. One Setup per
   port folder (the lock is the folder's, wherever this Setup.exe is).
-- `--update --no-window [--dry-run]`: the same without a window (tests, scripts), its log in `play\update.log`,
+- `--update --no-window [--dry-run] [--pgo]`: the same without a window (tests, scripts), its log in `play\update.log`,
   `--prepare`'s progress lines and exit codes; `--dry-run` downloads and checks, then stops before the build.
   The game folder is `--disc`, else the `game\disc` link.
 - An update keeps the time of every port, engine and port-base file that did not change, and gives a changed
@@ -212,5 +275,9 @@ build or the game stops too. Exit codes (`recomplauncher.json`'s `exit_codes` ha
   or Setup.cmd in such a folder). A game folder on a network drive is refused the same way.
 - The first build downloads about 1.3 GB of tools. They and the build files stay (about 2.6 GB) so an update
   builds only what changed; `tools\setup_cleanup.ps1` deletes them. `--prepare` (RecompLauncher) still deletes them.
+- During "Optimise for this PC" the game window opens by itself for about 6 minutes (9 with a story save).
+  Closing it ends that run early: what was counted is used when the run got past the title, else the game is
+  built the normal way. An install from v0.5.1 or older kept an LLVM without `llvm-profdata.exe`: the first
+  update with the box ticked downloads LLVM's archive once more (862 MB) and takes just that file from it.
 - GitHub's API answers 60 questions an hour per network without a sign-in. Setup asks 3 per download.
 - Only one Setup runs per folder at a time.

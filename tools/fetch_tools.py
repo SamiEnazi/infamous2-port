@@ -57,7 +57,10 @@ ARCHIVES = {
 }
 # Only what builds the port is unpacked from LLVM's archive (it holds 5+ GB of developer files).
 LLVM_KEEP = ("bin/clang-cl.exe bin/lld-link.exe bin/llvm-lib.exe bin/llvm-ar.exe bin/llvm-ranlib.exe bin/llvm-mt.exe "
-             "bin/llvm-rc.exe bin/clang-scan-deps.exe lib/clang")      # ~300 MB unpacked
+             "bin/llvm-rc.exe bin/clang-scan-deps.exe bin/llvm-profdata.exe lib/clang")      # ~300 MB unpacked
+# llvm-profdata.exe (Setup's "Optimise for this PC", tools/setup_build.ps1 -Pgo: it merges the training's counters)
+# came later: a tools-cache\llvm unpacked before it gets just that file with --pgo (get_llvm_member)
+LLVM_PROFDATA = "bin/llvm-profdata.exe"
 CABS_ESTIMATE = 260 * 1048576    # the SDK's .cab files, until the .msi files say which ones
 
 
@@ -237,6 +240,39 @@ def get_archive(key, prog):
     print(f"  {a['label']}: tools-cache\\{key}", flush=True)
 
 
+def llvm_member_missing(member):
+    """A kept tools-cache\\llvm (of the version this script pins) without `member` (unpacked before it was kept)."""
+    return bool(port_paths.cached("llvm")) and not port_paths.configured("llvm") and not stale("llvm") and \
+        not os.path.isfile(os.path.join(CACHE, "llvm", *member.split("/")))
+
+
+def get_llvm_member(member, prog):
+    """One file of LLVM's archive into a kept tools-cache\\llvm: the archive is downloaded again (it is deleted after
+    unpacking) and only that member is taken. .ready and clang-cl.exe are not touched, so the build files Setup
+    keeps stay valid (tools/rebuild_win.py toolset_check would otherwise rebuild everything)."""
+    a = ARCHIVES["llvm"]
+    dest = os.path.join(CACHE, "llvm")
+    arc = os.path.join(DL, a["url"].rsplit("/", 1)[1].replace("%2B", "+"))
+    download(a["url"], arc, a["sha256"], a["size"], a["label"], prog)
+    prog.say(f"unpacking {member} from {a['label']}", force=True)
+    tmp = dest + ".unpack"
+    _fresh(tmp)
+    m = a["top"] + "/" + member
+    tar, r = _tar(), None
+    if tar:
+        r = subprocess.run([tar, "-xf", arc, "-C", tmp, m], capture_output=True, text=True)
+    if r is None or r.returncode:
+        _fresh(tmp)
+        _untar_py(arc, tmp, [m], a["label"], prog)
+    src = os.path.join(tmp, *m.split("/"))
+    if not os.path.isfile(src):
+        raise SystemExit(f"{member} is not in {a['label']}'s archive")
+    os.replace(src, os.path.join(dest, *member.split("/")))
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.remove(arc)
+    print(f"  {a['label']}: {member} added to tools-cache\\llvm", flush=True)
+
+
 # ---------------------------------------------------------------- MSVC + Windows SDK (portable-msvc)
 
 def _first(items, cond=lambda x: True):
@@ -398,6 +434,7 @@ def stale(key):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--accept-msvc-license", action="store_true")
+    ap.add_argument("--pgo", action="store_true")   # setup_build.ps1 -Pgo: llvm-profdata.exe is needed too
     a = ap.parse_args()
     t0 = time.time()
     for k in ("cmake", "ninja", "llvm", "msvc", "sdk"):
@@ -410,18 +447,26 @@ def main():
         raise SystemExit("The C++ compiler parts (MSVC and the Windows SDK) are Microsoft's, under the Visual Studio "
                          f"Build Tools license: {MSVC_LICENSE}\nAccept it in Setup, or run "
                          "tools\\fetch_tools.ps1 -AcceptMsvcLicense")
-    if not get and not msvc:
+    extra = a.pgo and "llvm" not in get and llvm_member_missing(LLVM_PROFDATA)
+    if not get and not msvc and not extra:
         print("  build tools: all there already", flush=True)
         return
     os.makedirs(DL, exist_ok=True)
     prog = Progress()
     plan = plan_msvc() if msvc else None
-    prog.total = sum(ARCHIVES[k]["size"] for k in get) + (sum(f[2] for f in plan[0]) + CABS_ESTIMATE if plan else 0)
+    prog.total = sum(ARCHIVES[k]["size"] for k in get) + (sum(f[2] for f in plan[0]) + CABS_ESTIMATE if plan else 0) + \
+        (ARCHIVES["llvm"]["size"] if extra else 0)
     print(f"  downloading about {mb(prog.total)} of build tools (temporary)", flush=True)
     if plan:
         get_msvc(*plan, prog)
     for k in get:
         get_archive(k, prog)
+    if extra:
+        # "Optimise for this PC" never makes Setup fail: without llvm-profdata.exe the game is built the normal way
+        try:
+            get_llvm_member(LLVM_PROFDATA, prog)
+        except (Exception, SystemExit) as e:
+            print(f"  could not add {LLVM_PROFDATA} ({e}): Optimise for this PC is skipped this time", flush=True)
     shutil.rmtree(DL, ignore_errors=True)
     print(f"  progress: 100% build tools ready", flush=True)
     print(f"  build tools ready: downloaded {mb(prog.done)} in {time.time() - t0:.0f} s", flush=True)

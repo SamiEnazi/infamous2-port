@@ -182,7 +182,8 @@ JOB_OUTPUTS = ("jobmods_register.c", "datamods_register.c", "relocmods_register.
 LIFT_ENV_SKIP = {"PORT_JOBS", "PORT_BUILD", "PORT_PGO", "PORT_PGO_NAMES", "PORT_LIFT_OPT", "PORT_SPU_ARCH",
                  "PORT_LIFT_LTO", "PORT_LIFT_REUSE", "PORT_BUILD_CACHE", "PORT_ONLY_CACHE", "PORT_RPCS3",
                  "PORT_VCVARS", "PORT_NINJA", "PORT_LLVM", "PORT_CMAKE", "PORT_PYTHON", "PORT_MSVC", "PORT_SDK",
-                 "PORT_SETUP_API", "PORT_SETUP_CODELOAD"}   # (the last two: Setup.exe's test stand-in for GitHub)
+                 "PORT_SETUP_API", "PORT_SETUP_CODELOAD",   # (Setup.exe's test stand-in for GitHub)
+                 "PORT_PGO_TEST", "PORT_PGO_TRAIN", "PORT_PGO_KEEP_TRAIN"}   # (setup_build.ps1 -Pgo's test switches)
 _lifted = set()                           # the lift steps that ran in this invocation
 
 
