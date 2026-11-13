@@ -366,14 +366,19 @@ The port also builds and runs natively on Linux, with no Wine or Proton (tested 
 It is experimental: less tested than Windows, and there is no Setup.exe. **It runs on the Steam Deck**: a player
 built it inside an Ubuntu Distrobox container in Desktop Mode and plays it in Game Mode ([#24](../../issues/24));
 in Desktop Mode, start it from that container.
-From a `git clone`:
+
+**One script does everything:** download `inFAMOUS2-port-v…-Linux-x64.zip` from the
+[latest release](../../releases/latest) (launchers such as Quiver pick it by itself), unpack it, and run
+`./setup.sh`. The first time, it finds your game folder in RPCS3's game list (or asks you), builds the game from
+your copy (15–60 minutes), then starts it; after that, `./setup.sh` just plays. Or from a `git clone`:
 
 ```
 git clone https://github.com/SamiEnazi/infamous2-port
 cd infamous2-port
-tools/setup.sh --disc <your game folder> --rpcs3 <RPCS3's data folder>
-tools/play.sh
+./setup.sh                      # or: ./setup.sh --disc <your game folder>
 ```
+
+(`tools/setup.sh` and `tools/play.sh` still work on their own, with the same options as before.)
 
 `tools/setup.sh` lists what it needs from your distribution (a C/C++ toolchain, python3 with venv, the
 Vulkan loader, SDL2) and puts everything else in the port's own folder. Please [report](../../issues) how it
