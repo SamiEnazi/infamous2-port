@@ -365,13 +365,25 @@ int64_t sys_timer_usleep(ppu_context* ctx)
          *                 a real wait, at the cost of seeing the condition up
          *                 to ~0.5 ms late. */
         ensure_qpc_init();
+        /* (perf60) PS3_USLEEP_WAIT unset or "auto": pause where the CPU has two
+         * hardware threads a core (a thread that spins through the kernel takes
+         * most of its core from the sibling -- an SPU worker, when cores are few;
+         * PAUSE leaves it to the sibling), the yield-spin where it has one (there
+         * the yield is what hands the core to a waiting SPU thread). Measured
+         * 2026-11-13 at inFAMOUS 2's cathedral spire on 4 cores / 8 threads:
+         * 54.4 -> 57.1 fps, 1% low 23.6 -> 21.2 ms (work\brain\perf60\LOG.md).
+         * "spin" = the yield-spin everywhere, as before. */
         static int s_wmode = -1; static int64_t s_sleep_after;
         if (s_wmode < 0) {
+            extern int ps3_host_cpus(void), ps3_host_cores(void);   /* platform/host_place.c */
             const char* e = getenv("PS3_USLEEP_WAIT");
             int m = 0; long us = 200;
-            if (e && !strncmp(e, "pause", 5)) m = 1;
-            else if (e && !strncmp(e, "sleep", 5)) { m = 2; if (e[5] == ':' && atol(e + 6) >= 0) us = atol(e + 6); }
+            if (!e || !*e || !strcmp(e, "auto")) m = ps3_host_cpus() > ps3_host_cores() ? 1 : 0;
+            else if (!strncmp(e, "pause", 5)) m = 1;
+            else if (!strncmp(e, "sleep", 5)) { m = 2; if (e[5] == ':' && atol(e + 6) >= 0) us = atol(e + 6); }
             s_sleep_after = (int64_t)us * s_qpc_freq.QuadPart / 1000000;
+            fprintf(stderr, "[sys_timer] short sleeps wait by %s (PS3_USLEEP_WAIT=%s)\n",
+                    m == 1 ? "PAUSE" : m == 2 ? "timer after a poll run" : "yielding", e && *e ? e : "auto");
             s_wmode = m;
         }
         LARGE_INTEGER qpc_start, qpc_now;
@@ -421,12 +433,17 @@ int64_t sys_timer_usleep(ppu_context* ctx)
             do { SwitchToThread(); QueryPerformanceCounter(&qpc_now); } while (qpc_now.QuadPart < qpc_deadline);
             t_last = qpc_now.QuadPart;
         } else if (s_wmode == 1) {
-            int64_t next_yield = qpc_start.QuadPart + s_qpc_freq.QuadPart / 15625;   /* 64 us */
+            /* (perf60) the yield mark is the thread's, not the call's: a poll run
+             * is thousands of 1 us sleeps, none of which reached 64 us by itself,
+             * so a polling thread never offered its CPU to a ready one. */
+            static __declspec(thread) int64_t t_next_yield;
+            const int64_t y64 = s_qpc_freq.QuadPart / 15625;   /* 64 us */
+            if (qpc_start.QuadPart - t_next_yield > y64) t_next_yield = qpc_start.QuadPart + y64;   /* a new poll run */
             for (;;) {
                 for (int i = 0; i < 16; i++) YieldProcessor();   /* PAUSE */
                 QueryPerformanceCounter(&qpc_now);
+                if (qpc_now.QuadPart >= t_next_yield) { SwitchToThread(); QueryPerformanceCounter(&qpc_now); t_next_yield = qpc_now.QuadPart + y64; }
                 if (qpc_now.QuadPart >= qpc_deadline) break;
-                if (qpc_now.QuadPart >= next_yield) { SwitchToThread(); next_yield = qpc_now.QuadPart + s_qpc_freq.QuadPart / 15625; }
             }
         } else {
             do {

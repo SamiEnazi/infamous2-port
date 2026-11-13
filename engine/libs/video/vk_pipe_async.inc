@@ -85,7 +85,8 @@ static void vk_pa_wake(int all) { if (all) WakeAllConditionVariable(&s_pa_cv); e
 static void vk_pw_lock(void)   { AcquireSRWLockExclusive(&s_pw_mx); }
 static void vk_pw_unlock(void) { ReleaseSRWLockExclusive(&s_pw_mx); }
 static void vk_pa_yield(void)  { SwitchToThread(); }
-static u32  vk_pa_cpus(void)   { SYSTEM_INFO si; GetSystemInfo(&si); return (u32)si.dwNumberOfProcessors; }
+extern int ps3_host_cpus(void);   /* (perf60) runtime/platform/host_place.c: the CPUs this process may use (its affinity mask) */
+static u32  vk_pa_cpus(void)   { const int n = ps3_host_cpus(); return n > 0 ? (u32)n : 1u; }
 #else
 static pthread_mutex_t s_pa_mx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  s_pa_cv = PTHREAD_COND_INITIALIZER;
@@ -554,6 +555,7 @@ static void vk_pa_commit_push(vk_sc_key key, const u32* w, u32 n)
 static VkResult vk_pa_create_bg(const VkGraphicsPipelineCreateInfo* gci, VkPipeline* out)
 {
     const u64 t0 = ps3_ft_now();
+    vk_pipe_test_cold();                       /* (perf60) test aid */
     const VkResult r = pvkCreateGraphicsPipelines(s_vk.device, s_sc.pc, 1, gci, NULL, out);
     const u64 d = ps3_ft_now() - t0;
     __atomic_add_fetch(&s_pa.bg_pipes, 1ull, __ATOMIC_RELAXED);

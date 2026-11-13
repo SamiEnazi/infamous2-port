@@ -8,3 +8,13 @@
 0022A104 1 3C003F80 3C004000,3C004040,3C0040A0,3C004120   # jump height: lis r0,1.0f -> 2, 3, 5, 10
 001D99BC 2 3CC03F80 3CC00000,3CC03E80,3CC03F00,3CC04000   # AI movement speed: lis r6,1.0f -> 0, 0.25, 0.5, 2
 001F4764 3 3C00BF80 3C000000                               # "most enemies never attack": lis r0,-1.0f -> 0
+# [workers] (perf60, experiment) the number of SPU job workers. The game asks SPURS for 5 SPUs and builds every
+# WwsJob manager for 5 (func_0038B900: _cellSpursAttributeInitialize nSpus; func_0038B10C(r3 manager, r4, r5 workers,
+# r6, r7 -> priorities) from six places). Slot 40: 0 = 5 (the game's), 1 = 6, 2 = 7, 3 = 8. Read at boot only.
+0038B96C 40 38C00005 38C00006,38C00007,38C00008   # li r6,5: nSpus of the job managers' SPURS instance
+0038BA30 40 38A00005 38A00006,38A00007,38A00008   # li r5,5: the global manager (func_0038B32C builds its priorities from it)
+00041998 40 38A00005 38A00006,38A00007,38A00008   # li r5,5: func_0004197C's manager
+002EDC28 40 38A00005 38A00006,38A00007,38A00008   # li r5,5: func_002EDB68's manager (first)
+002EDC78 40 38A00005 38A00006,38A00007,38A00008   # li r5,5: func_002EDB68's manager (second)
+00350EBC 40 38A00005 38A00006,38A00007,38A00008   # li r5,5: func_00350DF4's manager
+0035210C 40 38A00005 38A00006,38A00007,38A00008   # li r5,5: func_00351EF4's manager

@@ -52,6 +52,14 @@ enum {
 };
 
 void ps3_host_place_self(int role);
+
+/* Core budget (perf60): the CPUs this process may use (its affinity mask;
+ * PS3_HOST_AFFINITY=<hex> sets one, for tests), and whether they are fewer than
+ * the game's busy threads need (PS3_CORE_SCARCE=0/1 forces the answer). Code
+ * that spins while it waits asks ps3_host_core_scarce() and blocks instead. */
+int ps3_host_cpus(void);          /* logical CPUs in the mask */
+int ps3_host_cores(void);         /* physical cores in the mask */
+int ps3_host_core_scarce(void);
 void ps3_host_place_self_once(int role);   /* no-op if this thread was placed */
 
 #ifdef __cplusplus

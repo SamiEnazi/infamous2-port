@@ -43,8 +43,14 @@ IS_WIN = os.name == "nt"   # else Linux: step_compile_linux
 PY = os.path.join(WORK, "venv", "Scripts", "python.exe") if IS_WIN else os.path.join(WORK, "venv", "bin", "python")
 DEPS = os.path.join(ROOT, "deps")
 # PORT_SPU_REWRITES: another native SPU rewrite directory (an agent's own copy; holds natives.txt + *.c),
-# PORT_SPU_NATIVES_FILE: another natives.txt. Defaults: work/rewrites/spu and its natives.txt.
-SPU_REWRITES = os.path.abspath(os.environ.get("PORT_SPU_REWRITES") or os.path.join(WORK, "rewrites", "spu"))
+# PORT_SPU_NATIVES_FILE: another natives.txt. Defaults: natives/spu of the repository (work/rewrites/spu when
+# it holds a natives.txt) and its natives.txt.
+# (natives, 2026-11-13) The published rewrites are natives/spu of this repository (Edge geometry, the BSP clipper,
+# the render-list builder: MIT, see natives/README.md); a developer's work/rewrites/spu with a natives.txt wins.
+_DEV_REWRITES = os.path.join(WORK, "rewrites", "spu")
+SPU_REWRITES = os.path.abspath(os.environ.get("PORT_SPU_REWRITES") or
+                               (_DEV_REWRITES if os.path.isfile(os.path.join(_DEV_REWRITES, "natives.txt"))
+                                else os.path.join(ROOT, "natives", "spu")))
 SPU_NATIVES = os.path.abspath(os.environ.get("PORT_SPU_NATIVES_FILE") or os.path.join(SPU_REWRITES, "natives.txt"))
 # Run-time SPU instruction alternatives (trim, 2026-11-10): RPCS3-style SPU patches as switches the
 # game flips while it runs (tools/spu_patches.txt; toolkit spu_lifter.py SPU_PATCH_FILE).
@@ -465,7 +471,7 @@ LINUX_REWRITE_PRELUDE = '#include "msvc_compat.h"   /* off Windows: the MSVC CRT
 def rewrite_wrapper(path, linux=None):
     """The text of spu/zz_native_<name>/spu_recomp.c for the rewrite at <path> (linux: this host's)."""
     linux = (not IS_WIN) if linux is None else linux
-    return ("/* native SPU rewrite (work/rewrites/spu: game-derived, gitignored), built like the lifted SPU TUs */\n"
+    return ("/* native SPU rewrite (natives/spu, or a developer's work/rewrites/spu), built like the lifted SPU TUs */\n"
             + (LINUX_REWRITE_PRELUDE if linux else "")
             + '#include "%s"\n' % path.replace("\\", "/"))
 

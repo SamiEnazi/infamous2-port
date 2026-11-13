@@ -381,6 +381,10 @@ static VkPipeline vk_eng_variant_ex(vk_eng_pipe* P, u32 topo_idx, u32 vk_idx, in
     return vk_pa_variant(P, topo_idx, vk_idx, neg, slotp);
 }
 
+/* (perf60) stand-ins: the backend's cold-driver test aid and the host's CPU budget */
+static void vk_pipe_test_cold(void) {}
+int ps3_host_cpus(void) { return 8; }
+
 #include "../vk_pipe_async.inc"
 
 /* ---- the scenario ---- */

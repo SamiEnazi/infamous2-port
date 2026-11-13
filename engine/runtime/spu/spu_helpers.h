@@ -2473,6 +2473,9 @@ static inline u128 spu_fsmb(u128 a) { return spu_fsmb_ref(a); }
 void spu_wrch(spu_context* ctx, uint32_t channel, u128 value);
 extern int g_spu_wrch_inline;
 extern volatile int g_spu_jobrec_mode;
+extern int g_spu_fastch;
+void spu_wrch_cmd_fast(spu_context* ctx, uint32_t cmd);
+void spu_wrch_tagupd_fast(spu_context* ctx, uint32_t v);
 static inline __attribute__((always_inline)) void spu_wrch_inl(spu_context* ctx, uint32_t ch, u128 v)
 {
     if (__builtin_constant_p(ch) &&
@@ -2489,6 +2492,14 @@ static inline __attribute__((always_inline)) void spu_wrch_inl(spu_context* ctx,
         case MFC_WrTagMask: ctx->mfc_tag_mask = x; return;
         default: break;
         }
+    }
+    /* PS3_SPU_FASTCH (spu_channels.c): the DMA command and the tag-update write skip the generic
+     * chain (recorder off; g_spu_fastch is -1 until the first generic MFC_Cmd decides it). */
+    if (__builtin_constant_p(ch) && (ch == MFC_Cmd || ch == MFC_WrTagUpdate) &&
+        __builtin_expect(g_spu_fastch > 0 && !g_spu_jobrec_mode, 1)) {
+        if (ch == MFC_Cmd) spu_wrch_cmd_fast(ctx, v._u32[0]);
+        else               spu_wrch_tagupd_fast(ctx, v._u32[0]);
+        return;
     }
     spu_wrch(ctx, ch, v);
 }

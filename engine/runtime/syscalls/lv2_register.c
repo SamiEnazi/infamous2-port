@@ -566,7 +566,7 @@ static int spu_limits_busy(uint32_t spu_limit, uint32_t raw_limit,
             physical += g->num_threads;
         }
     }
-    return spu_limit + raw_limit > 6 || physical >= spu_limit || controllable > spu_limit ||
+    return (spu_limit > 6 ? 6 : spu_limit) + raw_limit > 6 || physical >= spu_limit || controllable > spu_limit ||   /* > 6: PS3_SPU_GROUP_MAX */
            system_coop > 1;
 }
 
@@ -607,7 +607,16 @@ static int64_t sys_spu_thread_group_create_handler(ppu_context* ctx)
     uint32_t       name_ea = vm_read_be32(attr_ea + 4);
     const int32_t  gtype   = (int32_t)vm_read_be32(attr_ea + 8);
     if (nsize > 0x80 || !num) LV2_RET(ctx, CELL_EINVAL);
+    /* (perf60) PS3_SPU_GROUP_MAX=<6..8> (default 6 = lv2's limit, the six SPUs a
+     * PS3 game can use): the most SPU threads one scheduled group may have. A
+     * host with more cores than a PS3 has SPUs can run a title's SPURS instance
+     * with 7 or 8 (CellSpurs has 8 SPU slots), when the title is made to ask
+     * for them. Only the plain scheduled group types take the higher limit. */
+    static int grp_max = -1;
+    if (grp_max < 0) { const char* e = getenv("PS3_SPU_GROUP_MAX"); int v = e ? atoi(e) : 6; grp_max = v < 6 ? 6 : v > 8 ? 8 : v; }
     uint32_t max_threads = 6, min_threads = 1;
+    const uint32_t spu_cap = (gtype == 0x0 && (uint32_t)grp_max > s_spu_max_spu) ? (uint32_t)grp_max : s_spu_max_spu;
+    if (gtype == 0x0) max_threads = (uint32_t)grp_max;
     int needs_root = 0, sched = 1;
     switch (gtype) {
     case 0x0: case 0x4: case 0x18:
@@ -633,9 +642,9 @@ static int64_t sys_spu_thread_group_create_handler(ppu_context* ctx)
     {
         const uint32_t physical = coop ? num - 1 : sched ? 0 : num;
         const uint32_t controllable = coop ? 1 : sched ? num : 0;
-        if (s_spu_max_spu + s_spu_max_raw > 6 || physical > s_spu_max_spu || controllable > s_spu_max_spu)
+        if (s_spu_max_spu + s_spu_max_raw > 6 || physical > spu_cap || controllable > spu_cap)
             LV2_RET(ctx, CELL_EINVAL);
-        if (spu_limits_busy(s_spu_max_spu, s_spu_max_raw, physical, controllable,
+        if (spu_limits_busy(spu_cap, s_spu_max_raw, physical, controllable,
                             controllable && physical ? 1u : 0u))
             LV2_RET(ctx, CELL_EBUSY);
     }

@@ -405,6 +405,24 @@ static int64_t sys_semaphore_wait_impl(ppu_context* ctx)
 
         /* Bounded slices keep timed waits on the QPC deadline. */
         DWORD ms = (timeout_us == 0) ? INFINITE : 1;
+        /* (perf60) PS3_SEM_WAIT_LONG (default 1; 0 = 1 ms slices all the way, as
+         * before): all but the last 2 ms of a timed wait is one wait. A thread
+         * that waits with a timeout in a loop -- inFAMOUS 2's Wwise event thread,
+         * sys_semaphore_wait(10 ms) for the whole session -- woke 1000 times a
+         * second to find nothing; on a 4-core player PC every such wake-up takes
+         * a core from a busy thread. A post still ends the wait at once (it
+         * releases the kernel semaphore), and the deadline is still met to the
+         * millisecond by the sliced tail. */
+        if (timeout_us > 0) {
+            static int s_long = -1;
+            if (s_long < 0) { const char* e = getenv("PS3_SEM_WAIT_LONG"); s_long = !(e && e[0] == '0'); }
+            if (s_long) {
+                LARGE_INTEGER now, f;
+                QueryPerformanceCounter(&now); QueryPerformanceFrequency(&f);
+                const int64_t left_us = (deadline - now.QuadPart) * 1000000 / f.QuadPart;
+                if (left_us > 3000) ms = (DWORD)((left_us - 2000) / 1000);
+            }
+        }
         WaitForSingleObject(s->sem_handle, ms);
 
         EnterCriticalSection(&s->value_lock);

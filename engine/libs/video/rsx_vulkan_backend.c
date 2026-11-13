@@ -2617,10 +2617,38 @@ static void vk_sc_maybe_stats(const char* when)
 
 /* Every vkCreateGraphicsPipelines: one pipeline, through the cache, timed;
  * `site` is the trace's b (0 engine, 1 guest, 2 fallback, 3 pass). */
+/* (perf60) PS3RECOMP_VK_PIPE_TEST_COLD_MS=<n> (test aid, default 0 = nothing): every
+ * pipeline creation -- here and on the pipeline workers -- first sleeps n ms, as a
+ * driver whose own disk cache has never seen the pipeline does (10-50 ms measured
+ * on players' first sessions). The driver's cache cannot be emptied for one test
+ * run, so this is how the smoothness of a first session is measured on a PC that
+ * has played before. */
+static int s_pipe_cold_ms = -1;
+static void vk_pipe_test_cold(void)
+{
+    int v = __atomic_load_n(&s_pipe_cold_ms, __ATOMIC_RELAXED);
+    if (__builtin_expect(v < 0, 0)) {
+        const char* e = getenv("PS3RECOMP_VK_PIPE_TEST_COLD_MS");
+        v = e ? atoi(e) : 0;
+        if (v < 0) v = 0;
+        if (v > 1000) v = 1000;
+        __atomic_store_n(&s_pipe_cold_ms, v, __ATOMIC_RELAXED);
+        if (v) fprintf(stderr, "[RSX vulkan] PS3RECOMP_VK_PIPE_TEST_COLD_MS=%d: every pipeline creation sleeps %d ms first (test)\n", v, v);
+    }
+    if (__builtin_expect(v > 0, 0)) {
+#ifdef _WIN32
+        Sleep((DWORD)v);
+#else
+        usleep((useconds_t)v * 1000u);
+#endif
+    }
+}
+
 static VkResult vk_sc_create_pipeline(const VkGraphicsPipelineCreateInfo* gci,
                                       VkPipeline* out, u32 site)
 {
     const u64 t0 = ps3_ft_now();
+    vk_pipe_test_cold();
     const VkResult r = pvkCreateGraphicsPipelines(s_vk.device, s_sc.pc, 1, gci, NULL, out);
     const u64 t1 = ps3_ft_now();
     if (PS3_FT_ON()) ps3_ft_span(PS3_FT_COMPILE, 3, r == VK_SUCCESS ? 1u : 0u, site, t0, t1);

@@ -1461,6 +1461,82 @@ static __attribute__((noinline, cold)) void spu_wrch_inline_init(void)
     __atomic_store_n(&g_spu_wrch_inline, on, __ATOMIC_RELAXED);
 }
 
+/* PS3_SPU_FASTCH (default 1; 0 = the generic spu_wrch chain as before; spurt2 2026-11-11):
+ * a short path for the two channel writes every DMA ends in -- MFC_Cmd of a plain GET/PUT
+ * (no list, no lock-line command, no barrier) and MFC_WrTagUpdate. The generic chain spent,
+ * per command: the u128 passed through memory, ~15 gate loads/branches, channel_is_mfc,
+ * spu_mfc_atomic, mfc_for, mfc_channel_write's switch, and TWO full fences (mfence) around
+ * a copy that is a few host loads and stores. The fast function does the same steps in the
+ * same order -- mfc_submit_lean's tag bookkeeping, then mfc_do_transfer (so the job
+ * recorder / replay, PS3_SPU_DMA_FAST and every diagnostic gate still apply) -- and takes
+ * the generic chain for anything else (list, atomic, barrier, policy module, wwsjob probe
+ * image, SPU_TAGPROBE).
+ * PS3_SPU_FASTCH_FENCE (default 0 here): the two seq_cst fences of mfc_submit around a
+ * plain GET/PUT. A GET is host loads and a PUT host stores; x86-64 already orders load-load
+ * and store-store, and the only reorder it allows (an earlier store passing a later load of
+ * another address) is one the MFC itself allows between unfenced commands of different tags
+ * (CBEA: commands are unordered unless fenced/barriered). Every lock-line command keeps its
+ * fences (spu_mfc_atomic), the PPU side keeps its own. =1 puts them back (A/B switch). */
+int g_spu_fastch = -1;
+static int s_fastch_fence = 0;
+static __attribute__((noinline, cold)) int spu_fastch_init(void)
+{
+    const char* e = getenv("PS3_SPU_FASTCH");
+    int on = !(e && e[0] == '0') && spu_ch_lean() && !getenv("SPU_CHHIST") && !getenv("SPU_TAGPROBE") &&
+             !getenv("SPU_MFC_TRACE") && !getenv("SPU_DMATRACE");
+    const char* f = getenv("PS3_SPU_FASTCH_FENCE");
+    s_fastch_fence = f && f[0] == '1';
+    if (on) { spu_dma_lean_init(); on = spu_dma_fast_init() ? 1 : 0; }   /* the diagnostics gates */
+    __atomic_store_n(&g_spu_fastch, on, __ATOMIC_RELEASE);
+    return on;
+}
+/* 1 = this MFC_Cmd value is a plain GET/PUT the fast path may run. */
+static inline int spu_cmd_plain_xfer(uint32_t cmd)
+{
+    /* PUT/GET with the F/B bits: 0x20..0x23, 0x40..0x43; not lists (bit 2), nothing else */
+    const uint32_t hi = cmd & ~3u;
+    return (hi == 0x20u || hi == 0x40u) && cmd <= 0x43u;
+}
+/* Returns 1 when handled. The caller has already run the job-recorder wrch hook. */
+static inline int spu_mfc_cmd_fast(spu_context* ctx, uint32_t cmd)
+{
+    if (!spu_cmd_plain_xfer(cmd) || ctx->policy_mode || ctx->image_id == 2) return 0;
+    if (__builtin_expect(__atomic_load_n(&g_spu_fastch, __ATOMIC_ACQUIRE) <= 0, 0)) {
+        if (g_spu_fastch < 0 && spu_fastch_init() > 0) {} else return 0;
+    }
+    if (!spu_dma_fast()) return 0;                 /* PS3_SPU_DMA_LEAN toggled off at run time */
+    mfc_engine* mfc = mfc_for(ctx);
+    if (__builtin_expect(s_fastch_fence, 0)) __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    const uint32_t tag = ctx->mfc_tag & 0x1F;
+    mfc->tag_completed &= ~(1u << tag);
+    (void)mfc_do_transfer(ctx, ctx->mfc_lsa, ((uint64_t)ctx->mfc_eah << 32) | ctx->mfc_eal, ctx->mfc_size, cmd);
+    if (!(ctx->list_stall_mask & (1u << tag))) mfc->tag_completed |= (1u << tag);
+    if (__builtin_expect(s_fastch_fence, 0)) __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return 1;
+}
+/* MFC_WrTagUpdate: mfc_channel_write's case plus spu_wrch's event raise. */
+static inline void spu_mfc_tagupd_do(spu_context* ctx, uint32_t v)
+{
+    mfc_engine* mfc = mfc_for(ctx);
+    ctx->mfc_tag_status = mfc_tag_wait(mfc, ctx->mfc_tag_mask, v);
+    if (v != 0 && (ctx->event_mask & 0x1u)) {
+        spu_ev_raise(ctx, 0x1u);
+        spu_ch_wake(ctx);
+    }
+}
+void spu_wrch(spu_context* ctx, uint32_t channel, u128 value);
+/* Called from the lifted code's inline wrch (spu_helpers.h), recorder off. */
+void spu_wrch_cmd_fast(spu_context* ctx, uint32_t cmd)
+{
+    if (!spu_mfc_cmd_fast(ctx, cmd)) spu_wrch(ctx, MFC_Cmd, spu_make_preferred_u32(cmd));
+}
+void spu_wrch_tagupd_fast(spu_context* ctx, uint32_t v)
+{
+    if (__builtin_expect(__atomic_load_n(&g_spu_fastch, __ATOMIC_ACQUIRE) <= 0, 0) &&
+        !(g_spu_fastch < 0 && spu_fastch_init() > 0)) { spu_wrch(ctx, MFC_WrTagUpdate, spu_make_preferred_u32(v)); return; }
+    spu_mfc_tagupd_do(ctx, v);
+}
+
 void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
 {
     /* The job recorder (spu_jobrec.h) logs a recorded job's channel writes and
@@ -1484,6 +1560,11 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
     if (channel_is_mfc(channel)) {
         /* Atomic line ops (GETLLAR/PUTLLC/...) need real reservation semantics,
          * not the plain GET/PUT the DMA engine would do. */
+        if (channel == MFC_Cmd && spu_mfc_cmd_fast(ctx, v)) return;   /* PS3_SPU_FASTCH */
+        if (channel == MFC_WrTagUpdate && __atomic_load_n(&g_spu_fastch, __ATOMIC_RELAXED) > 0) {
+            spu_mfc_tagupd_do(ctx, v);
+            return;
+        }
         if (channel == MFC_Cmd && spu_mfc_atomic(ctx, v))
             return;
         /* PS3_SPU_CH_LEAN (default 1): the parameter channels only latch a

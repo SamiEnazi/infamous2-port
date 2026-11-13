@@ -1627,6 +1627,21 @@ class SPULifter:
                         f"if (__builtin_expect(ctx->pc == 0x{ct:X}u && SPU_CONST_BI_OK(ctx, 0x{ct:X}u), 1)) "
                         f"goto loc_{ct:08X}; "
                         f"g_spu_trampoline_fn = spu_indirect_branch; return;")
+            # A constant target that is ANOTHER lifted function of this image (spurt2, SPU_LIFT_XFN_BI,
+            # =1; default OFF since perf60 2026-11-13: live at the cathedral spire it cost 35-40% fps --
+            # 86 -> 52 fps, back to 82 with PS3_SPU_CONST_BI=0 at run time -- which the job replay cannot
+            # see, the recorder routes those jumps differently): the interrupt-window `ila/bid`, `ila/bie` pairs jump to
+            # the next chunk, which is its own function whenever a branch or call enters it. The
+            # same guard as the goto above, then the direct tail call SPU_DIRECT makes for `br`,
+            # instead of unwinding to the drain loop and spu_indirect_branch (8% of job 204's
+            # samples). The guard failing takes the indirect branch as before.
+            if (ct is not None and os.environ.get("SPU_LIFT_XFN_BI", "0") != "0"
+                    and ct in getattr(self, "func_starts", ())):
+                self.branch_targets.add(ct)
+                return (f"{_ied}ctx->pc = {g(tgt_reg)}._u32[0]; "
+                        f"if (__builtin_expect(ctx->pc == 0x{ct:X}u && SPU_CONST_BI_OK(ctx, 0x{ct:X}u), 1)) "
+                        f"{{ SPU_DIRECT_TAIL(ctx, {self.prefix}spu_func_{ct:08X}); }} "
+                        f"g_spu_trampoline_fn = spu_indirect_branch; return;")
             # Computed indirect tail: set pc + trampoline to the dispatcher, unwind.
             return (f"{_ied}ctx->pc = {g(tgt_reg)}._u32[0]; "
                     f"g_spu_trampoline_fn = spu_indirect_branch; return;")

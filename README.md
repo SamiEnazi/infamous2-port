@@ -429,6 +429,7 @@ Everything is in this one repository (since v0.5.0; before, the engine and the p
 | `patches/port/` | Our changes to the port base's files, applied to its copy in `work\port\` at build time (`base/` itself stays as Erik published it). |
 | `port_src/` | Files we add to the port. |
 | `cheats/` | The game side of the cheats and of the mouse camera. |
+| [`natives/`](natives/) | Native versions of the game's heaviest SPU jobs, compiled into the game by default (each has an off switch). |
 | `tools/` | The build (`tools/rebuild_win.py`), Setup (`tools/setup_exe/`, `tools/setup_build.ps1`), `tools/play.ps1`, and the tools used to test it. |
 
 ## 🤖 Made with Claude Code
@@ -480,7 +481,14 @@ This port stands on other people's work:
   [`base/LICENSE`](base/LICENSE) and its credits in [`base/CREDITS.md`](base/CREDITS.md).
 - **[ThiagoFraga761/infamous2-pc](https://github.com/ThiagoFraga761/infamous2-pc)**: the Vulkan SSAO and
   lighting passes and Windows groundwork we adopted, the texture-cache and buffer-growth ideas behind the
-  freeze fix, and the idea of giving the game's Edge geometry code the real picture size (MIT).
+  freeze fix, and the idea of giving the game's Edge geometry code the real picture size (MIT). Also
+  the **native versions of the game's heaviest SPU jobs** in [`natives/spu/`](natives/): the Edge geometry
+  kernels (skinning, culling, vertex decompression), the BSP polygon clipper and the render-list builder are
+  ports of his `edge_kernels_native.c`, `job220_native.c` and `ec5f_native.c` to this game version (MIT,
+  Copyright (c) 2026 the infamous2-recomp contributors; his notice is kept in each file), with AVX2 paths
+  added here. They are what makes the port fast on 4- and 6-core CPUs.
+- **[SIMDe](https://github.com/simd-everywhere/simde)** (MIT): the 68 headers the Edge kernels need are in
+  `natives/spu/simde-0.8.2/`, with its license.
 - **bungholio** and the [ArtemisPS3](https://github.com/bucanero/ArtemisPS3) cheat-code collection: three of the
   cheats (jump height, AI speed, enemies hold fire) are their codes for this exact game version, turned into
   menu switches, their "Hold L2 + X To Fly" code led us to the game's glide physics, and their "Have All Powers" and

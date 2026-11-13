@@ -1,0 +1,27 @@
+# inFAMOUS 2 (BCES01143 v1.04) SPU job modules: lifted functions a native rewrite in this
+# directory (natives/spu, built by default: tools/rebuild_win.py; PORT_SPU_NATIVES=0 = none) may take over (toolkit tools/spu_lifter.py SPU_NATIVE_FILE; the rewrite registers
+# with spu_native_register, runtime/spu/spu_channels.c, and declines -> the lifted body runs).
+# <image name> <addr>[:<continuation>] ...
+#
+# image 216 (US: jobmod_d7096a8ffc1c_e60C0 / image 220): the BSP polygon clipper 0x68D8
+# (job216_bsp_native.c, from ThiagoFraga761/infamous2-pc job220_native.c, MIT)
+jobmod_9cb47b0cc0eb_e60c0 0x68D8
+#
+# image 223 (US: jobmod_6d1c65171899_eA2A0 / image 209): Edge Geometry -- skinning 0xD0A8,
+# cull transform 0xA3C8, cull 0xA798, vertex decompression 0x4448, vertex compression chunk
+# 0x99E8 (continues at 0x98B0). The index kernel 0xC7B8 is left unhooked (opt-in upstream).
+# (edge223_native.c, from ThiagoFraga761/infamous2-pc edge_kernels_native.c, MIT; AVX2 via SIMDe)
+# Measured (cpu agent, 2026-11-09; replay of the Edge job alone, 1 thread x5, best us): on AVX2 through
+# SIMDe only the skinning kernel pays -- ck-rec2 none 492.6 / skin 478.7 / xf 533.9 / cull 536.9 /
+# dec 567.3 / enc 494.7; spu3-p2 (city) 468.4 / 457.0 / 499.5 / 498.9 / 536.9 / 468.3 -- all bit-exact.
+# So only 0xD0A8 is hooked; the others stay in edge223_native.c for an AVX-512 PC or a real AVX2 port:
+#   jobmod_d0d15ec83992_ea2a0 0xD0A8 0xA3C8 0xA798 0x4448 0x99E8:0x98B0
+# edge2 (2026-11-09): the fast paths written for AVX2 by hand (edge223_native.c, PS3_NATIVE_EDGE_AVX2=0 =
+# the SIMDe forms with xf/cull/dec lifted, the behaviour before). In the fight Edge was cull+xf 31% (lifted),
+# skin 30% (SIMDe), dec 16% (lifted), idx 5%, enc 0.2%: skin, xf, cull and dec are hooked. The index kernel
+# 0xC7B8 (AVX2 forms too, opt-in PS3_NATIVE_EDGE_IDX=1) passed the replay but not two fight runs (a stall
+# before the title, a different walk): add 0xC7B8 below only to test it.
+jobmod_d0d15ec83992_ea2a0 0xD0A8 0xA3C8 0xA798 0x4448
+#
+# image 204 (jobmod_3af9ed8fe0d4_e14ff0): the render-list builder, main 0x12C60 (job204_native.c, agent/native204)
+jobmod_3af9ed8fe0d4_e14ff0 0x12C60

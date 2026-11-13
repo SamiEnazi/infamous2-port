@@ -22,3 +22,4 @@
            # for a karma power whose rank was never reached; "Karma powers of both sides" returns the stored word
 0012D6C8   # [powers] karma allows power r4 now (r3 G): evil ones at their rank or worse, hero ones at theirs or better;
            # "Karma powers of both sides" returns 1 (the game's own answer once both endings are done)
+0054C8B8   # [workers] the WwsJob manager adds its SPURS workload (r5 -> the 8 per-SPU priority bytes; 0 = that SPU never runs it)

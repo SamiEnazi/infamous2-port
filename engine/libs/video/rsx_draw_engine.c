@@ -5039,32 +5039,60 @@ static void eng_vc_drop(eng_vc_entry* e)
  * (v0.2.13); 2 (default) = this. */
 #define ENG_VC_KEEP 60u
 #define ENG_VC_KEEP_NEW 2u
+/* (perf60) PS3RECOMP_ENG_VCACHE_PRUNE=3 (default; 2 = the above): no cliff.
+ * With more than half the table drawn in the last 60 frames the cache still
+ * "started over": every persistent buffer dropped at once, in the densest
+ * scenes, where fetching and decoding everything again costs most (the 20 fps
+ * moments above; the limits line of every long session showed the table at its
+ * cap). Now the keep window is halved (60, 30, 15 ... 1 frames; entries
+ * without a buffer: 1) until the survivors fit in half the table, so what was
+ * drawn most recently always stays. Starting over is left for a scene that
+ * draws more than half the table in one frame. Same rule for the index cache.
+ * PS3RECOMP_ENG_CACHE_TEST_CAP=<keys> (test aid): both tables count as full at
+ * that many keys (their real cap otherwise), so a short run exercises this. */
+static u32 s_vc_cap = ENG_VC_SIZE / 4u * 3u, s_ic_cap_keys;
+static int s_cache_cap_read;
+static void eng_cache_cap_init(void);
 static eng_vc_entry s_vc_tmp[ENG_VC_SIZE];
 static int eng_vc_prune(void)
 {
     static int env = -1;
-    if (env < 0) { const char* e = getenv("PS3RECOMP_ENG_VCACHE_PRUNE"); env = e ? atoi(e) : 2; }
+    if (env < 0) { const char* e = getenv("PS3RECOMP_ENG_VCACHE_PRUNE"); env = e ? atoi(e) : 3; }
     const int mode = ps3_toggle_get("PS3RECOMP_ENG_VCACHE_PRUNE", env);
     if (!mode) return 0;
-    u32 kept = 0;
+    const u64 pr_t0 = ps3_ft_now();
+    const u32 half = s_vc_cap / 3u * 2u;           /* ENG_VC_SIZE / 2 at the real cap */
+    u32 kept = 0, keep_old = ENG_VC_KEEP, keep_new = ENG_VC_KEEP_NEW, rounds = 0;
     memcpy(s_vc_tmp, s_vc, sizeof s_vc);
-    memset(s_vc, 0, sizeof s_vc);
-    for (u32 i = 0; i < ENG_VC_SIZE; i++) {
-        eng_vc_entry* o = &s_vc_tmp[i];
-        if (!o->key) continue;
-        const u32 keep = (mode >= 2 && !o->vbuf) ? ENG_VC_KEEP_NEW : ENG_VC_KEEP;
-        if (o->last_frame + keep < g.frames && o->skip_until <= g.frames) { eng_vc_drop(o); continue; }
-        u32 p = (u32)(o->key ^ (o->key >> 32)) & (ENG_VC_SIZE - 1u);
-        while (s_vc[p].key) p = (p + 1) & (ENG_VC_SIZE - 1u);
-        s_vc[p] = *o;
-        kept++;
+    for (;;) {
+        memset(s_vc, 0, sizeof s_vc);
+        kept = 0;
+        for (u32 i = 0; i < ENG_VC_SIZE; i++) {
+            eng_vc_entry* o = &s_vc_tmp[i];
+            if (!o->key) continue;
+            const u32 keep = (mode >= 2 && !o->vbuf) ? keep_new : keep_old;
+            /* a resting key (skip_until) is kept in the first round only */
+            if (o->last_frame + keep < g.frames && (rounds || o->skip_until <= g.frames)) {
+                eng_vc_drop(o); o->key = 0; continue;
+            }
+            u32 q = (u32)(o->key ^ (o->key >> 32)) & (ENG_VC_SIZE - 1u);
+            while (s_vc[q].key) q = (q + 1) & (ENG_VC_SIZE - 1u);
+            s_vc[q] = *o;
+            kept++;
+        }
+        if (kept <= half || mode < 3 || keep_old <= 1u) break;
+        keep_old /= 2u; keep_new = 1u; rounds++;
     }
     s_vc_used = kept;
     { static int n = 0; if (PS3_LOG_FIRST(n, 16))
-        fprintf(stderr, "[rsx engine] vertex cache full: kept %u recent keys (%.0f MB resident), frame %u\n",
-                kept, s_vc_bytes / 1e6, g.frames); }
-    if (kept > ENG_VC_SIZE / 2u) rsx_lim_event(RSX_LIM_VCACHE, 1, "vertex cache full of recent keys: starts over");
-    return kept <= ENG_VC_SIZE / 2u;
+        fprintf(stderr, "[rsx engine] vertex cache full: kept %u recent keys (%.0f MB resident), frame %u, %.2f ms%s\n",
+                kept, s_vc_bytes / 1e6, g.frames, (double)(ps3_ft_now() - pr_t0) / 1e6,
+                rounds ? " (keep window shortened)" : ""); }
+    if (rounds) { static int n = 0; if (PS3_LOG_FIRST(n, 8))
+        fprintf(stderr, "[rsx engine] vertex cache: more than %u keys in the last 60 frames -> kept the last %u frames' (%u keys)\n",
+                half, keep_old, kept); }
+    if (kept > half) rsx_lim_event(RSX_LIM_VCACHE, 1, "vertex cache full of recent keys: starts over");
+    return kept <= half;
 }
 
 /* Key, then (unless the key is resting) the content hash of the spans. NULL:
@@ -5128,7 +5156,8 @@ static eng_vc_entry* eng_vc_probe(const rsx_vertex_layout_plan* layout, u64* con
     for (u32 probe = 0; probe < 32; probe++, p = (p + 1) & (ENG_VC_SIZE - 1u)) {
         if (s_vc[p].key == key) { e = &s_vc[p]; break; }
         if (!s_vc[p].key) {
-            if (s_vc_used >= ENG_VC_SIZE / 4u * 3u) {   /* full: prune, else start over */
+            if (__builtin_expect(!s_cache_cap_read, 0)) eng_cache_cap_init();
+            if (s_vc_used >= s_vc_cap) {   /* full: prune, else start over */
                 if (eng_vc_prune()) return NULL;
                 { static int n = 0; if (PS3_LOG_FIRST(n, 64))
                     fprintf(stderr, "[rsx engine] vertex cache: %u keys, %.0f MB resident -> start over (frame %u)\n",
@@ -5311,24 +5340,53 @@ static int eng_ic_on(void)
 /* (minimap2) The index cache for this draw: it keys and rebuilds a draw with
  * one base index, so not a draw whose packets had several (dc.idx_mixed). */
 static inline int eng_ic_ok(void) { return !dc.idx_mixed && eng_ic_on(); }
-/* Full: keep the entries drawn in the last ENG_VC_KEEP frames, else start over. */
+/* Full: keep the entries drawn in the last ENG_VC_KEEP frames; too many of
+ * those: the most recent ones (PS3RECOMP_ENG_VCACHE_PRUNE=3, see eng_vc_prune);
+ * else start over. */
+static void eng_cache_cap_init(void)
+{
+    s_ic_cap_keys = ENG_IC_SIZE / 4u * 3u;
+    const char* e = getenv("PS3RECOMP_ENG_CACHE_TEST_CAP");
+    const u32 v = e ? (u32)strtoul(e, NULL, 0) : 0u;
+    if (v >= 64u) {
+        if (v < s_vc_cap) s_vc_cap = v;
+        if (v / 4u >= 64u && v / 4u < s_ic_cap_keys) s_ic_cap_keys = v / 4u;
+        fprintf(stderr, "[rsx engine] PS3RECOMP_ENG_CACHE_TEST_CAP: vertex cache full at %u keys, index cache at %u (test)\n",
+                s_vc_cap, s_ic_cap_keys);
+    }
+    s_cache_cap_read = 1;
+}
 static void eng_ic_prune(void)
 {
     static eng_ic_entry tmp[ENG_IC_SIZE];
+    static int env = -1;
+    if (env < 0) { const char* e = getenv("PS3RECOMP_ENG_VCACHE_PRUNE"); env = e ? atoi(e) : 3; }
+    const int mode = ps3_toggle_get("PS3RECOMP_ENG_VCACHE_PRUNE", env);
+    const u32 half = s_ic_cap_keys / 3u * 2u;      /* ENG_IC_SIZE / 2 at the real cap */
+    u32 kept = 0, keep_old = 60u, keep_new = 2u, rounds = 0;
     memcpy(tmp, s_ic, sizeof s_ic);
-    memset(s_ic, 0, sizeof s_ic);
-    u32 kept = 0;
-    for (u32 i = 0; i < ENG_IC_SIZE; i++) {
-        eng_ic_entry* o = &tmp[i];
-        if (!o->key) continue;
-        const u32 keep = o->ibuf ? 60u : 2u;
-        if (o->last_frame + keep < g.frames && o->skip_until <= g.frames) { eng_ic_drop(o); continue; }
-        u32 p = (u32)(o->key ^ (o->key >> 32)) & (ENG_IC_SIZE - 1u);
-        while (s_ic[p].key) p = (p + 1) & (ENG_IC_SIZE - 1u);
-        s_ic[p] = *o; kept++;
+    for (;;) {
+        memset(s_ic, 0, sizeof s_ic);
+        kept = 0;
+        for (u32 i = 0; i < ENG_IC_SIZE; i++) {
+            eng_ic_entry* o = &tmp[i];
+            if (!o->key) continue;
+            const u32 keep = o->ibuf ? keep_old : keep_new;
+            if (o->last_frame + keep < g.frames && (rounds || o->skip_until <= g.frames)) {
+                eng_ic_drop(o); o->key = 0; continue;
+            }
+            u32 q = (u32)(o->key ^ (o->key >> 32)) & (ENG_IC_SIZE - 1u);
+            while (s_ic[q].key) q = (q + 1) & (ENG_IC_SIZE - 1u);
+            s_ic[q] = *o; kept++;
+        }
+        if (kept <= half || mode < 3 || keep_old <= 1u) break;
+        keep_old /= 2u; keep_new = 1u; rounds++;
     }
     s_ic_used = kept;
-    if (kept > ENG_IC_SIZE / 2u) {
+    if (rounds) { static int n = 0; if (PS3_LOG_FIRST(n, 8))
+        fprintf(stderr, "[rsx engine] index cache: more than %u keys in the last 60 frames -> kept the last %u frames' (%u keys)\n",
+                half, keep_old, kept); }
+    if (kept > half) {
         { static int n = 0; if (PS3_LOG_FIRST(n, 16))
             fprintf(stderr, "[rsx engine] index cache: %u keys -> start over (frame %u)\n", kept, g.frames); }
         rsx_lim_event(RSX_LIM_ICACHE, 1, "index cache full of recent keys: starts over");
@@ -5364,7 +5422,8 @@ static eng_ic_entry* eng_ic_probe(const rsx_dsp_index_array* ia, u32 ia_loc, int
     for (u32 probe = 0; probe < 32; probe++, p = (p + 1) & (ENG_IC_SIZE - 1u)) {
         if (s_ic[p].key == key) { e = &s_ic[p]; break; }
         if (!s_ic[p].key) {
-            if (s_ic_used >= ENG_IC_SIZE / 4u * 3u) { eng_ic_prune(); return NULL; }
+            if (__builtin_expect(!s_cache_cap_read, 0)) eng_cache_cap_init();
+            if (s_ic_used >= s_ic_cap_keys) { eng_ic_prune(); return NULL; }
             e = &s_ic[p];
             memset(e, 0, sizeof *e); e->key = key; s_ic_used++;
             break;

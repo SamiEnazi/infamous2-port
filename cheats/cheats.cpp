@@ -2138,3 +2138,58 @@ struct Init {
 Init s_init;
 
 } // namespace
+
+/* ==== [workers] (perf60; class P2: our own change of the game's behaviour by address) ======================
+ * PS3_JOB_WORKERS=<5|6|auto> (default auto): the number of SPU threads that run the game's jobs.
+ * The game asks SPURS for 5 SPUs and builds each WwsJob manager for 5 (a PS3 has 6 a game can use; the sixth
+ * is left to the light kicker and Bink there). Here the host's cores decide: 6 workers when the PC has
+ * PS3_JOB_WORKERS_CORES physical cores or more (default 10), else 5.
+ *   measured 2026-11-13, cathedral spire heavy view, same exe (work\brain\perf60\LOG.md):
+ *     i5-13600K (14 cores)      5 -> 6 workers: 86.4 -> 89.7 fps
+ *     6 cores / 12 threads      5 -> 6 workers: 80.3 -> 76.4 fps (a sixth worker with no core for it)
+ *   7 and 8 do not boot (SPURS never starts its kernels), so 6 is the most.
+ * How: the three places that hold the 5 are lifted with alternatives (patches.txt slot 40), and each
+ * manager's workload carries one priority byte per SPU, 0 for the SPUs the game does not use
+ * (func_0054C8B8's r5); the hook gives the sixth SPU the priority of the fifth before the game hands the
+ * bytes to SPURS. Read once, before the game starts. A lift without slot 40 = the game's 5. */
+extern "C" int ps3_host_cores(void);            /* toolkit runtime/platform/host_place.c: cores this process may use */
+namespace {
+constexpr int kSlotWorkers = 40;
+int s_workers = 5;
+void hook_jm_add_workload(struct ppu_context* ctx, ppu_hook_body body)   /* 0x0054C8B8(r3 manager, r4, r5 -> priority[8], ...) */
+{
+    const uint32_t pr = (uint32_t)ctx->gpr[5];
+    if (pr && s_workers > 5) {
+        const uint8_t last = vm_read8(pr + 4);
+        static int n = 0;
+        for (int k = 5; k < s_workers && k < 8; k++)
+            if (last && !vm_read8(pr + k)) vm_write8(pr + k, last);
+        if (n++ < 12)
+            fprintf(stderr, "[workers] job manager %08X: priorities %u %u %u %u %u %u %u %u\n", (uint32_t)ctx->gpr[3],
+                    vm_read8(pr), vm_read8(pr + 1), vm_read8(pr + 2), vm_read8(pr + 3), vm_read8(pr + 4),
+                    vm_read8(pr + 5), vm_read8(pr + 6), vm_read8(pr + 7));
+    }
+    ppu_hook_call(ctx, body);
+}
+struct WorkersInit {
+    WorkersInit()
+    {
+        const char* e = getenv("PS3_JOB_WORKERS");
+        int n = 5;
+        if (!e || !*e || !strcmp(e, "auto")) {
+            const char* c = getenv("PS3_JOB_WORKERS_CORES");
+            const int need = (c && atoi(c) > 0) ? atoi(c) : 10;
+            n = ps3_host_cores() >= need ? 6 : 5;
+        } else {
+            n = atoi(e);
+            if (n < 5 || n > 8) n = 5;       /* 7, 8: experiments only (they do not boot) */
+        }
+        if (n == 5) return;
+        s_workers = n;
+        ppu_patch_set(kSlotWorkers, n - 5);
+        ppu_hook_set(0x0054C8B8, hook_jm_add_workload);
+        fprintf(stderr, "[workers] %d SPU job workers (PS3_JOB_WORKERS=%s, %d cores)\n", n, e && *e ? e : "auto", ps3_host_cores());
+    }
+};
+WorkersInit s_workers_init;
+} // namespace
