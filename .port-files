@@ -260,6 +260,7 @@ engine/include/ps3emu/ps3_msgdlg.h
 engine/include/ps3emu/ps3_pad_icons.h
 engine/include/ps3emu/ps3_savedlg.h
 engine/include/ps3emu/ps3_settings.h
+engine/include/ps3emu/ps3_title_view.h
 engine/include/ps3emu/ps3_toggles.h
 engine/include/ps3emu/ps3types.h
 engine/include/ps3emu/spu_fallback.h

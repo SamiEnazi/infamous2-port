@@ -114,8 +114,12 @@ present fills the window as before, the window is 1280x720 unless `PS3RECOMP_VK_
 - HUD elements the game places from the 3D world (markers over people and objects, if drawn after the
   composite) are pinned with the HUD: near the sides they sit inward of their spot, by
   (x - 640) x (kx - k) pixels (up to ~300 px at the edge at 21:9 1080p). Centre ones are right.
-- Full-screen 2D effects drawn after the composite (fades, tints) are pinned too: they cover the 16:9
-  middle only. A program list that fills instead would be the fix, if a run shows one.
+- (Fixed 2026-11-13, PS3RECOMP_WIDE_FILL, below.) Full-screen 2D effects drawn after the composite used to be
+  pinned too: the hurt overlay covered the 16:9 middle only, with a hard vertical edge at both sides.
+- Full-screen effects drawn with other programs than the two kinds `PS3RECOMP_WIDE_FILL` knows (below) stay
+  pinned; `PS3RECOMP_WIDE_LOG=1` lists what is pinned and what fills, once a second.
+- A HUD piece that slides in from a side (partly past the screen edge) fills while it is past the edge and
+  is pinned once it is inside: a small jump in its last frame of the slide. Not seen in the opening.
 - The SSAO keeps the game's half-res job sizes: horizontally coarser by the shape factor.
 - 16:10 is hor+, i.e. 90% of 16:9's width; Vert+ would need SetFov (`0x0047D820`) to scale tany.
 - With the option at 16:9, a non-16:9 fullscreen still stretches the 16:9 picture (today's
@@ -143,3 +147,36 @@ subtitles in the middle 16:9; the placeholder movie pillarboxed (letterboxed at 
 Not run: fullscreen Auto on a real ultrawide screen, menus / pause / loading screens / in-engine
 cutscenes / fights at a wide shape, FSR upscaling of a wide 720p picture, the job-replay gate (no SPU
 change).
+
+## Full-screen effects after the composite: PS3RECOMP_WIDE_FILL (2026-11-13, agent dofov)
+
+A YouTube review at 21:9 showed the hurt overlay (red veins and a dark vignette) covering only the middle
+16:9 with a hard vertical edge at both sides. What the game draws there (`PS3RECOMP_WIDE_LOG=1`, runs
+`dofov-w1` old / `dofov3-w2` / `dofov4-w3` in native/recordings, route work/dofov/wide.steps: the opening, a
+hit of 0.8 x max health at w95 through the game's own ApplyHealthDelta (`PS3_CHEATS_AT=95:hurt=0.8`), the
+pause menu at w100-104):
+- every HUD piece and the hurt overlay use the same UI programs (fp `2921adcb9c915692`, vp `cd700ba66a07de3c`
+  in this build's hashes): one textured quad per element, placed by two matrices in the vertex constants
+  -- clip = ((pos.x c[256] + pos.y c[257] + pos.z c[258] + c[259]).xyz) . rows c[260..263];
+- the overlay is an 8-vertex frame (positions +-874 x +-531, clip +-1.37 x +-1.48: past every edge, the dark
+  vignette, multiplied) and 4-vertex blood splats (+-256, placed half off the screen, e.g. clip x -1.58..-0.59);
+- the pause menu is a frame of overlay alone (no composite): pillarboxed as before.
+
+The rule (rsx_draw_engine.c, the `PS3_ASPECT_HUD_AFTER` block; default on, `PS3RECOMP_WIDE_FILL=0` = every draw
+after the composite pinned, as before). A display draw after the composite fills the wide picture (stretched
+across like the 3D frame, `set_hud 2`) instead of being pinned when:
+1. it uses the composite's own vertex program (the post passes' screen mesh), or
+2. its vertex program is the UI's two-matrix form -- recognised once per program by its decompiled text (the
+   eight products `v[0].x * c[256]` ... `+ c[263]`) -- and its position box through those two matrices either
+   covers the whole guest screen (|x|, |y| past 0.98 of w) or reaches past the left or right edge (x < -1 or
+   > 1). Everything inside the screen (meters, minimap, prompts, subtitles, text) stays pinned.
+The position box comes from the vertices read for the draw, or, when they came from the vertex cache, from the
+box kept with the cache entry when it was made (`eng_vc_entry.wbox`, only while a wide picture pins a HUD). A UI
+quad with neither stays pinned. Draws after a wide frame's composite skip the fast path for repeated draws
+(rsx_draw_fast.inc): their decision depends on vertices and constants it does not see.
+
+Seen at 21:9 (720p, shots `h956` / `h965` / `h98` = 0.6 / 1.5 / 3 s after the hit): the dark vignette and the
+splats reach the sides of the wide picture, no vertical edge; the splats are 1.31x wider than at 16:9 (the
+16:9 overlay stretched across, as the 3D frame is) -- organic shapes, it does not read as stretched. The HUD
+(prompt text, reticle) stays where it was; the pause menu keeps its bars. 16:9 runs none of this (`set_hud` is
+not installed there).

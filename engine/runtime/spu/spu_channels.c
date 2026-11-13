@@ -1882,7 +1882,13 @@ static inline int spu_spin_core_ok(void)
 static __attribute__((noinline, cold)) int spu_spin_us_init(void)
 {
     const char* e = getenv("PS3_SPU_SPIN_US");
-    int v = e ? atoi(e) : 30;
+    /* (spurt3) unset: 30 us where the CPU has cores to spare, 0 (sleep at once) where it has fewer
+     * physical cores than the game has busy threads (ps3_host_core_scarce, host_place.c: under 8). There
+     * the spinning worker takes its core's second hardware thread from a working one: 18.7% of a thread
+     * over the five workers at inFAMOUS 2's cathedral spire on 4 cores / 8 threads, for the same fps and
+     * a better 1% low without it (26.2 -> 22.6 ms, work/brain/perf60/LOG.md). A number = that number. */
+    extern int ps3_host_core_scarce(void);
+    int v = (e && *e) ? atoi(e) : (ps3_host_core_scarce() ? 0 : 30);
     if (v < 0) v = 0;
     if (v > 1000) v = 1000;
     const char* l = getenv("PS3_SPU_SPIN_LEAN");
@@ -3057,7 +3063,29 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
     if (fast) {
         const uint32_t lsa = (uint32_t)(ls - ctx->ls);
         int overlap = 0;
-        for (unsigned slot = 0; slot < SPU_RESIDENT_CODE_SLOTS; ++slot) {
+        /* (spurt3) PS3_SPU_OVL_BBOX (default 1; 0 = walk the 16 slots at every GET, as before): the lowest
+         * and highest local-store address any resident span covers, kept in the context with
+         * its span generation (ib_gen changes with every span change; a new context starts with no box; the job recorder's save/restore
+         * writes the slots without it, so the box is only trusted while the recorder is off). A GET
+         * outside the box overlaps no span: the walk would find nothing. */
+        static int s_bbox = -1;
+        if (__builtin_expect(s_bbox < 0, 0)) { const char* e = getenv("PS3_SPU_OVL_BBOX"); s_bbox = !(e && e[0] == '0'); }
+        int walk = 1;
+        if (s_bbox && !g_spu_jobrec_mode) {
+            if (__builtin_expect(ctx->ovl_bb_gen1 != (uint32_t)ctx->ib_gen + 1u, 0)) {
+                uint32_t lo = 0xFFFFFFFFu, hi = 0;
+                for (unsigned slot = 0; slot < SPU_RESIDENT_CODE_SLOTS; ++slot) {
+                    if (!ctx->resident_code[slot].image_id) continue;
+                    const uint32_t base = ctx->resident_code[slot].lsa;
+                    const uint32_t end = base + ctx->resident_code[slot].size;
+                    if (base < lo) lo = base;
+                    if (end > hi) hi = end;
+                }
+                ctx->ovl_bb_lo = lo; ctx->ovl_bb_hi = hi; ctx->ovl_bb_gen1 = (uint32_t)ctx->ib_gen + 1u;
+            }
+            walk = lsa < ctx->ovl_bb_hi && lsa + size > ctx->ovl_bb_lo;
+        }
+        for (unsigned slot = 0; walk && slot < SPU_RESIDENT_CODE_SLOTS; ++slot) {
             if (!ctx->resident_code[slot].image_id) continue;
             const uint32_t base = ctx->resident_code[slot].lsa;
             const uint32_t end = base + ctx->resident_code[slot].size;

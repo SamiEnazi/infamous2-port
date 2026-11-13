@@ -15,10 +15,14 @@
 #ifndef SPU_DMA_H
 #define SPU_DMA_H
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <emmintrin.h>   /* spu_get_copy */
+#endif
 #include "spu_context.h"
 #include "spu_jobrec.h"
 #include "../../include/ps3emu/log_first.h"   /* PS3_LOG_FIRST */
 #include "../memory/guest_mem_atomic.h"
+static inline void spu_get_copy(void* dst, const uint8_t* g, size_t n);   /* (spurt3) below: PS3_SPU_GET_WIDE */
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -685,7 +689,7 @@ static inline int mfc_do_transfer_raw(spu_context* spu, uint32_t lsa, uint64_t e
                   fputs(b, stderr);
               } } }
         /* GET: main memory -> local store */
-        gm_copy_from(ls_ptr, (const uint8_t*)ea_ptr, size);
+        spu_get_copy(ls_ptr, (const uint8_t*)ea_ptr, size);   /* (spurt3) PS3_SPU_GET_WIDE */
         SPU_EDGE_VP_AFTER_GET(ls_ptr, size);   /* (edgevp) */
         /* SPU_STACKEA_WATCH (b): scan the just-loaded payload for a 0xD00Cxxxx
          * dword = the completion-word EA arriving in a job buffer. */
@@ -889,6 +893,53 @@ static inline int mfc_do_transfer_raw(spu_context* spu, uint32_t lsa, uint64_t e
     return 0;
 }
 
+/* (spurt3) PS3_SPU_GET_WIDE (default 1; 0 = gm_copy_from, one doubleword a step, as before): a DMA GET's
+ * copy from guest memory into the local store, 64 bytes a step in 16-byte loads. Without a training profile
+ * (every player build) gm_copy_from was 4% of each SPU worker at inFAMOUS 2's cathedral spire -- the same
+ * bytes, moved eight at a time because an atomic load is not vectorised. The guarantee is the same one: the
+ * head is brought to an 8-byte boundary byte by byte, after which every load covers whole aligned
+ * doublewords, and an aligned doubleword lies in one cache line, so a concurrent 8-byte guest store is seen
+ * whole or not at all. Short copies (under 32 bytes) and the tail go the old way. x86-64 only. */
+#if defined(_MSC_VER)
+__declspec(selectany) int g_spu_get_wide = -1;
+#else
+__attribute__((weak)) int g_spu_get_wide = -1;
+#endif
+static __attribute__((noinline, cold)) int spu_get_wide_init(void)
+{
+    const char* e = getenv("PS3_SPU_GET_WIDE");
+    const int on = !(e && e[0] == '0');
+    __atomic_store_n(&g_spu_get_wide, on, __ATOMIC_RELAXED);
+    return on;
+}
+static inline void spu_get_copy(void* dst, const uint8_t* g, size_t n)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    int w = __atomic_load_n(&g_spu_get_wide, __ATOMIC_RELAXED);
+    if (__builtin_expect(w < 0, 0)) w = spu_get_wide_init();
+    if (w && n >= 32) {
+        uint8_t* d = (uint8_t*)dst;
+        size_t i = 0;
+        for (; ((uintptr_t)(g + i)) & 7u; i++) d[i] = gm_load8(g + i);
+        for (; i + 64 <= n; i += 64) {
+            const __m128i v0 = _mm_loadu_si128((const __m128i*)(const void*)(g + i));
+            const __m128i v1 = _mm_loadu_si128((const __m128i*)(const void*)(g + i + 16));
+            const __m128i v2 = _mm_loadu_si128((const __m128i*)(const void*)(g + i + 32));
+            const __m128i v3 = _mm_loadu_si128((const __m128i*)(const void*)(g + i + 48));
+            _mm_storeu_si128((__m128i*)(void*)(d + i), v0);
+            _mm_storeu_si128((__m128i*)(void*)(d + i + 16), v1);
+            _mm_storeu_si128((__m128i*)(void*)(d + i + 32), v2);
+            _mm_storeu_si128((__m128i*)(void*)(d + i + 48), v3);
+        }
+        for (; i + 16 <= n; i += 16)
+            _mm_storeu_si128((__m128i*)(void*)(d + i), _mm_loadu_si128((const __m128i*)(const void*)(g + i)));
+        if (i < n) gm_copy_from(d + i, g + i, n - i);
+        return;
+    }
+#endif
+    gm_copy_from(dst, g, n);
+}
+
 /* PS3_SPU_DMA_FAST (default 1; spu_channels.c spu_dma_fast_init): the DMA
  * path without its diagnostics. mfc_do_transfer_raw and mfc_submit_body carry
  * some fifty environment-gated probes -- each a static load and a branch on
@@ -945,7 +996,7 @@ static inline int mfc_do_transfer_lean(spu_context* spu, uint32_t lsa, uint64_t 
       if (spu->image_id == 22 && mfc_is_get(cmd) && size > 0x100)
           g_cri_video_dma = 1; }
     if (mfc_is_get(cmd)) {
-        gm_copy_from(ls_ptr, (const uint8_t*)ea_ptr, size);
+        spu_get_copy(ls_ptr, (const uint8_t*)ea_ptr, size);   /* (spurt3) PS3_SPU_GET_WIDE */
         SPU_EDGE_VP_AFTER_GET(ls_ptr, size);   /* (edgevp) */
         { extern void spu_overlay_note_get(spu_context*, uint32_t, const uint8_t*, uint32_t);
           spu_overlay_note_get(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size); }

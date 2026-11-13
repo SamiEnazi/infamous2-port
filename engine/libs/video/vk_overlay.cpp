@@ -25,6 +25,7 @@
 #include "backends/imgui_impl_sdl2.h"
 
 #include "../../include/ps3emu/ps3_settings.h"
+#include "../../include/ps3emu/ps3_title_view.h"   /* (dofov) the Depth of field page: does the title tell gameplay from cutscenes */
 #include "../../include/ps3emu/ps3_lightfx.h"   /* [light] the Lighting page (vk_overlay_light.inc) */
 #include "../../include/ps3emu/ps3_game_mods.h" /* [mods] the Mods page: runtime/ppu/ppu_fs_mods.h */
 #include "mod_preview.h"                        /* [modsui] a mod's preview picture, decoded and shrunk */
@@ -159,6 +160,7 @@ enum {
     V_LANG, V_VOICE_LANG, V_TEXT_LANG,
     V_ASPECT,                 /* [wide] */
     V_GAME_MODS,              /* [mods] */
+    V_FOV,                    /* (dofov) the title's field of view (cheats.cpp), live */
     V_N
 };
 static const char* const kVar[V_N] = {
@@ -173,6 +175,7 @@ static const char* const kVar[V_N] = {
     "PS3_LANG", "PS3_VOICE_LANG", "PS3_TEXT_LANG",   /* the game reads them once, at start */
     "PS3RECOMP_ASPECT",                               /* [wide] read once, at start */
     "PS3_GAME_MODS",                                  /* [mods] read once, at start */
+    "PS3_FOV",                                        /* (dofov) percent of the game's field of view */
 };
 /* Plain arrays: filled during this file's dynamic initialisation, before
  * main (zero-initialised storage exists before any of it runs). */
@@ -1200,6 +1203,12 @@ static const char* const kAspect[] = { "16:9", "auto", "21:9", "32:9", "16:10" }
 static const char* const kAspectName[] = { "16:9  (the game's)", "Auto  (the screen's or window's shape)",
                                            "21:9  ultrawide", "32:9  super ultrawide", "16:10" };
 static const char* const kUp[] = { "fsr", "cas", "bilinear" };   /* VK_POSTFX_UP_* order */
+/* (dofov) PS3RECOMP_DOF (rsx_draw_engine.c): the game's depth of field */
+static const char* const kDof[] = { "1", "play", "0" };
+static const char* const kDofName[] = { "On  (the PS3 look)", "Off in gameplay  (cutscenes keep it)", "Off everywhere" };
+/* (dofov) PS3_FOV: the field of view, percent of the game's own (the title's cheats.cpp; 100 = the game's) */
+enum { kFovMin = 70, kFovMax = 130 };
+static const double kFovGameV = 0.9;   /* the free camera's vertical field of view in play, rad (NOTES.md) */
 static const char* const kUpName[] = { "AMD FSR 1 (sharpest)", "AMD CAS scaling", "Bilinear (soft)" };
 
 struct Ui {
@@ -1207,7 +1216,9 @@ struct Ui {
     int present;
     bool fullscreen;
     int aa, scale, aniso, upscale; float sharpen;
-    bool dof, edge_blur;      /* the game's own effects (rsx_draw_engine.c ENG_DOF_BLEND_FP) */
+    int dof;                  /* (dofov) the game's depth of field: index in kDof (rsx_draw_engine.c ENG_DOF_BLEND_FP) */
+    bool edge_blur;           /* the game's own edge blur (the same pass) */
+    int fov;                  /* (dofov) PS3_FOV: percent of the game's field of view (kFovMin..kFovMax) */
     int mesh_trim;            /* [trim]/[edgevp] 0 = the game's culling at the render resolution (default),
                                * 1 = off (whole meshes), 2 = the PS3's 720p culling */
     int aspect;               /* [wide] index in kAspect; -1 = another value (env / file) */
@@ -1240,7 +1251,11 @@ static void ui_load(void)
       s_ui.aa = a == VK_POSTFX_AA_SMAA ? 2 : a == VK_POSTFX_AA_FXAA ? 1 : 0; }
     s_ui.sharpen = vk_postfx_sharpen();
     s_ui.upscale = vk_postfx_upscale();
-    { const char* e = getenv(kVar[V_DOF]); s_ui.dof = !(e && !strcmp(e, "0")); }
+    { const char* e = getenv(kVar[V_DOF]);   /* (dofov) 1/unset on, play = off in gameplay, 0 off */
+      s_ui.dof = !e || !*e ? 0 : !strcmp(e, "0") ? 2 : (!strcmp(e, "play") || !strcmp(e, "gameplay") || !strcmp(e, "2")) ? 1 : 0; }
+    { const char* e = getenv(kVar[V_FOV]);   /* (dofov) */
+      int f = e && *e ? atoi(e) : 100;
+      s_ui.fov = f < kFovMin ? kFovMin : f > kFovMax ? kFovMax : f; }
     { const char* e = getenv(kVar[V_EDGE_BLUR]); s_ui.edge_blur = !(e && !strcmp(e, "0")); }
     { const int t = spu_patch_find("mesh_trim");   /* [trim] what the SPU code runs now */
       const bool culls = t < 0 || spu_patch_alt(t) == 0;
@@ -1372,6 +1387,31 @@ static void tab_display(void)
                k > 1.001f || k < 0.999f ? "wide" : "16:9");
       hint(b); }
 
+    /* (dofov) PS3_FOV: the title changes its gameplay cameras' field of view (cheats.cpp "Field of view") */
+    section("Camera");
+    { const bool have = ps3_setting_applier(kVar[V_FOV]) != NULL;
+      if (!have) ImGui::BeginDisabled();
+      ImGui::SetNextItemWidth(combo_w());
+      if (ImGui::SliderInt("Field of view", &s_ui.fov, kFovMin, kFovMax, s_ui.fov == 100 ? "100%% (the game's)" : "%d%%",
+                           ImGuiSliderFlags_AlwaysClamp)) {
+          char v[16]; snprintf(v, sizeof v, "%d", s_ui.fov);
+          apply_setting(V_FOV, v);   /* 100 = the game's own (the title then runs the game's code exactly) */
+      }
+      if (!have) ImGui::EndDisabled();
+      if (have) live_mark(V_FOV);
+      /* the free camera's view at this setting and the picture's shape (hor+: the width follows the shape) */
+      const double v = kFovGameV * s_ui.fov / 100.0;
+      const double h = 2.0 * atan(tan(v * 0.5) * (16.0 / 9.0) * (double)vk_postfx_aspect_k());
+      char b[720];
+      snprintf(b, sizeof b, "How much of the world the gameplay camera shows: lower zooms in, higher shows more around "
+               "Cole. The free camera's usual view (the game's %.0f\xC2\xB0 x %.0f\xC2\xB0 at 16:9; some places frame it "
+               "tighter) is now %.0f\xC2\xB0 across and %.0f\xC2\xB0 up and down. Aiming zooms in by the game's own amount at "
+               "every setting, the mouse turns the same angle, and the game's level of detail and culling follow the "
+               "wider or narrower view. Cutscenes keep their own framing.%s",
+               2.0 * atan(tan(kFovGameV * 0.5) * 16.0 / 9.0) * 57.29578, kFovGameV * 57.29578, h * 57.29578, v * 57.29578,
+               have ? "" : " Not in this build: its lift has no camera hooks (cheats/hooks.txt).");
+      hint(b); }
+
     section("Menu");   /* [theme] */
     { static const char* const looks[] = { "Hero (blue)", "Infamous (red)" };
       int look = vk_ov_theme_red();
@@ -1444,11 +1484,15 @@ static void tab_graphics(void)
          "game starts. A higher internal resolution costs GPU time (see the HUD).");
 
     section("Game effects");
-    if (ImGui::Checkbox("Depth of field", &s_ui.dof)) apply_setting(V_DOF, s_ui.dof ? "1" : "0");
+    ImGui::SetNextItemWidth(combo_w());
+    if (ImGui::Combo("Depth of field", &s_ui.dof, kDofName, 3)) apply_setting(V_DOF, kDof[s_ui.dof]);
     live_mark(V_DOF);
-    hint("The game blurs the scene by distance, strongly in cutscenes. This is the softness you see on "
-         "distant things when the camera turns: inFAMOUS 2 has no camera motion blur. Off shows "
-         "everything sharp. No frame-rate cost.");
+    hint("The game blurs the scene by distance: in play a steady blur of everything far away (the softness "
+         "you see on distant things when the camera turns: inFAMOUS 2 has no camera motion blur), in "
+         "cutscenes a focus chosen for each shot. \"Off in gameplay\" keeps the cutscenes' focus; \"Off "
+         "everywhere\" shows everything sharp. No frame-rate cost.");
+    if (s_ui.dof == 1 && !ps3_title_view_provided())
+        hint("This build's title code does not tell gameplay from cutscenes yet (no camera seen): off everywhere for now.");
     if (ImGui::Checkbox("Edge blur", &s_ui.edge_blur)) apply_setting(V_EDGE_BLUR, s_ui.edge_blur ? "1" : "0");
     live_mark(V_EDGE_BLUR);
     hint("The game can soften the borders of the picture where its lighting settings ask for it. Off "

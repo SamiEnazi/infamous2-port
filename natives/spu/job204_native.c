@@ -33,6 +33,7 @@
 
 #include "spu_context.h"
 #include "spu_helpers.h"
+#include "native_float.h"   /* spu_fm, spu_fma ... = the *_lean forms (PS3_NATIVE_FLOAT_LEAN=0: the reference forms) */
 #include "spu_dma.h"
 #include "spu_jobrec.h"
 #ifdef IN

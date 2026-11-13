@@ -466,6 +466,9 @@ typedef struct spu_context {
      * resident code slot owned the pc, that slot, whose word is re-checked on
      * each hit exactly as the resolver checks it. fn == NULL is empty. */
     uint32_t ib_gen;
+    /* (spurt3) PS3_SPU_OVL_BBOX: the lowest / highest local-store address any resident code span covers,
+     * valid while ovl_bb_gen1 == ib_gen + 1 (0 = never computed); spu_overlay_note_get. */
+    uint32_t ovl_bb_gen1, ovl_bb_lo, ovl_bb_hi;
     /* Index + 1 of the MFC slot this context last held (spu_channels.c
      * mfc_for); 0 = none. Checked against the slot's owner on every use. */
     uint32_t mfc_hint;

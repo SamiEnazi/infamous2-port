@@ -11,7 +11,8 @@ written as ordinary C with AVX2, checked bit for bit against the translated code
 | `spu/job204_native.c` | 204, render list | builds the draw command blocks of a frame | `PS3RECOMP_NATIVE_J204=0` |
 | `spu/job216_bsp_native.c` | 216, BSP | the polygon clipper | `PS3_NATIVE_J220=0` |
 
-`PS3_SPU_NATIVE=0` turns all of them off at once. A build without them: `PORT_SPU_NATIVES=0` before Setup.
+`PS3_SPU_NATIVE=0` turns all of them off at once. `PS3_NATIVE_FLOAT_LEAN=0` makes their float arithmetic go through the engine's
+per-lane reference helpers again (`spu/native_float.h`: the same results, slower). A build without them: `PORT_SPU_NATIVES=0` before Setup.
 A native that meets an input it does not know declines, and the translated job runs instead.
 
 Measured on a PC cut down to 4 cores / 8 threads (the cathedral spire, 2026-11-13): 45 -> 54 fps in the

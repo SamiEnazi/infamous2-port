@@ -683,3 +683,96 @@ game logic" -- both changed:
   and "MAX_HEAVY_MAGIC_POINTS" (field Cole+0x2578, entry 0x00963CC8) -- what a HUD script would read -- the power
   check 0x001538E0 (fires while the count is above 0, given energy above its floor or a power without an energy
   cost), AddIonicCharges' clamp, the collector. The ionic powers themselves still have to be owned (Unlock all).
+
+## Depth of field and field of view (2026-11-13, inf2-cheats dofov; Sami: "can we remove the depth of field effect? and add a fov slider?")
+
+Menu: Graphics > Game effects > Depth of field (On / Off in gameplay / Off everywhere; PS3RECOMP_DOF = 1 / play / 0),
+Display > Camera > Field of view (70..130 %, PS3_FOV, 100 = the game's). Both live, both saved in settings.ini.
+Engine: toolkit agent/dofov (include/ps3emu/ps3_title_view.h, rsx_draw_engine.c, vk_overlay.cpp). Title: this
+folder (cheats.cpp section "Field of view", hooks.txt [fov] lines). Scratch, runs: work\dofov (game-derived).
+
+### Where the game's depth of field lives (static)
+- One full-screen pass, FX_DOF_BLEND (class CFxDOFBlend; the post object built by func_002FD1E4 keeps it at
+  +0xA0, resource 1387 / class 1078; its 8 parameters from FX 1401 at +0xA4..+0xC0), FP 59313a119f622eb5: the
+  sharp scene lerped to two quarter-size blurred copies by depth (c4.x / c5.x = strength, c2/c3 = focus), see
+  rsx_draw_engine.c ENG_DOF_BLEND_FP. inFAMOUS 2 has no camera motion blur: the softness on distant things when
+  the camera turns is this pass.
+- Its numbers are lighting data, not a switch: the lighting sets' DOF_DISTANCE / DOF_BLUR_MAX / DOF_BLUR_SKY
+  (script property table 0x0095D760.., getters 0x006F0434 = lerp of the two blended sets' +0x1F0 by the blend
+  weight, 0x006F0244 / 0x006F2630; the level-data table 0x0095E224.. at +0x250 / +0x260; an override set with
+  ADD_BLOOM / FOG_COLOR / FOG_OPACITY at 0x00976B64.., setters 0x00700FCC / 0x00702314 that mark +0x2A0 dirty),
+  plus the animation events SetDofBlur / ClearDofBlur (event name table 0x009EB918: cutscene animations set their
+  own blur). No single "DoF on" flag exists; the per-frame consumer that writes the pass's constants was not
+  located statically (a data breakpoint on the pass's fragment constants would find it).
+- So the switch stays in the renderer (the pass identified by its program hash, its two strength terms replaced
+  by 0: the pass returns the sharp scene bit for bit, as PS3RECOMP_DOF=0 always did), and the new "Off in
+  gameplay" asks the title which camera made the frame (below).
+
+### Where the game's field of view lives (static)
+- The render camera C (one object all camera modes drive: free driver D+0x108 = aim camera A+0x108):
+  C+0x29C vertical fov in use (rad; 0.9 free, 0.5 aiming), C+0x2A4 aspect, C+0x2A8 / C+0x2AC tan of the half fov
+  across / up, C+0x2CC the fov it moves to, C+0x2D0 how fast, C+0x2B0 the LOD factor.
+- SetFov 0x0047D820(C, f1): only if f1 != C+0x29C: store, tan(f1 / 2) -> +0x2AC, x aspect -> +0x2A8, then vtable
+  +0x6C / +0x70 (projection, frustum). Called only by SetFovNow 0x0047D8D8 (C+0x2CC = f1, C+0x2D4 = 0, tail jump)
+  and by the camera's update 0x00480750 (a virtual: moves +0x29C to +0x2CC at +0x2D0, then 0x0047D8EC: the LOD
+  factor +0x2B0 = 1.0, or -- when the byte at [0x009B72F0 - 0x7FDC] is set and 0x002A9510 says no -- 0.9 / fov
+  above 1.1 rad and 0.9 / fov - 0.72 below 0.5 rad; then x a list of scene factors x a quality table).
+  SetFovTarget 0x0047D018(C, f1, f2): +0x2CC / +0x2D0 (the free camera only, 0x00082B44). In the old lift both
+  little setters were PPU_XINLINE'd into the free camera; a hooked function is never inlined.
+- Who asks (all through SetFovNow / SetFovTarget; none calls SetFov directly): the camera modes, vtable slot 3 =
+  the frame (r3 the mode, +0x108 its camera), slot 2 = the start (r4 the camera it takes over):
+  0x0093836C free 0x00082964 (reads C+0x29C each frame at 0x00082A6C / 0x00083230, smooths towards its camera
+  volume's FIELD_OF_VIEW / FOV_LIMITS with 0x004F3D08, asks SetFovTarget, SetFovNow on a cut);
+  0x00938FDC aim 0x00098A00 (its own A+0x25C, taken from C+0x29C by the start 0x00099B68; SetFovNow each frame);
+  0x00938DBC 0x00090188 (start 0x0008BEB4 keeps C+0x29C at +0x124; SetFovNow(+0x124) at 0x00090BB8);
+  0x00938BCC 0x000926B0 (-> 0x000915D8, SetFovNow at 0x0009184C); 0x009389EC 0x000931DC (-> 0x0009298C,
+  0x00092BF8); 0x00938ADC 0x00093B34 (clamped, 0x00093F18 / 0x00093FF4); 0x00938CCC 0x0008DC94 (asks nothing).
+  The render walk (RenderGather 0x002E7BEC -> 0x0048EE94) copies C into its own camera with 0x0048E980
+  (fov via SetFovNow 0x0048EA58, aspect 0x0047D024, near 0x0047D094, far 0x0047D104).
+- Readers that make the picture follow the fov: the 27 readers of +0x2A8 / +0x2AC (WIDESCREEN.md), LOD
+  0x0047D8EC, the render walk's LOD picks on the copy's +0x29C: 0x002EEC20 (a level from a 4-entry fov table)
+  and 0x002F1C08 (K / fov), 0x003E8038 (a clamped, quantised fov), 0x001FF4E4 (tan(fov / 2 x aspect - c)).
+  The Edge job culls with the PPU's matrix (WIDESCREEN.md "The SPU side"), so it follows too.
+- Community: RPCS3's "Extended FOV" (bef32 0x0096DE14) does nothing on 1.04 (WIDESCREEN.md).
+
+### What the runs showed (native\recordings\dofov-r1..r4, the opening route work\dofov\dofov.steps = fast_combat +
+cutscene shots; PS3_FOV_PROBE=1 + PS3RECOMP_FX_LOG=1; timeline work\dofov\fovsum.py, r1_sum.txt)
+- Cameras: every in-engine cutscene shot of the opening is mode 0x00093B34 (each frame SetFovNow from 0x00093FF4,
+  the shot's fov: 0.40 / 0.94 / 0.70 / 0.41 / 0.54 / 0.51 rad); one frame of 0x000926B0 at the hand-over; then the
+  free camera (its fov follows the camera volume: 0.70, 0.73, 0.90, 0.75 in the opening, not always 0.9), the aim
+  camera while L1 is held (0.5; its start 0x00099B68 once per aim). 0x00090188's start ran at boot; 0x0008DC94 and
+  0x000931DC never ran. The render walk copies C every frame (0x0048EA5C). The free camera also ran ~25 frames
+  inside the bus cutscene (w3.8) -- why ps3_title_view needs 300 ms without a cutscene frame before "gameplay".
+- Depth of field (the pass's strength c4.x): cutscenes 0.2 .. 1.0, a different value per shot (0.3 / 0.6 / 0.67 /
+  0.7 / 0.8 / 1.0 -- the focus on faces); gameplay a constant 0.55 (the far blur). So "Off in gameplay" removes the
+  steady far blur and keeps every cutscene's own focus. Shots: work\dofov\shots\cut_c07_dof.png (r1 on / r2 off in
+  gameplay = kept / r3 off everywhere = sharp), play_a28_dof_crop.png (r1 on / r2 off in gameplay: the far gate and
+  ship sharp).
+- Field of view: r2 PS3_FOV 100 -> 130 at w100: the free camera's request stays the game's 0.750 while the camera
+  holds 0.9898 (= 2 atan(1.3711 tan(0.375))), aiming 0.5 -> 0.6735; steady, no drift over 40 s (nothing compounds).
+  r3 70 % from w20: free 0.519 for the game's 0.75, 0.630 for 0.9, aim 0.341. r4 21:9 + 130 % from the start: the
+  same values, cutscene fovs exactly r1's (untouched). Shots: shots\fov_free.png, fov_aim.png (the crosshair stays
+  in the middle, the HUD text in place), fov_wide_219.png.
+- A slider change while the free camera holds its fov (the opening's tutorial lock, r3 w20..w26) shows at the next
+  camera change (the next volume or the aim), because the mode then simply keeps "the current fov" in its own
+  units; in normal play (r2 w100) it follows at once with the game's own smoothing.
+- The opening route completes with every setting (r1..r4: the anchor, aims, the walk, close); r1 = default settings
+  = the controller route on the new exe. Picture pairs against the m27-g3 run of the old exe are scene noise only
+  (cutscene/animation timing): the same scenes, HUD, framing.
+
+### Switches and test knobs
+- PS3_FOV=<percent> (50..150; the menu 70..130; 100 or unset = the game's code exactly: only the mode hooks run,
+  marking the time). PS3RECOMP_DOF=1 | play | 0. PS3_FOV_HOOK=0: no camera hooks at all (then "play" = off).
+- Tests: PS3_FOV_PROBE=1 ([fov] lines a second), PS3_FOV_AT="t:fov=130,t:dof=play" (from PS3_FOV_AT_WAIT /
+  PAD_SCRIPT_WAIT), PS3_CHEATS_AT="t:hurt=0.8" (a hit of 0.8 x max health through ApplyHealthDelta, not put back:
+  the hurt overlay; used for the 21:9 overlay fix below).
+
+### 21:9: the hurt overlay over the whole picture (the lead's follow-up; engine only, toolkit docs/WIDESCREEN.md
+"Full-screen effects after the composite")
+- The hurt overlay is UI quads (the same programs as every HUD piece): an 8-vertex dark frame past every edge and
+  4-vertex blood splats placed half off the screen. Pinned with the HUD they stopped at the 16:9 border (dofov-w1).
+- PS3RECOMP_WIDE_FILL (default 1): a UI quad after the composite that covers the screen or reaches past its left or
+  right edge fills the wide picture; quads inside the screen stay pinned. Runs dofov3-w2 (frame only), dofov4-w3
+  (frame + splats); the HUD and the pause menu unchanged; 16:9 runs none of it (dofov4-r6 = the controller route on
+  the final build: the same fps and pictures as dofov-r1). Shots: work\dofov\shots\wide_hurt.png,
+  wide_hud_pause.png, wide_169_unchanged.png.

@@ -31,6 +31,16 @@ No emulator while you play.
 
 ## 🆕 What's new
 
+**v0.5.3**
+- 🎥 **Field of view slider:** F2 → Display → Camera → *Field of view*, 70–130% of the game's. Aiming, the mouse
+  and widescreen stay right, and cutscenes keep their framing.
+- 🌫️ **Depth of field setting:** F2 → Graphics → Game effects → *Depth of field*: On (the PS3 look), Off in
+  gameplay (cutscenes keep their focus effects), or Off everywhere.
+- 🖥️ **Ultrawide:** at 21:9 and 32:9 the red "hurt" overlay now covers the whole screen, not just the middle.
+- ⚡ **Faster again on 4–6 core CPUs:** the heaviest view at the cathedral spire runs about 14% faster on 4 cores
+  than in v0.5.2, with smoother slow frames (27 → 20 ms).
+- 🎮 **Steam Deck:** confirmed working by a player ([#24](../../issues/24)).
+
 **v0.5.2**
 - ⚡ **Faster on every PC:** native versions of the game's heaviest SPU jobs (+13–19% on 4-core CPUs, up to +26%
   on fast ones), six job workers on CPUs with 10 or more cores, and less wasted waiting on 4–6 core CPUs.
@@ -347,7 +357,9 @@ and build files, so only what changed is built again. `-NoBuildCache` deletes th
 ## 🐧 Linux (experimental)
 
 The port also builds and runs natively on Linux, with no Wine or Proton (tested on Ubuntu 22.04 with an AMD GPU).
-It is experimental: less tested than Windows, there is no Setup.exe, and the Steam Deck hasn't been tried yet.
+It is experimental: less tested than Windows, and there is no Setup.exe. **It runs on the Steam Deck**: a player
+built it inside an Ubuntu Distrobox container in Desktop Mode and plays it in Game Mode ([#24](../../issues/24));
+in Desktop Mode, start it from that container.
 From a `git clone`:
 
 ```

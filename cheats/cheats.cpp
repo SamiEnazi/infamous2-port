@@ -66,6 +66,13 @@
 #define PS3_CHEAT_NO_CASUAL 0
 #endif
 #include "ps3emu/ps3_mouse_camera.h"   /* [mouse] the mouse camera's direct mode (cellPad) */
+#include "ps3emu/ps3_settings.h"       /* [fov] PS3_FOV: the menu's Display page > Camera, live */
+#if defined(__has_include)
+#if __has_include("ps3emu/ps3_title_view.h")
+#include "ps3emu/ps3_title_view.h"     /* [fov] gameplay or cutscene camera, for PS3RECOMP_DOF=play */
+#define CHEATS_HAVE_TITLE_VIEW 1
+#endif
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -84,6 +91,7 @@
 
 /* The in-game menu (libs/video/vk_overlay.cpp): 1 while F2's menu is open. The karma rank pick waits for 0. */
 extern "C" int vk_overlay_menu_open(void);
+extern "C" unsigned long long ps3_ms_now(void);   /* [fov] libs/video/cellGcmSys.c: the renderer's clock */
 
 namespace {
 
@@ -245,6 +253,8 @@ void power_tick(struct ppu_context* ctx, uint32_t c);
 
 /* ---- the hooks ----------------------------------------------------------------------- */
 void timeline_poll(struct ppu_context* ctx, uint32_t c);
+void fov_mode_body(struct ppu_context* ctx, ppu_hook_body body, int m, bool enter);   /* [fov] below */
+constexpr int kModeAim = 6;                                                            /* [fov] s_modes[] */
 void probe_tick(uint32_t c);
 void glide_probe(uint32_t c);
 
@@ -1070,6 +1080,7 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
  * keeps the pitch within its limits (the soft limit in func_0008D7C8). */
 void hook_aim_cam(struct ppu_context* ctx, ppu_hook_body body)
 {
+    if (!s_mouse_hook) { fov_mode_body(ctx, body, kModeAim, false); return; }   /* [fov] alone (PS3_MOUSE_CAM_HOOK=0) */
     const uint32_t a = (uint32_t)ctx->gpr[3];
     float sens = 1.0f, aim = 1.0f;
     const bool on = gptr(a) && mouse_take(&sens, &aim);
@@ -1077,7 +1088,7 @@ void hook_aim_cam(struct ppu_context* ctx, ppu_hook_body body)
     s_owe_yaw = s_owe_pitch = 0.0f;  /* the free camera's carried turn ends with it */
     s_free_hold = 0;
     if (s_tpc_on.load(std::memory_order_relaxed)) tpc_end("aiming");   /* [spot] the player aims: his camera */
-    if (!gptr(a)) { ppu_hook_call(ctx, body); return; }
+    if (!gptr(a)) { fov_mode_body(ctx, body, kModeAim, false); return; }   /* [fov] its field of view */
     const float y0 = rdf(a + kAYaw), p0 = rdf(a + kAPitch);
     if (moved && s_aim_manual) {
         const float k = kRadPerCount * kAimViewRatio * aim;
@@ -1089,7 +1100,7 @@ void hook_aim_cam(struct ppu_context* ctx, ppu_hook_body body)
     s_mt_cam = CAM_AIM;              /* watch for its manual path whether or not the mouse moved */
     s_mt_mask = on && s_mouse_tee ? CAM_AIM : CAM_NONE;
     s_mt_rate = s_mt_eps = false;
-    ppu_hook_call(ctx, body);
+    fov_mode_body(ctx, body, kModeAim, false);   /* [fov] the game's step, with its field of view */
     s_mt_cam = CAM_NONE;
     s_mt_mask = CAM_NONE;
     s_aim_manual = s_mt_rate;
@@ -1136,6 +1147,301 @@ void hook_cam_stick(struct ppu_context* ctx, ppu_hook_body body)
         wrf(py, n > 0.0f ? kStickEps * s_eps_dy / n : 0.0f);
         s_mt_eps = true;
     }
+}
+
+/* ---- Field of view (PS3_FOV) and gameplay-or-cutscene for the renderer (2026-11-13, agent dofov; NOTES.md
+ * "Depth of field and field of view") ---------------------------------------------------------------------
+ * How the game sets its field of view (static, EBOOT v1.04; the run evidence is in NOTES.md):
+ *   The render camera C (the free camera driver's D+0x108 = the aim camera's A+0x108; every camera mode drives
+ *   it): C+0x29C the vertical field of view in use (rad: 0.9 in free play, 0.5 aiming), C+0x2A4 the aspect,
+ *   C+0x2A8 / C+0x2AC tan of the half fov across / up, C+0x2CC the fov it moves to, C+0x2D0 how fast,
+ *   C+0x2B0 its level-of-detail factor.
+ *   SetFov 0x0047D820(C, f1): if f1 != C+0x29C: C+0x29C = f1, C+0x2AC = tan(f1 / 2), C+0x2A8 = that x C+0x2A4,
+ *     then its vtable +0x6C and +0x70 (projection and frustum again). Its callers: SetFovNow (a tail jump) and
+ *     the camera's update 0x00480750 (a virtual), which moves C+0x29C to C+0x2CC and then, every frame, runs
+ *     0x0047D8EC: the LOD factor C+0x2B0 = K / C+0x29C (x the scene's own factors).
+ *   SetFovNow 0x0047D8D8(C, f1): C+0x2CC = f1, C+0x2D4 = 0, then SetFov. SetFovTarget 0x0047D018(C, f1 fov,
+ *     f2 rate): C+0x2CC, C+0x2D0 (the free camera only, from 0x00082B44).
+ *   The camera modes (vtable slot 3 = the frame, r3 = the mode, +0x108 its camera; slot 2 = the start, r4 =
+ *     the camera it takes over): the free camera 0x00082964 reads C+0x29C each frame, moves it towards what its
+ *     camera volume asks for (FIELD_OF_VIEW, FOV_LIMITS, FOV_SMOOTHING) and asks SetFovTarget (or SetFovNow on
+ *     a cut); the aim camera 0x00098A00 keeps its own A+0x25C (taken from C+0x29C by its start 0x00099B68) and
+ *     asks SetFovNow every frame; 0x00090188 (start 0x0008BEB4 keeps C+0x29C at +0x124), 0x000926B0 (via
+ *     0x000915D8), 0x000931DC (via 0x0009298C) and 0x00093B34 ask SetFovNow; 0x0008DC94 asks nothing.
+ *   Readers that follow the camera: the 27 readers of C+0x2A8 / C+0x2AC (projection, the PPU frustum, the
+ *     render walk's camera copy 0x0048E980 <- C: fov, aspect, near, far), the render walk's LOD picks
+ *     0x002EEC20 (a level by the fov) and 0x002F1C08 (K / fov) on the copy's +0x29C, 0x0047D8EC above.
+ * What PS3_FOV = p percent (100 = the game's) changes: every gameplay camera is k times wider in tan(fov / 2),
+ * k = tan(p x 0.45) / tan(0.45) -- the free camera's 0.9 rad becomes p% of 0.9, and aiming keeps the game's
+ * zoom tan(aim) / tan(free) exactly. The camera then truly holds the wider fov (C+0x29C): projection, frustum
+ * culling, the Edge job's culling (its matrix is the PPU's), the LOD factors and the copy all follow, as if
+ * the game had asked for that fov. The modes keep working in the game's own units: while a gameplay mode's
+ * frame or start runs, C+0x29C reads as the game's value (2 atan(tan(C+0x29C / 2) / k)), and what it asks
+ * for its camera from inside (SetFovNow / SetFovTarget) is made k times wider; the true value goes back
+ * when it asks (SetFov's own compare sees it), when the camera's update or the copy runs, or at the end. So
+ * the modes' smoothing and limits run as at 100% and nothing compounds. Cutscene and scripted cameras (the
+ * modes not marked play below, and a cutscene that runs none of these modes) are never changed. A gameplay
+ * mode that takes over from one starts from the cutscene's fov and moves to the wider one with its own
+ * smoothing (no jump).
+ * The mouse (hook_free_cam / hook_aim_cam): the free turn stays 0.0008 rad a count at every setting (the same
+ * turn for the same hand motion), and kAimViewRatio = tan(aim) / tan(free) is the same at every setting (both
+ * are k times the game's), so aiming still crosses the screen as fast as the free view.
+ * Widescreen (PS3RECOMP_ASPECT, game_patches.cpp) widens C+0x2A4; SetFov multiplies tan(fov / 2) by it: the
+ * two multiply (hor+ at any fov).
+ * Gameplay or cutscene (include/ps3emu/ps3_title_view.h, PS3RECOMP_DOF=play): every frame of a gameplay mode
+ * marks "gameplay", every frame of another mode "other"; the renderer turns the game's depth of field off while
+ * the marks say gameplay.
+ * Exact at 100%: the mode hooks only call the game's code and mark the time; the request hooks are not set.
+ * PS3_FOV_HOOK=0: none of these hooks (PS3RECOMP_DOF=play is then off everywhere).
+ * Tests: PS3_FOV_PROBE=1 ([fov] lines once a second), PS3_FOV_AT="t:fov=130,t:dof=play" (t seconds after the
+ * file PS3_FOV_AT_WAIT, default PAD_SCRIPT_WAIT, exists; set as the menu sets them). */
+constexpr uint32_t kFnSetFov = 0x0047D820, kFnFovNow = 0x0047D8D8, kFnFovTarget = 0x0047D018;
+constexpr uint32_t kFnCamUpdate = 0x00480750, kFnCamCopy = 0x0048E980;
+constexpr uint32_t kCamFov = 0x29C, kCamTanY = 0x2AC, kModeCam = 0x108;
+constexpr double kFreeFov = 0.9;                       /* the free camera's vertical fov in play, rad */
+constexpr int kFovMinPct = 50, kFovMaxPct = 150;      /* PS3_FOV's range (the menu offers 70..130) */
+struct CamMode { uint32_t frame, start; const char* name; bool play; };
+/* Which mode is which (run dofov-r1, the opening with PS3_FOV_PROBE=1; NOTES.md): every in-engine cutscene shot
+ * of the opening is 0x00093B34's (each frame, SetFovNow from 0x00093FF4 with the shot's fov: 0.40 .. 1.24 rad),
+ * the free camera from the first player control (0.70 .. 0.90 by camera volume), the aim camera while L1 is held
+ * (0.5); 0x000926B0 ran one frame at the hand-over from the cutscene; 0x00090188's start ran at boot; 0x0008DC94
+ * and 0x000931DC never ran there. Only the free and the aim camera count as gameplay. */
+const CamMode s_modes[] = {
+    { 0x00082964, 0x00000000, "free",  true  },   /* vtable 0x0093836C; its start 0x0007BE18 takes no fov */
+    { 0x0008DC94, 0x00000000, "8DC94", false },   /* 0x00938CCC: not seen */
+    { 0x00090188, 0x0008BEB4, "90188", false },   /* 0x00938DBC: its start at boot */
+    { 0x000926B0, 0x00000000, "926B0", false },   /* 0x00938BCC (0x000915D8 asks): one frame, cutscene -> play */
+    { 0x000931DC, 0x00000000, "931DC", false },   /* 0x009389EC (its start 0x0064FA58 is shared code: no hook): not seen */
+    { 0x00093B34, 0x00000000, "93B34", false },   /* 0x00938ADC: the cutscene camera */
+    { 0x00098A00, 0x00099B68, "aim",   true  },   /* 0x00938FDC: hook_aim_cam (the mouse) runs fov_mode_body */
+};
+constexpr int kNModes = (int)(sizeof s_modes / sizeof s_modes[0]);
+static_assert(kNModes == 7 && kModeAim == 6, "s_modes: the aim camera is the last");
+std::atomic<double> s_fov_k{1.0};
+std::atomic<int> s_fov_pct{100};
+std::atomic<bool> s_fov_read{false};   /* PS3_FOV read (after main: settings.ini is exported then) or set by the menu */
+bool s_fov_hook = true;                /* PS3_FOV_HOOK */
+int s_fov_probe;                       /* PS3_FOV_PROBE */
+std::atomic<long long> s_fov_mapped{0}, s_fov_conj{0};
+/* The gameplay mode running now on the guest's main thread, and its camera's true fov (bits) while the mode sees
+ * the game's value (temp). */
+struct FovConj { bool on, live; uint32_t cam, saved, temp; double k; int mode; };
+FovConj s_conj;
+
+double fov_map(double x, double k) { return (x > 0.0 && x < 3.1) ? 2.0 * atan(k * tan(x * 0.5)) : x; }
+double fov_unmap(double y, double k) { return (y > 0.0 && y < 3.1) ? 2.0 * atan(tan(y * 0.5) / k) : y; }
+
+void fov_hooks_update();
+void fov_set_pct(int pct)
+{
+    if (pct < kFovMinPct) pct = kFovMinPct;
+    if (pct > kFovMaxPct) pct = kFovMaxPct;
+    const double k = pct == 100 ? 1.0 : tan(kFreeFov * 0.5 * pct / 100.0) / tan(kFreeFov * 0.5);
+    const int was = s_fov_pct.exchange(pct);
+    s_fov_k.store(k, std::memory_order_relaxed);
+    if (was != pct)
+        fprintf(stderr, "[fov] field of view %d%% of the game's (free camera %.1f deg high; tan x %.4f)%s\n", pct,
+                kFreeFov * pct / 100.0 * 57.2957795, k, s_fov_hook ? "" : ": PS3_FOV_HOOK=0, not applied");
+    fov_hooks_update();
+}
+/* PS3_FOV, the menu (ps3_settings.h): live. */
+int fov_apply(const char* v)
+{
+    s_fov_read.store(true);
+    fov_set_pct(v && *v ? atoi(v) : 100);
+    return ppu_hook_exists(kFnFovNow) && s_fov_hook ? 1 : 0;
+}
+struct FovAt { double t; char what[8]; char val[16]; bool done; };
+FovAt s_fov_at[16];
+int s_n_fov_at;
+const char* s_fov_at_wait;
+double s_fov_at_t0 = -1.0, s_fov_at_poll;
+void fov_first()
+{
+    if (s_fov_read.exchange(true)) return;
+    if (const char* e = getenv("PS3_FOV")) if (*e) fov_set_pct(atoi(e));
+    if (const char* e = getenv("PS3_FOV_AT")) {
+        char buf[512];
+        snprintf(buf, sizeof buf, "%s", e);
+        for (char* tok = strtok(buf, ", "); tok && s_n_fov_at < 16; tok = strtok(nullptr, ", ")) {
+            char* colon = strchr(tok, ':');
+            char* eq = colon ? strchr(colon, '=') : nullptr;
+            if (!eq) continue;
+            *eq = 0;
+            FovAt& a = s_fov_at[s_n_fov_at++];
+            a.t = atof(tok);
+            snprintf(a.what, sizeof a.what, "%s", colon + 1);
+            snprintf(a.val, sizeof a.val, "%s", eq + 1);
+            a.done = false;
+        }
+        s_fov_at_wait = getenv("PS3_FOV_AT_WAIT");
+        if (!s_fov_at_wait) s_fov_at_wait = getenv("PAD_SCRIPT_WAIT");
+        if (!s_fov_at_wait || !*s_fov_at_wait) s_fov_at_t0 = now_s();
+        fprintf(stderr, "[fov] test timeline: %d entries, from %s\n", s_n_fov_at,
+                s_fov_at_t0 >= 0.0 ? "now" : s_fov_at_wait);
+    }
+}
+void fov_timeline()
+{
+    if (!s_n_fov_at) return;
+    const double t = now_s();
+    if (s_fov_at_t0 < 0.0) {
+        if (t - s_fov_at_poll < 0.25) return;
+        s_fov_at_poll = t;
+        FILE* f = fopen(s_fov_at_wait, "rb");
+        if (!f) return;
+        fclose(f);
+        s_fov_at_t0 = t;
+        fprintf(stderr, "[fov] test timeline starts (t=%.3f)\n", t);
+    }
+    for (int i = 0; i < s_n_fov_at; i++) {
+        FovAt& a = s_fov_at[i];
+        if (a.done || t - s_fov_at_t0 < a.t) continue;
+        a.done = true;
+        const char* var = !strcmp(a.what, "fov") ? "PS3_FOV" : !strcmp(a.what, "dof") ? "PS3RECOMP_DOF" : nullptr;
+        if (var) { const int live = ps3_setting_apply(var, a.val);
+                   fprintf(stderr, "[fov] test timeline w%.1f: %s=%s (%s)\n", a.t, var, a.val, live ? "live" : "not live"); }
+    }
+}
+
+/* PS3_FOV_PROBE=1: once a second, what ran: the modes (frames / starts, their camera), the fov requests by
+ * caller, SetFov, the camera update and copy, the render camera's fov and tan now, the view mark. */
+struct FovTally { uint32_t key, cam; long long n; float lo, hi; };
+FovTally s_ft[40];
+int s_ft_n;
+double s_ft_t;
+uint32_t s_ft_vt[kNModes];
+uint32_t s_ft_cam;                    /* the last gameplay mode's camera */
+void fov_tally(uint32_t key, uint32_t cam, float v)
+{
+    FovTally* e = nullptr;
+    for (int i = 0; i < s_ft_n && !e; i++) if (s_ft[i].key == key && s_ft[i].cam == cam) e = &s_ft[i];
+    if (!e && s_ft_n < 40) { e = &s_ft[s_ft_n++]; *e = FovTally{key, cam, 0, v, v}; }
+    if (e) { e->n++; if (v < e->lo) e->lo = v; if (v > e->hi) e->hi = v; }
+}
+void fov_probe_flush()
+{
+    const double t = now_s();
+    if (t - s_ft_t < 1.0) return;
+    s_ft_t = t;
+    char buf[3072];
+    int k = snprintf(buf, sizeof buf, "[fov] t=%.3f clock %.1f k=%.4f mapped=%lld conj=%lld", t,
+                     (double)ps3_ms_now() / 1000.0, s_fov_k.load(), s_fov_mapped.load(), s_fov_conj.load());
+#ifdef CHEATS_HAVE_TITLE_VIEW
+    k += snprintf(buf + k, sizeof buf - k, " view=%d", ps3_title_view_gameplay(ps3_ms_now()));
+#endif
+    if (gptr(s_ft_cam))
+        k += snprintf(buf + k, sizeof buf - k, " C %08X fov %.4f tan %.4f target %.4f", s_ft_cam,
+                      (double)rdf(s_ft_cam + kCamFov), (double)rdf(s_ft_cam + kCamTanY), (double)rdf(s_ft_cam + 0x2CC));
+    k += snprintf(buf + k, sizeof buf - k, " |");
+    for (int i = 0; i < s_ft_n && k < (int)sizeof buf - 96; i++) {
+        const FovTally& e = s_ft[i];
+        const uint32_t kind = e.key >> 28, a = e.key & 0x0FFFFFFFu;
+        static const char* const kKind[] = { "frame", "start", "now", "target", "setfov", "update", "copy" };
+        k += snprintf(buf + k, sizeof buf - k, " %s %06X cam %08X n=%lld %.4f..%.4f;", kind < 7 ? kKind[kind] : "?", a,
+                      e.cam, e.n, (double)e.lo, (double)e.hi);
+    }
+    fprintf(stderr, "%s\n", buf);
+    s_ft_n = 0;
+}
+
+void fov_conj_restore(uint32_t cam)   /* the true value back before the game's own code compares or reads it */
+{
+    if (s_conj.live && cam == s_conj.cam) {
+        if (vm_read32(cam + kCamFov) == s_conj.temp) vm_write32(cam + kCamFov, s_conj.saved);
+        s_conj.live = false;
+    }
+}
+/* A camera mode's frame (start = false: r3 the mode, its camera at +0x108) or start (r4 the camera). */
+void fov_mode_body(struct ppu_context* ctx, ppu_hook_body body, int m, bool start)
+{
+    if (!s_fov_hook) { ppu_hook_call(ctx, body); return; }
+    const CamMode& md = s_modes[m];
+    const uint32_t self = (uint32_t)ctx->gpr[3];
+    const uint32_t cam = start ? (uint32_t)ctx->gpr[4] : (gptr(self) ? vm_read32(self + kModeCam) : 0u);
+    fov_first();
+#ifdef CHEATS_HAVE_TITLE_VIEW
+    if (!start) ps3_title_view_mark(md.play ? 1 : 0, ps3_ms_now());
+#endif
+    fov_timeline();
+    if (s_fov_probe) {
+        if (gptr(self) && !s_ft_vt[m]) {
+            s_ft_vt[m] = vm_read32(self);
+            fprintf(stderr, "[fov] mode %s (%08X): object %08X vtable word %08X, camera %08X\n", md.name,
+                    start ? md.start : md.frame, self, s_ft_vt[m], cam);
+        }
+        fov_tally((start ? 1u << 28 : 0u) | (start ? md.start : md.frame), cam, gptr(cam) ? rdf(cam + kCamFov) : 0.0f);
+        if (md.play && gptr(cam)) s_ft_cam = cam;
+        fov_probe_flush();
+    }
+    const double k = s_fov_k.load(std::memory_order_relaxed);
+    if (!md.play || k == 1.0 || !gptr(cam) || s_conj.on) { ppu_hook_call(ctx, body); return; }
+    const uint32_t saved = vm_read32(cam + kCamFov);
+    float cur; memcpy(&cur, &saved, 4);
+    if (!(cur > 0.01f && cur < 3.0f)) { ppu_hook_call(ctx, body); return; }   /* not a field of view: not ours */
+    const float g = (float)fov_unmap(cur, k);
+    uint32_t gb; memcpy(&gb, &g, 4);
+    s_conj = FovConj{ true, true, cam, saved, gb, k, m };
+    vm_write32(cam + kCamFov, gb);
+    s_fov_conj.fetch_add(1, std::memory_order_relaxed);
+    ppu_hook_call(ctx, body);
+    if (s_conj.live && vm_read32(cam + kCamFov) == gb) vm_write32(cam + kCamFov, saved);
+    s_conj.on = s_conj.live = false;
+}
+template <int M> void hook_mode_frame(struct ppu_context* ctx, ppu_hook_body body) { fov_mode_body(ctx, body, M, false); }
+template <int M> void hook_mode_start(struct ppu_context* ctx, ppu_hook_body body) { fov_mode_body(ctx, body, M, true); }
+const ppu_hook_fn kModeFrameHook[kNModes] = { hook_mode_frame<0>, hook_mode_frame<1>, hook_mode_frame<2>, hook_mode_frame<3>,
+                                              hook_mode_frame<4>, hook_mode_frame<5>, hook_mode_frame<6> };
+const ppu_hook_fn kModeStartHook[kNModes] = { hook_mode_start<0>, hook_mode_start<1>, hook_mode_start<2>, hook_mode_start<3>,
+                                              hook_mode_start<4>, hook_mode_start<5>, hook_mode_start<6> };
+
+/* SetFovNow 0x0047D8D8(r3 camera, f1 fov) and SetFovTarget 0x0047D018(r3 camera, f1 fov, f2 rate): from inside a
+ * gameplay mode, for its camera, k times wider. */
+void fov_request(struct ppu_context* ctx, ppu_hook_body body, bool now)
+{
+    const uint32_t cam = (uint32_t)ctx->gpr[3];
+    const float asked = (float)ctx->fpr[1];
+    if (s_conj.on && cam == s_conj.cam) {
+        if (now) fov_conj_restore(cam);   /* SetFov compares with the camera's true fov */
+        ctx->fpr[1] = (double)(float)fov_map(ctx->fpr[1], s_conj.k);
+        s_fov_mapped.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (s_fov_probe) { fov_tally(((now ? 2u : 3u) << 28) | ((uint32_t)ctx->lr & 0x0FFFFFFFu), cam, asked); fov_probe_flush(); }
+    ppu_hook_call(ctx, body);
+}
+void hook_fov_now(struct ppu_context* ctx, ppu_hook_body body) { fov_request(ctx, body, true); }
+void hook_fov_target(struct ppu_context* ctx, ppu_hook_body body) { fov_request(ctx, body, false); }
+/* SetFov (probe only): who sets what. */
+void hook_set_fov(struct ppu_context* ctx, ppu_hook_body body)
+{
+    fov_tally((4u << 28) | ((uint32_t)ctx->lr & 0x0FFFFFFFu), (uint32_t)ctx->gpr[3], (float)ctx->fpr[1]);
+    ppu_hook_call(ctx, body);
+}
+/* The camera's own update 0x00480750 (r3 camera) and the render walk's copy 0x0048E980 (r3 the copy, r4 the
+ * camera it copies): they read the true fov. */
+void hook_cam_update(struct ppu_context* ctx, ppu_hook_body body)
+{
+    const uint32_t cam = (uint32_t)ctx->gpr[3];
+    fov_conj_restore(cam);
+    if (s_fov_probe) fov_tally(5u << 28 | kFnCamUpdate, cam, gptr(cam) ? rdf(cam + kCamFov) : 0.0f);
+    ppu_hook_call(ctx, body);
+}
+void hook_cam_copy(struct ppu_context* ctx, ppu_hook_body body)
+{
+    const uint32_t src = (uint32_t)ctx->gpr[4];
+    fov_conj_restore(src);
+    if (s_fov_probe) fov_tally(6u << 28 | kFnCamCopy, src, gptr(src) ? rdf(src + kCamFov) : 0.0f);   /* cam = the camera copied */
+    ppu_hook_call(ctx, body);
+}
+void fov_hooks_update()
+{
+    const bool map = s_fov_hook && s_fov_k.load(std::memory_order_relaxed) != 1.0;
+    const bool probe = s_fov_hook && s_fov_probe;
+    ppu_hook_set(kFnFovNow, map || probe ? hook_fov_now : nullptr);
+    ppu_hook_set(kFnFovTarget, map || probe ? hook_fov_target : nullptr);
+    ppu_hook_set(kFnCamUpdate, map || probe ? hook_cam_update : nullptr);
+    ppu_hook_set(kFnCamCopy, map || probe ? hook_cam_copy : nullptr);
+    ppu_hook_set(kFnSetFov, probe ? hook_set_fov : nullptr);
 }
 
 /* ---- saved spots: "Save this spot" / "Go to saved spot" (2026-11-11; NOTES.md "Saved spots") --------------
@@ -1620,9 +1926,16 @@ void hooks_update()
     ppu_hook_set(kFnRingMax, s_fix_ring ? hook_ring_max : nullptr);   /* the fix, always */
     /* [mouse] the mouse camera's direct mode: always (they write nothing while the mouse is still) */
     ppu_hook_set(kFnFreeCam, s_mouse_hook ? hook_free_cam : nullptr);
-    ppu_hook_set(kFnAimCam, s_mouse_hook ? hook_aim_cam : nullptr);
+    ppu_hook_set(kFnAimCam, (s_mouse_hook || s_fov_hook) ? hook_aim_cam : nullptr);   /* [fov] also its field of view */
     ppu_hook_set(kFnCamRate, s_mouse_hook ? hook_cam_rate : nullptr);
     ppu_hook_set(kFnCamStick, s_mouse_hook ? hook_cam_stick : nullptr);
+    /* [fov] the camera modes: always (each frame marks gameplay / other for the renderer; with PS3_FOV != 100 the
+     * gameplay ones see the game's fov), the requests only while PS3_FOV != 100 (fov_hooks_update) */
+    for (int m = 0; m < kNModes; m++) {
+        if (m != kModeAim) ppu_hook_set(s_modes[m].frame, s_fov_hook ? kModeFrameHook[m] : nullptr);
+        if (s_modes[m].start) ppu_hook_set(s_modes[m].start, s_fov_hook ? kModeStartHook[m] : nullptr);
+    }
+    fov_hooks_update();
 }
 
 /* ---- the menu's cheats --------------------------------------------------------------- */
@@ -1976,6 +2289,13 @@ void timeline_poll(struct ppu_context* ctx, uint32_t c)
                     s_mt_turns.load(), s_mt_frames.load());
         }
         else if (!strcmp(e.id, "powerdump")) power_dump(ctx, c);   /* the powers, one line each */
+        else if (!strcmp(e.id, "hurt")) {           /* [wide] tests: a hit of v x max health through the game's own
+                                                     * ApplyHealthDelta (not put back): the hurt screen tint shows */
+            const float mx = rdf(c + kHpMax), hp0 = rdf(c + kHp);
+            call_game(ctx, func_00363E54, [&](struct ppu_context* x) {
+                x->gpr[3] = c; x->gpr[4] = 0; x->gpr[5] = 0; x->fpr[1] = -(double)(float)(e.v * mx); });
+            fprintf(stderr, "[cheats] hurt: health %g -> %g of %g\n", hp0, rdf(c + kHp), mx);
+        }
         else if (!strcmp(e.id, "drain")) {          /* energy as if spent (tests the refill) */
             wrf(c + kEnergy, (float)e.v);
             fprintf(stderr, "[cheats] drain: energy set to %g\n", rdf(c + kEnergy));
@@ -2128,6 +2448,9 @@ struct Init {
         if (const char* e = getenv("PS3_MOUSE_TEE")) s_mouse_tee = e[0] != '0';         /* [mouse] GitHub #27 */
 #endif
         s_mouse_probe = getenv("PS3_MOUSE_PROBE") ? atoi(getenv("PS3_MOUSE_PROBE")) : 0;
+        if (const char* e = getenv("PS3_FOV_HOOK")) s_fov_hook = e[0] != '0';             /* [fov] */
+        s_fov_probe = getenv("PS3_FOV_PROBE") ? atoi(getenv("PS3_FOV_PROBE")) : 0;
+        ps3_setting_register("PS3_FOV", fov_apply);   /* the menu's Display page > Camera (PS3_FOV is read after main) */
         if (!getenv("PS3_CHEATS")) s_env_done = true;
         hooks_update();
         if (s_probe || s_timeline || !s_env_done)

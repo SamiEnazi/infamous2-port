@@ -23,3 +23,16 @@
 0012D6C8   # [powers] karma allows power r4 now (r3 G): evil ones at their rank or worse, hero ones at theirs or better;
            # "Karma powers of both sides" returns 1 (the game's own answer once both endings are done)
 0054C8B8   # [workers] the WwsJob manager adds its SPURS workload (r5 -> the 8 per-SPU priority bytes; 0 = that SPU never runs it)
+0047D820   # [fov] SetFov(r3 camera, f1 fov): if changed, C+0x29C = fov, tan(fov/2) -> C+0x2AC, x aspect -> C+0x2A8 (probe only)
+0047D8D8   # [fov] SetFovNow(r3 camera, f1 fov): C+0x2CC = fov, C+0x2D4 = 0, then SetFov (a tail jump)
+0047D018   # [fov] SetFovTarget(r3 camera, f1 fov, f2 rate): C+0x2CC / C+0x2D0 (the free camera only)
+00480750   # [fov] the camera's update (a virtual, r3 camera): moves C+0x29C to C+0x2CC, then the LOD factor 0x0047D8EC
+0048E980   # [fov] the render walk's camera copy (r3 the copy, r4 the camera: fov, aspect, near, far ...)
+00082964   # [fov] camera mode frames (vtable slot 3; r3 the mode, +0x108 its camera): the free camera driver
+0008DC94   # [fov]   mode 0x00938CCC
+00090188   # [fov]   mode 0x00938DBC
+000926B0   # [fov]   mode 0x00938BCC
+000931DC   # [fov]   mode 0x009389EC
+00093B34   # [fov]   mode 0x00938ADC (the aim camera 0x00098A00 has its slot above)
+0008BEB4   # [fov] camera mode starts (vtable slot 2; r3 the mode, r4 the camera taken over): mode 0x00938DBC
+00099B68   # [fov]   the aim camera's start (keeps C+0x29C at A+0x25C)

@@ -79,6 +79,7 @@
 
 #include "spu_context.h"
 #include "spu_helpers.h"
+#include "native_float.h"   /* spu_fm, spu_fma ... = the *_lean forms (PS3_NATIVE_FLOAT_LEAN=0: the reference forms) */
 /* trim (2026-11-10): the toolkit's run-time SPU instruction alternatives (runtime/spu/spu_patch.h,
  * project tools/spu_patches.txt). Switch mesh_trim = 1 (PS3RECOMP_MESH_TRIM=0, the default) is
  * Yahfz's RPCS3 patch "Disable Mesh Trimming": the cull's `brnz $r4, 0xA80C` at 0xA7C0 a nop, so
