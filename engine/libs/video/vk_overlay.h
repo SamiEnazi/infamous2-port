@@ -116,6 +116,12 @@ int  vk_overlay_open_menu(void);
 int  vk_overlay_menu_open(void);
 extern volatile int g_vk_overlay_on_worker;
 
+/* (lowend) Once the GPU is picked, before the settings are read: a card with
+ * little video memory (vram_mb, 4.5 GB or less) or integrated graphics starts
+ * with the menu's "Low-end PC" values for the settings the player has not
+ * chosen (vk_overlay_lowend.inc). Returns how many it changed. */
+int  vk_overlay_lowend_auto(unsigned vram_mb, int integrated, const char* gpu_name);
+
 /* Window teardown (device alive and idle): frees everything. */
 void vk_overlay_shutdown(void);
 

@@ -288,6 +288,23 @@ static u32 s_surf_clock;
  * 1 = always, 0 = never (the copies). */
 static volatile int s_fbf_mode = -1;
 static void eng_fbf_set(int id, int v) { (void)id; __atomic_store_n(&s_fbf_mode, v, __ATOMIC_RELAXED); }
+/* (lowend) Also a menu setting (ps3_settings.h): the low-end defaults turn it
+ * on at 720p, where the copies cost ~2 ms of GPU a frame on the city walk
+ * (vk_overlay_lowend.inc). The toggle watch is taken at the engine's init and
+ * the environment read again after it: the toggles may have been seeded before
+ * the low-end defaults set the variable. "" = unset (on when scaled). */
+static int eng_fbf_apply(const char* v)
+{
+    eng_fbf_set(0, (v && *v) ? atoi(v) : -1);
+    return 1;
+}
+static void eng_fbf_init(void)
+{
+    ps3_toggle_watch(PS3T_ENG_FBFETCH, eng_fbf_set);
+    const char* e = getenv("PS3RECOMP_ENG_FBFETCH");
+    if (e && *e) eng_fbf_apply(e);
+    ps3_setting_register("PS3RECOMP_ENG_FBFETCH", eng_fbf_apply);
+}
 static struct {
     u32 cand;                    /* units that sample one of the draw's own targets */
     u8  att[16];                 /* ... which colour attachment */
@@ -334,6 +351,7 @@ typedef struct {
     u64 wt_stamp;               /* ... the page versions it was armed with */
     u8 modded;                  /* PS3_MODS: the upload was a pack's replacement */
     u32 ws_frame;               /* (rsx5) PS3RECOMP_LIMITS: the last frame that bound it */
+    u32 acct;                   /* (lowend) the bytes it adds to s_tex_bytes (span with a texture, else 0) */
 } eng_texture;
 /* (rsx5) PS3RECOMP_LIMITS: textures bound this frame (the working set the
  * cache must hold), and PS3RECOMP_ENG_TEX_RETRY (default 1; 0 = never, as
@@ -2883,6 +2901,117 @@ static u32 eng_tex_cap(void)
     return cap;
 }
 
+/* ---- (lowend) the texture cache's size in bytes ----------------------------
+ * The cache above is capped by entries (4096) and keeps every texture until
+ * then, also those of streets long left behind: ~120 MB of guest bytes after a
+ * minute's walk in New Marais (in 16 MB blocks: ~300 MB of video memory), more
+ * over a long session. A small card (2 GB, integrated graphics) wants a
+ * ceiling; past the budget Windows pages video memory to system memory, which
+ * shows as heavy frame drops. PS3RECOMP_ENG_TEXCACHE_MB=<n> (default 0
+ * = no byte limit, as before; live): past n MB of textures (their guest
+ * bytes, about what they take on the GPU) a new texture first drops the least
+ * recently used ones -- only ones no draw has bound for ENG_TEX_STALE frames
+ * (5 s at 60 fps), so what the scene uses is never pushed out and nothing is
+ * uploaded again and again (above the limit when the scene needs more). At
+ * most ENG_TEX_DROP_MAX a miss, so a lowered limit is reached over a few
+ * frames. The Vulkan backend lowers it on its own when the GPU's memory is
+ * near its budget (rsx_draw_engine_tex_pressure; vk_vram.inc). */
+#define ENG_TEX_STALE 300u
+#define ENG_TEX_DROP_MAX 64u
+static u64 s_tex_bytes;                       /* the entries' acct, summed */
+static volatile u64 s_tex_cap_bytes;          /* the setting, 0 = none */
+static volatile u64 s_tex_pressure_bytes;     /* the backend's limit, 0 = none */
+static u64 s_tex_dropped, s_tex_dropped_bytes;
+static int eng_texcache_mb_apply(const char* v)
+{
+    const long mb = (v && *v) ? atol(v) : 0;
+    __atomic_store_n(&s_tex_cap_bytes, mb > 0 ? (u64)mb << 20 : 0ull, __ATOMIC_RELAXED);
+    return 1;
+}
+static inline void eng_tex_account(eng_texture* e)
+{
+    const u32 want = e->handle ? e->span : 0u;
+    s_tex_bytes += (u64)want - (u64)e->acct;
+    e->acct = want;
+}
+/* The limit in effect: the smaller of the setting and the backend's. */
+static inline u64 eng_tex_limit(void)
+{
+    const u64 a = __atomic_load_n(&s_tex_cap_bytes, __ATOMIC_RELAXED);
+    const u64 b = __atomic_load_n(&s_tex_pressure_bytes, __ATOMIC_RELAXED);
+    return !a ? b : !b ? a : (a < b ? a : b);
+}
+static void eng_tidx_insert(u32 i);
+static void eng_tidx_remove(u32 i);
+/* Entry i out of the cache: its texture released (after the frames that use
+ * it, as every release), the last entry moved into its place. */
+static void eng_tex_drop(u32 i)
+{
+    eng_texture* e = &g.textures[i];
+    const u32 h = e->handle;
+    s_tex_dropped++; s_tex_dropped_bytes += e->acct;
+    e->handle = 0;
+    eng_tex_account(e);
+    eng_tidx_remove(i);
+    const u32 last = g.n_textures - 1u;
+    if (i != last) {
+        eng_tidx_remove(last);
+        g.textures[i] = g.textures[last];
+        eng_tidx_insert(i);
+    }
+    memset(&g.textures[last], 0, sizeof g.textures[last]);
+    g.n_textures--;
+    if (h) g.be->texture_release(g.be->user, h);
+}
+/* Make room for `need` more bytes under the limit (a miss, before its entry).
+ * One pass over the cache picks up to ENG_TEX_DROP_MAX of the least recently
+ * used stale entries; the oldest of them go until the room is there, highest
+ * index first (eng_tex_drop moves the last entry down: never a pending one).
+ * A pass that finds none ends the search for this frame (a miss storm in a
+ * scene that needs more than the limit costs one pass, not one per miss). */
+static u32 s_tex_novictim_frame = ~0u;
+static void eng_tex_make_room(u32 need)
+{
+    const u64 lim = eng_tex_limit();
+    if (!lim || s_tex_bytes + need <= lim || s_tex_novictim_frame == g.frames) return;
+    u32 cand[ENG_TEX_DROP_MAX];
+    u32 nc = 0;
+    for (u32 i = 0; i < g.n_textures; i++) {  /* cand: sorted oldest first */
+        const eng_texture* e = &g.textures[i];
+        if (!e->handle || e->ws_frame + ENG_TEX_STALE > g.frames || e->icon_atlas) continue;
+        if (nc == ENG_TEX_DROP_MAX && e->last_use_serial >= g.textures[cand[nc - 1u]].last_use_serial) continue;
+        u32 k = nc < ENG_TEX_DROP_MAX ? nc++ : nc - 1u;
+        while (k && g.textures[cand[k - 1u]].last_use_serial > e->last_use_serial) { cand[k] = cand[k - 1u]; k--; }
+        cand[k] = i;
+    }
+    if (!nc) { s_tex_novictim_frame = g.frames; return; }   /* all in use: over the limit, as the scene needs */
+    u64 freed = 0;
+    u32 take = 0;
+    while (take < nc && s_tex_bytes - freed + need > lim) freed += g.textures[cand[take++]].acct;
+    for (u32 a = 1; a < take; a++) {          /* highest index first */
+        const u32 x = cand[a];
+        u32 b = a;
+        while (b && cand[b - 1u] < x) { cand[b] = cand[b - 1u]; b--; }
+        cand[b] = x;
+    }
+    for (u32 a = 0; a < take; a++) eng_tex_drop(cand[a]);
+}
+void rsx_draw_engine_tex_stats(unsigned* entries, unsigned long long* bytes)
+{
+    if (entries) *entries = g.n_textures;
+    if (bytes) *bytes = s_tex_bytes;
+}
+unsigned long long rsx_draw_engine_tex_limit(void) { return eng_tex_limit(); }
+void rsx_draw_engine_tex_pressure(unsigned long long limit_bytes)
+{
+    __atomic_store_n(&s_tex_pressure_bytes, (u64)limit_bytes, __ATOMIC_RELAXED);
+}
+void rsx_draw_engine_tex_dropped(unsigned long long* n, unsigned long long* bytes)
+{
+    if (n) *n = s_tex_dropped;
+    if (bytes) *bytes = s_tex_dropped_bytes;
+}
+
 static u32 eng_texture_slot_impl(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
                                  u32 levels, u32 pitch, int cube, u32 remap, u32 depth);
 
@@ -2982,6 +3111,7 @@ static u32 eng_texture_slot_impl(u32 location, u32 offset, u32 fmt, u32 w, u32 h
             e->levels = levels;
             e->span = depth > 1 ? eng_texture_span_3d(fmt, w, h, depth, levels, pitch)
                                 : eng_texture_span(fmt, w, h, levels, pitch, cube);
+            eng_tex_account(e);                 /* (lowend) */
         }
         const u32 span = e->span;
         if (!span) return 0;
@@ -3111,6 +3241,7 @@ static u32 eng_texture_slot_impl(u32 location, u32 offset, u32 fmt, u32 w, u32 h
     u32 index;
     u32 evicted = 0;
     int appended = 0;
+    if (retry_index == ~0u) eng_tex_make_room(span);   /* (lowend) PS3RECOMP_ENG_TEXCACHE_MB */
     if (retry_index != ~0u) {
         index = retry_index;                  /* its own failed entry: nothing to release */
     } else if (g.n_textures < eng_tex_cap()) {
@@ -3178,7 +3309,9 @@ static u32 eng_texture_slot_impl(u32 location, u32 offset, u32 fmt, u32 w, u32 h
     if (e.handle && evicted) g.be->texture_release(g.be->user, evicted);
     if (e.handle || !evicted) {
         if (!appended) eng_tidx_remove(index);   /* the old key, still in the slot */
+        if (!appended) { g.textures[index].handle = 0; eng_tex_account(&g.textures[index]); }   /* (lowend) */
         g.textures[index] = e;
+        eng_tex_account(&g.textures[index]);     /* (lowend) e.acct is 0 */
         eng_tidx_insert(index);
     }
     return e.handle;
@@ -6108,9 +6241,7 @@ static u32 eng_fp_tex_mask(void)
 static int eng_fbf_candidate(u32 u, const rsx_dsp_texture* t, const u32* target_slots,
                              u32 n_targets, u32 own_slot)
 {
-    int mode = __atomic_load_n(&s_fbf_mode, __ATOMIC_RELAXED);
-    { static int watched; if (!watched) { watched = 1; ps3_toggle_watch(PS3T_ENG_FBFETCH, eng_fbf_set);
-                                          mode = __atomic_load_n(&s_fbf_mode, __ATOMIC_RELAXED); } }
+    int mode = __atomic_load_n(&s_fbf_mode, __ATOMIC_RELAXED);   /* (lowend) watched from eng_fbf_init */
     /* Unset: on when the targets are scaled on either axis (PS3_RES_SCALE,
      * PS3_ASPECT) -- rsx_fp_wpos_scale() is 1 only when both axes are. */
     if (mode < 0) mode = rsx_fp_wpos_scale() != 1.0f;
@@ -8036,6 +8167,10 @@ int rsx_draw_engine_init(u32 width, u32 height)
     eng_glow_init();                                                  /* (fx12) */
     ps3_setting_register("PS3RECOMP_FX_GLOW", eng_glow_apply);
     eng_texpack_register();
+    eng_fbf_init();                                                   /* (lowend) PS3RECOMP_ENG_FBFETCH: a setting too */
+    s_tex_bytes = 0;                                                  /* (lowend) g starts empty */
+    eng_texcache_mb_apply(getenv("PS3RECOMP_ENG_TEXCACHE_MB"));
+    ps3_setting_register("PS3RECOMP_ENG_TEXCACHE_MB", eng_texcache_mb_apply);
     /* PS3RECOMP_LIMITS: the engine's capacities, and the one line at exit */
     rsx_lim_cap(RSX_LIM_TEXCACHE, eng_tex_cap());
     rsx_lim_cap(RSX_LIM_SURFACES, ENG_MAX_SURFACES);
@@ -8081,6 +8216,7 @@ void rsx_draw_engine_shutdown(void)
     const rsx_draw_backend* be = g.be;
     memset(&g, 0, sizeof g);
     g.be = be;
+    s_tex_bytes = 0;   /* (lowend) */
     eng_tidx_rebuild();
 }
 

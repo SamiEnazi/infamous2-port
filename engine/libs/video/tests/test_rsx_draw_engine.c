@@ -14,6 +14,7 @@
  */
 #include "rsx_draw_engine.h"
 #include "rsx_primitives.h"   /* RSX_PRIMITIVE_* */
+#include "../../../include/ps3emu/ps3_settings.h"   /* (lowend) ps3_setting_apply */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -590,6 +591,88 @@ static void test_texture_cache(void)
           "the least recently used entry was the one evicted");
 
     engine_down();
+}
+
+/* (lowend) PS3RECOMP_ENG_TEXCACHE_MB: past the byte limit a new texture first
+ * drops the least recently used ones that no draw bound for 300 frames --
+ * never one the scene still uses (then the cache goes over the limit). */
+static void bind_texture_unit_size(u32 location, u32 offset, u32 w, u32 h)
+{
+    const u32 dma = (location == RSX_LOCATION_MAIN) ? 2u : 1u;
+    m(M_TEX_UNIT + 0x00, offset);
+    m(M_TEX_UNIT + 0x04, dma | (2u << 4) | ((0x85u | 0x20u) << 8) | (1u << 16));
+    m(M_TEX_UNIT + 0x0C, 0x80000000u);
+    m(M_TEX_UNIT + 0x10, 0xAAE4u);
+    m(M_TEX_UNIT + 0x18, (w << 16) | h);
+    m(0x1840, w * 4u);                        /* control3: the pitch */
+}
+
+static void test_texture_cache_bytes(void)
+{
+    printf("-- texture cache byte limit\n");
+    engine_up();
+    ps3_setting_apply("PS3RECOMP_ENG_TEXCACHE_MB", "2");
+    unsigned n = 0; unsigned long long bytes = 0;
+    const u32 T = 512u, MB = 1u << 20;        /* 512x512 A8R8G8B8 linear: 1 MB each */
+    u32 h[4];
+    for (u32 i = 0; i < 2; i++) {
+        memset(vm_base + 0x100000u + i * MB, 0x30 + (int)i, MB);
+        bind_texture_unit_size(RSX_LOCATION_MAIN, 0x100000u + i * MB, T, T);
+        draw_triangle();
+        h[i] = stub.last_created_texture;
+        rsx_draw_engine_present();
+    }
+    rsx_draw_engine_tex_stats(&n, &bytes);
+    CHECK(n == 2 && bytes == 2ull * MB, "two 1 MB textures are 2 MB (%u entries, %llu bytes)", n, bytes);
+    CHECK(rsx_draw_engine_tex_limit() == 2ull * MB, "the setting is the limit (%llu)", rsx_draw_engine_tex_limit());
+
+    /* both still recent: a third one goes over the limit, nothing is dropped */
+    memset(vm_base + 0x300000u, 0x52, MB);
+    bind_texture_unit_size(RSX_LOCATION_MAIN, 0x300000u, T, T);
+    const int rel0 = stub.n_texture_release;
+    draw_triangle();
+    h[2] = stub.last_created_texture;
+    rsx_draw_engine_tex_stats(&n, &bytes);
+    CHECK(stub.n_texture_release == rel0 && n == 3 && bytes == 3ull * MB,
+          "textures bound in the last 300 frames are never dropped (%d released, %u entries)",
+          stub.n_texture_release - rel0, n);
+
+    /* 300+ frames later, the first two are stale; the third is used again */
+    for (u32 f = 0; f < 310; f++) {
+        if (f == 305) { bind_texture_unit_size(RSX_LOCATION_MAIN, 0x300000u, T, T); draw_triangle(); }
+        rsx_draw_engine_present();
+    }
+    memset(vm_base + 0x400000u, 0x63, MB);
+    bind_texture_unit_size(RSX_LOCATION_MAIN, 0x400000u, T, T);
+    draw_triangle();
+    h[3] = stub.last_created_texture;
+    rsx_draw_engine_tex_stats(&n, &bytes);
+    CHECK(stub.alive[h[0]] == 0 && stub.alive[h[1]] == 0 && stub.alive[h[2]] && stub.alive[h[3]] &&
+          n == 2 && bytes == 2ull * MB,
+          "a new texture drops the stale ones, oldest first, down to the limit (%u entries, %llu MB)", n, bytes >> 20);
+    unsigned long long nd = 0, nb = 0;
+    rsx_draw_engine_tex_dropped(&nd, &nb);
+    CHECK(nd == 2 && nb == 2ull * MB, "the drops are counted (%llu, %llu bytes)", nd, nb);
+
+    /* the dropped one comes back: made again (the index still finds the others) */
+    const int c0 = stub.n_texture_create;
+    bind_texture_unit_size(RSX_LOCATION_MAIN, 0x300000u, T, T);
+    draw_triangle();
+    CHECK(stub.n_texture_create == c0 && stub.bound_tex[0] == h[2], "a kept texture is still found after the moves");
+    bind_texture_unit_size(RSX_LOCATION_MAIN, 0x100000u, T, T);
+    draw_triangle();
+    CHECK(stub.n_texture_create == c0 + 1, "a dropped texture is made again when it is used");
+
+    /* the backend's own limit, and none */
+    rsx_draw_engine_tex_pressure(1ull * MB);
+    CHECK(rsx_draw_engine_tex_limit() == 1ull * MB, "the smaller of the setting and the backend's limit");
+    rsx_draw_engine_tex_pressure(0);
+    ps3_setting_apply("PS3RECOMP_ENG_TEXCACHE_MB", "0");
+    CHECK(rsx_draw_engine_tex_limit() == 0, "0 = no limit");
+    engine_down();
+    rsx_draw_engine_tex_stats(&n, &bytes);
+    CHECK(bytes == 0, "the count starts over with the engine (%llu)", bytes);
+    ps3_setting_setenv("PS3RECOMP_ENG_TEXCACHE_MB", NULL);
 }
 
 /* ---- 4. the pipeline key ------------------------------------------------- */
@@ -1201,6 +1284,7 @@ int main(void)
     test_surface_aliasing();
     test_mrt_set();
     test_texture_cache();
+    test_texture_cache_bytes();   /* (lowend) */
     test_pipeline_key();
     test_restart_expansion();
     test_indexed_draws();

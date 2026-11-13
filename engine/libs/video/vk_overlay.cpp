@@ -194,6 +194,37 @@ static bool overlay_off(void)
     return e && e[0] == '0' && e[1] == 0;
 }
 
+/* ---- (lowend) the settings the "Low-end PC" preset and the automatic choice
+ * for small graphics cards set (vk_overlay_lowend.inc), and where each one's
+ * value came from at start: the player's (a variable set when the game
+ * started, a line in the file) or not (the launcher's PS3_OVERLAY_DEFAULTS,
+ * nothing). Only those that are not the player's change automatically. The
+ * standard values are the launcher's (tools/play.ps1 PS3_OVERLAY_DEFAULTS)
+ * when it names them, else the ones here (the same, 2026-11-13); `unset` is
+ * what the modules use when the variable is not set (the PS3 look).
+ * Measured on the New Marais walk (RTX 2070 Super, GPU timestamps): standard
+ * 6.2 ms of GPU a frame and ~0.9 GB of video memory; these 5.0 ms and ~0.65 GB.
+ * At 720p the decals' own-target reads are copies unless FBFETCH is on (49
+ * passes, 2.3 ms of copies a frame): 720p without it costs as much as 1080p. */
+static const struct { const char* var; const char* low; const char* std_; const char* unset; } kLowEnd[] = {
+    { "PS3RECOMP_RENDER_SCALE",    "1",   "1.5",  "1" },   /* 720p: the screen targets 2.25x smaller (~240 MB) */
+    { "PS3RECOMP_ENG_FBFETCH",     "1",   "",     ""  },   /* decals read their targets in place at 720p too */
+    { "PS3RECOMP_SSAO",            "0",   "2",    "0" },   /* the game's half-resolution AO */
+    { "PS3RECOMP_SOFT_SHADOWS",    "0",   "2",    "0" },   /* the PS3's shadow filter */
+    { "PS3RECOMP_FX_RES",          "1",   "full", "1" },   /* fire and smoke at the game's 512x288 */
+    { "PS3RECOMP_ENG_TEXCACHE_MB", "512", "0",    "0" },   /* past 512 MB, textures not used for 5 s go */
+    { "PS3RECOMP_VRAM_PRESSURE",   "1",   "0",    "0" },   /* near the budget the texture cache stops growing */
+};
+enum { LOWEND_N = (int)(sizeof kLowEnd / sizeof kLowEnd[0]) };
+enum { LE_NONE = 0, LE_ENV, LE_FILE, LE_DEFAULTS };
+static unsigned char s_le_src[LOWEND_N];   /* where the value at start came from */
+static char s_le_def[LOWEND_N][24];        /* PS3_OVERLAY_DEFAULTS' value ("" = it names none) */
+static int le_index(const char* k)
+{
+    for (int i = 0; i < LOWEND_N; i++) if (!strcmp(k, kLowEnd[i].var)) return i;
+    return -1;
+}
+
 static void trim(char*& s)
 {
     while (*s == ' ' || *s == '\t' || *s == '"') s++;
@@ -333,6 +364,7 @@ static void preload(void)
 {
     if (overlay_off()) return;
     for (int i = 0; i < V_N; i++) s_env_set[i] = getenv(kVar[i]) != NULL;
+    for (int i = 0; i < LOWEND_N; i++) s_le_src[i] = getenv(kLowEnd[i].var) ? LE_ENV : LE_NONE;   /* (lowend) */
     /* Headless runs never read the player's file. */
     if (!env_on("PS3RECOMP_VK_WINDOW")) return;
     const char* p = getenv("PS3_OVERLAY_INI");
@@ -355,6 +387,7 @@ static void preload(void)
                 for (char* e = eq - 1; e >= k && (*e == ' ' || *e == '\t'); e--) *e = 0;
                 trim(v);
                 if (!*k) continue;
+                { const int le = le_index(k); if (le >= 0 && s_le_src[le] == LE_NONE) s_le_src[le] = LE_FILE; }   /* (lowend) */
                 const int i = var_index(k);
                 if (i >= 0) {
                     snprintf(s_saved[i], sizeof s_saved[i], "%s", v);
@@ -385,6 +418,11 @@ static void preload(void)
             char* k = tok; char* v = eq + 1;
             trim(k); trim(v);
             const int i = var_index(k);
+            { const int le = le_index(k);                                          /* (lowend) */
+              if (le >= 0) {
+                  snprintf(s_le_def[le], sizeof s_le_def[le], "%s", v);
+                  if (s_le_src[le] == LE_NONE) s_le_src[le] = LE_DEFAULTS;
+              } }
             if (!*k || getenv(k) || (i >= 0 && in_file[i])) continue;
             ps3_setting_setenv(k, v);
             n++;
@@ -663,6 +701,7 @@ static int tab_from_name(const char* e)
     return -1;
 }
 
+static void lowend_preset(bool low);   /* (lowend) vk_overlay_lowend.inc */
 /* PS3RECOMP_OVERLAY_MENU_AT="40:display,50:audio,60:close" (tests). */
 enum { SCRIPT_N = 16 };
 static struct { double t; char what[64]; bool done; } s_script[SCRIPT_N];
@@ -704,6 +743,8 @@ static void script_poll(double now)
             if (eq) { *eq = 0; ps3_overlay_cheat_set(k, atof(eq + 1)); }
         }
         else if (!SDL_strncasecmp(w, "bind=", 5)) remap_script(w + 5);   /* [remap] "bind=cross=key:F17", "bind=reset" */
+        else if (!SDL_strcasecmp(w, "preset=low")) lowend_preset(true);       /* (lowend) the Graphics page's buttons */
+        else if (!SDL_strcasecmp(w, "preset=standard")) lowend_preset(false);
         else { const int t = tab_from_name(w); if (t >= 0) s_tab_want = t; set_open(1); }
     }
 }
@@ -1348,8 +1389,10 @@ static void tab_display(void)
                   (unsigned)((float)s_vk.render_width * rs * ka + 0.5f), (unsigned)((float)s_vk.render_height * rs + 0.5f)); }
 }
 
+static void lowend_section(void);   /* (lowend) vk_overlay_lowend.inc */
 static void tab_graphics(void)
 {
+    lowend_section();
     section("Image quality");
     ImGui::SetNextItemWidth(combo_w());
     if (ImGui::Combo("Anti-aliasing", &s_ui.aa, kAAName, 3)) apply_setting(V_AA, kAA[s_ui.aa]);
@@ -2453,6 +2496,7 @@ static void quit_confirm(void)
 
 #include "vk_overlay_light.inc"   /* [light] tab_lighting, lfx_compare_toggle */
 #include "vk_overlay_update.inc"  /* [update] tab_update, update_confirm, update_attach */
+#include "vk_overlay_lowend.inc"  /* (lowend) the automatic choice for small cards, the Graphics presets */
 
 static void draw_menu(double now)
 {
@@ -2638,6 +2682,7 @@ extern "C" void vk_overlay_attach(const vk_overlay_attach_info* info)
     g_pad_overlay_present = 1;
     if (env_on("PS3RECOMP_OVERLAY_MENU_OPEN") || env_on("PS3_OVERLAY_FORCE_OPEN")) set_open(1);
     notice_for("F2: settings    F1: performance HUD", 6.0);
+    lowend_attach();                 /* (lowend) the automatic lighter settings, said once */
     vk_overlay_cheats_attach();      /* remembered cheats on again, and a notice naming them */
     vk_overlay_saves_attach();       /* [saves] the save-data list dialog for cellSaveData */
     update_attach();                 /* [update] the launcher's answer about a newer version (F2 > Update) */

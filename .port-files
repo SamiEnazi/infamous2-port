@@ -570,6 +570,7 @@ engine/libs/video/tests/test_metal_resource_lifetime.m
 engine/libs/video/tests/test_rsx_draw_delta.c
 engine/libs/video/tests/test_rsx_draw_delta_win.py
 engine/libs/video/tests/test_rsx_draw_engine.c
+engine/libs/video/tests/test_rsx_draw_engine_win.py
 engine/libs/video/tests/test_rsx_fifo.c
 engine/libs/video/tests/test_rsx_glow.c
 engine/libs/video/tests/test_rsx_glow_win.py
@@ -594,6 +595,7 @@ engine/libs/video/vk_overlay.cpp
 engine/libs/video/vk_overlay.h
 engine/libs/video/vk_overlay_cheats.cpp
 engine/libs/video/vk_overlay_light.inc
+engine/libs/video/vk_overlay_lowend.inc
 engine/libs/video/vk_overlay_mouse.inc
 engine/libs/video/vk_overlay_remap.inc
 engine/libs/video/vk_overlay_saves.cpp
@@ -606,6 +608,7 @@ engine/libs/video/vk_postfx.c
 engine/libs/video/vk_postfx.h
 engine/libs/video/vk_threaded_be.h
 engine/libs/video/vk_threaded_rec.h
+engine/libs/video/vk_vram.inc
 engine/libs/video/vulkan/rsx_vk_fallback.frag
 engine/libs/video/vulkan/rsx_vk_fallback.vert
 engine/libs/video/vulkan/rsx_vk_fallback_frag.spv.h

@@ -91,7 +91,7 @@
 /* ---------------------------------------------------------------------------
  * Run-time loaded entry points (Vulkan 1.0 core only)
  * -------------------------------------------------------------------------*/
-#define VK_GLOBAL_FNS(X) X(vkCreateInstance)
+#define VK_GLOBAL_FNS(X) X(vkCreateInstance) X(vkEnumerateInstanceExtensionProperties)
 #define VK_INSTANCE_FNS(X) \
     X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) \
     X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceQueueFamilyProperties) \
@@ -725,6 +725,10 @@ static void vk_batch_flush_at(int line);
 #define vk_batch_flush() vk_batch_flush_at(__LINE__)
 
 #define VK_LOG(...)  fprintf(stderr, "[RSX vulkan] " __VA_ARGS__)
+/* (lowend) vk_vram.inc: allocation accounting, the GPU's budget, the [vram] line */
+static void vk_vram_install(void);
+static void vk_vram_pick_heap(void);
+static void vk_vram_frame(void);
 #define VK_CHECK(call, what)                                               \
     do { VkResult r_ = (call);                                             \
          if (r_ != VK_SUCCESS) {                                           \
@@ -778,6 +782,7 @@ static int vk_load_device_functions(void)
     if (!(p##name = (PFN_##name)pvkGetDeviceProcAddr(s_vk.device, #name))) \
         { VK_LOG("missing device function " #name "\n"); return -1; }
     VK_DEVICE_FNS(LOAD_D)
+    vk_vram_install();                       /* (lowend) before the recorder saves vkFreeMemory */
     vk_tq_install();                         /* PS3RECOMP_VK_THREADED=1 */
     return 0;
 }
@@ -875,6 +880,7 @@ static int vk_pick_device(void)
     s_vk.phys = devs[best];
     vk_find_graphics_queue(s_vk.phys, &s_vk.queue_family);
     pvkGetPhysicalDeviceMemoryProperties(s_vk.phys, &s_vk.memprops);
+    vk_vram_pick_heap();                     /* (lowend) */
     VkPhysicalDeviceProperties p;
     pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
     VK_LOG("using device %d: %s\n", best, p.deviceName);
@@ -4489,6 +4495,7 @@ static void vk_mg_frame(void);   /* PS3RECOMP_VK_MERGE_STATS */
 static void vk_present_window(void)
 {
     vk_mg_frame();
+    vk_vram_frame();                            /* (lowend) PS3RECOMP_VRAM_LOG */
 #ifndef VK_TQ_NO_ASYNC_PRESENT
     if (vk_present_async_ok()) { vk_present_async(); return; }
 #endif
@@ -9936,6 +9943,8 @@ static void vk_wide_decide(void)
     s_wide.cw = cw;
 }
 
+#include "vk_vram.inc"                     /* (lowend) video memory: accounting, budget, [vram] */
+
 /* ---------------------------------------------------------------------------
  * Public entry points
  * -------------------------------------------------------------------------*/
@@ -9962,19 +9971,46 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                               .apiVersion = VK_API_VERSION_1_0 };
     VkInstanceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
                                 .pApplicationInfo = &app };
-    if (s_vk.windowed) {
-        ci.enabledExtensionCount   = s_vk.inst_ext_count;
-        ci.ppEnabledExtensionNames = s_vk.inst_exts;
-    }
+    /* (lowend) VK_KHR_get_physical_device_properties2, when the loader has it:
+     * the memory-budget query (vk_vram.inc) goes through its
+     * vkGetPhysicalDeviceMemoryProperties2KHR on this 1.0 instance. */
+    const char* iexts[17];
+    u32 niext = 0;
+    if (s_vk.windowed)
+        for (u32 k = 0; k < s_vk.inst_ext_count && niext < 16u; k++) iexts[niext++] = s_vk.inst_exts[k];
+    int props2 = 0;
+    { u32 n = 0;
+      if (pvkEnumerateInstanceExtensionProperties(NULL, &n, NULL) == VK_SUCCESS && n) {
+          VkExtensionProperties* e = (VkExtensionProperties*)malloc(n * sizeof *e);
+          if (e && pvkEnumerateInstanceExtensionProperties(NULL, &n, e) == VK_SUCCESS)
+              for (u32 k = 0; k < n && !props2; k++)
+                  props2 = !strcmp(e[k].extensionName, VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+          free(e);
+      } }
+    for (u32 k = 0; k < niext && props2 == 1; k++)
+        if (!strcmp(iexts[k], VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) props2 = 2;   /* already asked for */
+    if (props2 == 1) iexts[niext++] = VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
+    ci.enabledExtensionCount   = niext;
+    ci.ppEnabledExtensionNames = niext ? iexts : NULL;
     VkResult ir = pvkCreateInstance(&ci, NULL, &s_vk.instance);
+    if (ir != VK_SUCCESS && props2 == 1) {        /* (lowend) never fail over the extra extension */
+        props2 = 0;
+        ci.enabledExtensionCount = --niext;
+        ci.ppEnabledExtensionNames = niext ? iexts : NULL;
+        ir = pvkCreateInstance(&ci, NULL, &s_vk.instance);
+    }
     if (ir != VK_SUCCESS && s_vk.windowed) {
         vk_window_drop("vkCreateInstance with the surface extensions failed");
+        props2 = 0;
         ci.enabledExtensionCount = 0;
         ci.ppEnabledExtensionNames = NULL;
         ir = pvkCreateInstance(&ci, NULL, &s_vk.instance);
     }
     if (ir != VK_SUCCESS) { VK_LOG("vkCreateInstance failed (VkResult %d)\n", (int)ir); return -1; }
     if (vk_load_instance_functions()) return -1;
+    if (props2)
+        s_vram.props2 = (PFN_vkGetPhysicalDeviceMemoryProperties2KHR)
+            pvkGetInstanceProcAddr(s_vk.instance, "vkGetPhysicalDeviceMemoryProperties2KHR");
     if (s_vk.windowed) {
         if (vk_load_wsi_instance_functions()) {
             vk_window_drop("the driver has no surface functions");
@@ -9989,12 +10025,27 @@ static int vk_init_all(u32 width, u32 height, const char* title)
         vk_window_drop("no device can present to the window");
         if (vk_pick_device()) return -1;
     }
+    /* (lowend) a small card: lighter defaults, before anything reads them (the
+     * engine, the targets and postfx come after this). Play only: a headless
+     * run is a test (PS3RECOMP_LOWEND=1 still asks for it). */
+    { const char* le = getenv("PS3RECOMP_LOWEND");
+      if (s_vk.windowed || (le && le[0] == '1' && !le[1])) {
+          VkPhysicalDeviceProperties pp;
+          pvkGetPhysicalDeviceProperties(s_vk.phys, &pp);
+          vk_overlay_lowend_auto(vk_vram_device_local_mb(), pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
+                                 pp.deviceName);
+      } }
 
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                     .queueFamilyIndex = s_vk.queue_family,
                                     .queueCount = 1, .pQueuePriorities = &prio };
-    static const char* dev_exts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    const char* dev_exts[2];
+    u32 ndext = 0;
+    if (s_vk.windowed) dev_exts[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    /* (lowend) VK_EXT_memory_budget: the heap's use and budget (vk_vram.inc) */
+    s_vram.budget_ok = s_vram.props2 && vk_has_device_extension(s_vk.phys, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    if (s_vram.budget_ok) dev_exts[ndext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
     /* DXT (BC1-3) is how PS3 titles ship most textures; Vulkan gates it
      * behind a feature, enabled only when the device reports it. */
     VkPhysicalDeviceFeatures have, want;
@@ -10015,17 +10066,26 @@ static int vk_init_all(u32 width, u32 height, const char* title)
     s_vk.bc_ok = have.textureCompressionBC ? 1 : 0;
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-                               .enabledExtensionCount = s_vk.windowed ? 1u : 0u,
-                               .ppEnabledExtensionNames = s_vk.windowed ? dev_exts : NULL,
+                               .enabledExtensionCount = ndext,
+                               .ppEnabledExtensionNames = ndext ? dev_exts : NULL,
                                .pEnabledFeatures = &want };
-    VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
+    VkResult dr_ = pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device);
+    if (dr_ != VK_SUCCESS && s_vram.budget_ok) {   /* (lowend) never fail over the budget extension */
+        s_vram.budget_ok = 0;
+        dci.enabledExtensionCount = --ndext;
+        dci.ppEnabledExtensionNames = ndext ? dev_exts : NULL;
+        dr_ = pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device);
+    }
+    VK_CHECK(dr_, "vkCreateDevice");
+    VK_LOG("GPU memory: %u MB (heap %d)%s\n", vk_vram_device_local_mb(), s_vram.dl_heap,
+           s_vram.budget_ok ? ", budget numbers on (VK_EXT_memory_budget)" : ", no budget numbers");
     if (vk_load_device_functions()) return -1;
     if (s_vk.windowed && vk_load_wsi_device_functions())
         vk_window_drop("the driver has no swapchain functions");
     pvkGetDeviceQueue(s_vk.device, s_vk.queue_family, 0, &s_vk.queue);
     vk_sc_open(title);               /* the shader + pipeline disk caches */
     vk_postfx_init(s_vk.instance, s_vk.phys, s_vk.device, pvkGetInstanceProcAddr,   /* [postfx] */
-                   pvkGetDeviceProcAddr, s_sc.pc);
+                   vk_vram_gdpa, s_sc.pc);                 /* (lowend) its allocations counted */
 
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                     .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,

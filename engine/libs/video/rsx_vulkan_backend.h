@@ -93,6 +93,10 @@ u32  rsx_vulkan_backend_guest_draws(void);
  * backend. */
 int  rsx_vulkan_backend_guest_programs(void);
 
+/* (lowend) The GPU's own memory: this process's use and its budget in MB (1 =
+ * the driver gave them, VK_EXT_memory_budget) and the card's size (vk_vram.inc). */
+int  rsx_vk_vram_now(unsigned* use_mb, unsigned* budget_mb, unsigned* card_mb);
+
 #ifdef __cplusplus
 }
 #endif

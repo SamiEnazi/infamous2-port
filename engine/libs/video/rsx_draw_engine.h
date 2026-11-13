@@ -477,6 +477,16 @@ void rsx_draw_engine_set_guest_memory(rsx_vertex_guest_ptr_fn reader, void* user
 int  rsx_draw_engine_init(u32 width, u32 height);
 void rsx_draw_engine_shutdown(void);
 
+/* (lowend) The texture cache's size (entries, the guest bytes of the ones with
+ * a texture), its byte limit in effect (0 = none: PS3RECOMP_ENG_TEXCACHE_MB and
+ * the backend's own), and the textures it dropped for that limit. The backend
+ * sets its own limit when the GPU's memory is near its budget (0 = none):
+ * only textures no draw bound for five seconds go. Reads are a frame old at most. */
+void rsx_draw_engine_tex_stats(unsigned* entries, unsigned long long* bytes);
+unsigned long long rsx_draw_engine_tex_limit(void);
+void rsx_draw_engine_tex_pressure(unsigned long long limit_bytes);
+void rsx_draw_engine_tex_dropped(unsigned long long* n, unsigned long long* bytes);
+
 /* One FIFO method, with its subchannel bits still on: the engine masks them
  * out itself, as rsx_live_draw_method (6902-6976) does, because a title whose
  * SPU-built command lists bind NV4097 to another subchannel would otherwise
