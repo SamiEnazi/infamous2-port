@@ -40,6 +40,13 @@
 #   summary.txt   written when the game exits (tools\playlog_report.py)
 #   stdout.log / stderr.log
 # -NoLog turns the frame and thread records off.
+#
+# Steam, Playnite and other launchers (GitHub #29) can start work\port\build\Infamous2Recomp.exe itself, with no
+# arguments: the game then runs this script hidden as -Attach <its pid> -EnvFile <file>. Everything below runs as
+# for the .cmd, but the game is not started here: its variables, the ELF and the session folder go to the file, the
+# game takes them and writes its own stdout.log / stderr.log, and this script watches it as it watches a game it
+# starts (threads.tsv, the update check, the update on exit, summary.txt). The window stays the launcher's process,
+# so Steam Input and the Steam overlay find it.
 param(
     [switch]$Fullscreen,
     [int]$Volume = 100,              # 0..100 (only when given: else the menu's setting)
@@ -51,8 +58,11 @@ param(
     [switch]$Trace,                  # log every controller packet the game receives (PS3_PAD_TRACE=1)
     [string]$Exe = "",
     [string]$RecordRoute = "",       # record a test route: a COPY of the test save, movies cut, your controller -> work\routes\<name>.pad (testspeed)
-    [ValidateSet("city", "opening")][string]$From = "city"   # -RecordRoute from the save (city) or from a new game (opening: the anchor is the "look up" prompt)
+    [ValidateSet("city", "opening")][string]$From = "city",  # -RecordRoute from the save (city) or from a new game (opening: the anchor is the "look up" prompt)
+    [int]$Attach = 0,                # the game's process id: it was started without arguments (see above)
+    [string]$EnvFile = ""            # with -Attach: where the game's variables go
 )
+if ($Attach -and -not $EnvFile) { throw "-Attach needs -EnvFile" }
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "port_paths.ps1")   # Get-PortPath rpcs3 (config.local.json, written by Setup.cmd)
@@ -358,8 +368,11 @@ if ($SpuLighting) { $given += "SPU lighting" }
 "Starting inFAMOUS 2$(if ($given) { ' (' + ($given -join ', ') + ')' })... F1 = FPS counter, F2 = settings."
 if (-not $NoLog) { "Press F9 in the game window whenever something feels slow or stutters. Session folder: $out" }
 # Stream the logs to disk while it runs (they are too big to hold in memory).
-$so = [System.IO.StreamWriter]::new("$out\stdout.log")
-$se = [System.IO.StreamWriter]::new("$out\stderr.log")
+$so = $null; $se = $null
+if (-not $Attach) {   # an attached game writes its own
+    $so = [System.IO.StreamWriter]::new("$out\stdout.log")
+    $se = [System.IO.StreamWriter]::new("$out\stderr.log")
+}
 # Thread CPU every 10 s: which thread is the limit (main / RSX / SPU workers). Reading the
 # thread times costs microseconds; nothing is injected into the game.
 $t0 = Get-Date
@@ -406,15 +419,29 @@ do {
         # the hitch catcher's stacks of that run's frozen frames (same clock as its playlog)
         if (-not $NoLog -and (Test-Path -LiteralPath "$out\hitches.tsv")) { Move-Item -Force -LiteralPath "$out\hitches.tsv" -Destination "$out\hitches.$($run - 1).tsv" }
     }
-    $p = [System.Diagnostics.Process]::Start($psi)
+    if ($Attach) {
+        # The game waits for this file (main.cpp bare_start): written whole, then renamed into place.
+        $p = [System.Diagnostics.Process]::GetProcessById($Attach)
+        $null = $p.Handle   # held from now on, so its exit code can be read after it ends
+        $lines = @(foreach ($k in $vars.Keys) { if ($vars[$k] -ne "") { "$k=$($vars[$k])" } })
+        $lines += "PS3_START_ELF=$root\work\EBOOT.elf", "PS3_START_DIR=$out", "PS3_START_STDOUT=$out\stdout.log",
+                  "PS3_START_STDERR=$out\stderr.log", "END"
+        [System.IO.File]::WriteAllLines("$EnvFile.part", [string[]]$lines, (New-Object System.Text.UTF8Encoding $false))
+        Move-Item -Force -LiteralPath "$EnvFile.part" -Destination $EnvFile
+    } else {
+        $p = [System.Diagnostics.Process]::Start($psi)
+    }
     if ($RecordRoute) {
         "" | Set-Content -LiteralPath (Join-Path $rdrv "live.tsv")
         $routeDrv = Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile', '-File', (Join-Path $PSScriptRoot "fast_driver.ps1"),
             '-Steps', (Join-Path $PSScriptRoot $(if ($From -eq 'opening') { 'record_route_opening.steps' } else { 'record_route.steps' })), '-Rec', $rdrv, '-GamePid', $p.Id,
             '-LiveLog', $(if ($From -eq 'opening') { "$out\stderr.log" } else { (Join-Path $rdrv "live.tsv") })   # opening: the session's live stderr (cutscene events)
     }
-    $t1 = $p.StandardOutput.BaseStream.CopyToAsync($so.BaseStream)
-    $t2 = $p.StandardError.BaseStream.CopyToAsync($se.BaseStream)
+    $t1 = $null; $t2 = $null
+    if (-not $Attach) {
+        $t1 = $p.StandardOutput.BaseStream.CopyToAsync($so.BaseStream)
+        $t2 = $p.StandardError.BaseStream.CopyToAsync($se.BaseStream)
+    }
     if ($tw) {
         $prev = @{}; $prevT = Get-Date
         while (-not $p.WaitForExit(10000)) {
@@ -438,11 +465,11 @@ do {
     } else {
         $p.WaitForExit()
     }
-    try { $t1.Wait(5000) | Out-Null; $t2.Wait(5000) | Out-Null } catch {}
-} while ($p.ExitCode -eq $restartCode -and $run -lt 20 -and -not $RecordRoute)
+    try { if ($t1) { $t1.Wait(5000) | Out-Null; $t2.Wait(5000) | Out-Null } } catch {}
+} while ($p.ExitCode -eq $restartCode -and $run -lt 20 -and -not $RecordRoute -and -not $Attach)
 if ($updWatch) { try { [void]$updWatch.PS.BeginStop($null, $null) } catch {} }
 if ($tw) { $tw.Close() }
-$so.Close(); $se.Close()
+if ($so) { $so.Close() }; if ($se) { $se.Close() }
 $lockFs.Close()   # agents may run the game again
 Remove-Item -LiteralPath $myTicket -ErrorAction SilentlyContinue
 "Exited (code 0x{0:X}) after {1:F0} min. Logs: $out" -f $p.ExitCode, ((Get-Date) - $t0).TotalMinutes
@@ -455,7 +482,7 @@ if ($p.ExitCode -eq 0x55504454 -and $vars["PS3_UPDATE_DIR"]) {
 if (-not $NoLog -and (Test-Path -LiteralPath "$out\playlog.tsv")) {
     # the cap the session ended at: the menu can change it while playing
     $cap = 60
-    $capLine = Select-String -Path "$out\stderr.log" -Pattern 'frame cap (off|[\d.]+)' -ErrorAction SilentlyContinue | Select-Object -Last 1
+    $capLine = Select-String -LiteralPath "$out\stderr.log" -Pattern 'frame cap (off|[\d.]+)' -ErrorAction SilentlyContinue | Select-Object -Last 1
     if ($capLine) { $c = $capLine.Matches[0].Groups[1].Value; $cap = $(if ($c -eq 'off') { 0 } else { [double]$c }) }
     Invoke-PyHelper @("-I", (Join-Path $PSScriptRoot "playlog_report.py"), $out, "--cap", [string]$cap)
 }

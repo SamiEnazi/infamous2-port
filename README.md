@@ -364,6 +364,10 @@ runs on your distribution and GPU.
 
 - **Start:** `Play inFAMOUS 2.cmd`, or the desktop shortcut. It starts at native 1080p with all the picture
   extras on; F2 changes anything, and your choices are kept.
+- **Steam, Playnite and other launchers:** add the game itself, `work\port\build\Infamous2Recomp.exe` in the
+  port's folder (in Steam: *Add a Non-Steam Game* → Browse). Started that way, it sets itself up exactly like
+  `Play inFAMOUS 2.cmd`, and Steam Input (the Steam Controller, or any controller set up in Steam) and the Steam
+  overlay work.
 - **Keys:**
 
   | Key | Action |

@@ -1,0 +1,207 @@
+From: SamiEnazi <85966743+SamiEnazi@users.noreply.github.com>
+Subject: [PATCH] start without arguments: tools\play.ps1 -Attach sets the session up (GitHub #29)
+
+Started with no ELF (Steam's "Add a Non-Steam Game", Playnite, a shortcut to the
+exe itself), the game used to print its usage line and quit, so a launcher
+could only start "Play inFAMOUS 2.cmd" and Steam Input never reached the game's
+window. Now, on Windows, the exe runs tools\play.ps1 -Attach <pid> -EnvFile
+<file> hidden (the nearest tools\play.ps1 above the exe): the script sets the
+session up as for the .cmd and writes the game's variables, the ELF and the
+session folder to the file; the exe takes them (SetEnvironmentVariableW +
+_wputenv_s), writes its own stdout.log / stderr.log there, changes to the
+session folder and goes on as that session's game. play.ps1 watches it as it
+watches a game it starts. A failure shows a message box with the script's last
+lines. With an ELF argument nothing changes.
+diff --git a/main.cpp b/main.cpp
+index ba97673..ea50047 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -483,12 +483,188 @@ static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1,
+     ppu_guest_call(opd, a0, a1, a2, a3, a4, a5, a6, a7);
+ }
+ 
++#ifdef _WIN32
++/* ---------------------------------------------------------------------------
++ * Started with no arguments (GitHub #29): Steam's "Add a Non-Steam Game",
++ * Playnite, or a shortcut pointed at Infamous2Recomp.exe itself. tools\play.ps1
++ * -Attach <this pid> sets the session up exactly as "Play inFAMOUS 2.cmd" does
++ * (the game-folder link and file checks, the save backup, the settings, the
++ * session folder play\<date-time>) and writes the game's variables to a file.
++ * This process takes them, writes its own stdout.log / stderr.log there and
++ * runs as that session's game, so its window stays the process the launcher
++ * started: Steam Input and the Steam overlay find the game. play.ps1 stays
++ * beside it as it does for a game it starts itself (the thread record, the
++ * update check, summary.txt when the game ends).
++ * Returns 1 with argc/argv set to the ELF, 0 when there is no tools\play.ps1
++ * above the exe (the usage line as before), -1 when it failed (already shown).
++ * -----------------------------------------------------------------------*/
++#include <string>
++
++static std::wstring bare_tail(const wchar_t* path, size_t max_chars)
++{
++    std::wstring out;
++    FILE* f = _wfopen(path, L"rb");
++    if (!f) return out;
++    std::string s;
++    char buf[4096];
++    size_t n;
++    while ((n = fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, n);
++    fclose(f);
++    if (s.size() > max_chars) s = s.substr(s.size() - max_chars);
++    int w = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), NULL, 0);
++    if (w > 0) {
++        out.resize((size_t)w);
++        MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &out[0], w);
++    }
++    return out;
++}
++
++static int bare_fail(const wchar_t* what, const wchar_t* log)
++{
++    std::wstring msg = what;
++    std::wstring tail = log ? bare_tail(log, 1500) : std::wstring();
++    if (!tail.empty()) msg += L"\n\nLast lines of the launcher's output:\n\n" + tail;
++    MessageBoxW(NULL, msg.c_str(), L"inFAMOUS 2", MB_OK | MB_ICONWARNING);
++    return -1;
++}
++
++static int bare_start(int* argc, char*** argv)
++{
++    static wchar_t exe[2048], root[2048], ps1[2100];
++    DWORD n = GetModuleFileNameW(NULL, exe, 2048);
++    if (!n || n >= 2048) return 0;
++    wcscpy(root, exe);
++    int found = 0;
++    for (int up = 0; up < 6 && !found; up++) {          /* <port>\work\port\build\Infamous2Recomp.exe */
++        wchar_t* s = wcsrchr(root, L'\\');
++        if (!s) break;
++        *s = 0;
++        _snwprintf(ps1, 2099, L"%ls\\tools\\play.ps1", root);
++        ps1[2099] = 0;
++        found = GetFileAttributesW(ps1) != INVALID_FILE_ATTRIBUTES;
++    }
++    if (!found) return 0;
++
++    wchar_t tmp[MAX_PATH + 1], envf[MAX_PATH + 64], logf[MAX_PATH + 64];
++    if (!GetTempPathW(MAX_PATH + 1, tmp)) return bare_fail(L"Windows has no temporary folder for the game.", NULL);
++    const DWORD pid = GetCurrentProcessId();
++    _snwprintf(envf, MAX_PATH + 63, L"%lsinf2-start-%lu.env", tmp, (unsigned long)pid);
++    _snwprintf(logf, MAX_PATH + 63, L"%lsinf2-start-%lu.log", tmp, (unsigned long)pid);
++    envf[MAX_PATH + 63] = logf[MAX_PATH + 63] = 0;
++    DeleteFileW(envf);
++
++    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
++    HANDLE hlog = CreateFileW(logf, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa,
++                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
++    static wchar_t cmd[8192];
++    _snwprintf(cmd, 8191, L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%ls\" -Attach %lu -EnvFile \"%ls\"",
++               ps1, (unsigned long)pid, envf);
++    cmd[8191] = 0;
++    STARTUPINFOW si;
++    ZeroMemory(&si, sizeof si);
++    si.cb = sizeof si;
++    si.dwFlags = STARTF_USESHOWWINDOW | (hlog != INVALID_HANDLE_VALUE ? STARTF_USESTDHANDLES : 0);
++    si.wShowWindow = SW_HIDE;
++    si.hStdInput = NULL;
++    si.hStdOutput = si.hStdError = hlog;
++    PROCESS_INFORMATION pi;
++    if (!CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, root, &si, &pi)) {
++        if (hlog != INVALID_HANDLE_VALUE) CloseHandle(hlog);
++        return bare_fail(L"The game could not start Windows PowerShell to set itself up.\n"
++                         L"Start it with \"Play inFAMOUS 2.cmd\" in the port's folder instead.", NULL);
++    }
++    if (hlog != INVALID_HANDLE_VALUE) CloseHandle(hlog);
++
++    /* play.ps1 writes <file>.part and renames it, so the file is whole once it exists. It may wait first:
++     * the game lock (a test run), the save backup. Ten minutes, then give up. */
++    const ULONGLONG t0 = GetTickCount64();
++    int ok = 0;
++    for (;;) {
++        if (GetFileAttributesW(envf) != INVALID_FILE_ATTRIBUTES) { ok = 1; break; }
++        if (WaitForSingleObject(pi.hProcess, 100) == WAIT_OBJECT_0) {
++            ok = GetFileAttributesW(envf) != INVALID_FILE_ATTRIBUTES;
++            break;
++        }
++        if (GetTickCount64() - t0 > 600000) break;
++    }
++    CloseHandle(pi.hThread);
++    CloseHandle(pi.hProcess);   /* play.ps1 goes on beside the game */
++    if (!ok)
++        return bare_fail(L"The game could not set itself up (tools\\play.ps1 stopped).", logf);
++
++    FILE* f = _wfopen(envf, L"rb");
++    if (!f) return bare_fail(L"The game could not read its settings from the launcher.", logf);
++    std::string all;
++    {
++        char buf[4096];
++        size_t r;
++        while ((r = fread(buf, 1, sizeof buf, f)) > 0) all.append(buf, r);
++        fclose(f);
++    }
++    DeleteFileW(envf);
++    if (all.size() >= 3 && (unsigned char)all[0] == 0xEF && (unsigned char)all[1] == 0xBB && (unsigned char)all[2] == 0xBF)
++        all.erase(0, 3);
++
++    std::wstring elf, dir, so, se;
++    int ended = 0;
++    size_t pos = 0;
++    while (pos < all.size()) {
++        size_t e = all.find('\n', pos);
++        if (e == std::string::npos) e = all.size();
++        std::string line = all.substr(pos, e - pos);
++        pos = e + 1;
++        if (!line.empty() && line.back() == '\r') line.pop_back();
++        if (line == "END") { ended = 1; break; }
++        size_t eq = line.find('=');
++        if (eq == std::string::npos || eq == 0) continue;
++        int wn = MultiByteToWideChar(CP_UTF8, 0, line.data(), (int)line.size(), NULL, 0);
++        if (wn <= 0) continue;
++        std::wstring w((size_t)wn, L'\0');
++        MultiByteToWideChar(CP_UTF8, 0, line.data(), (int)line.size(), &w[0], wn);
++        size_t weq = w.find(L'=');
++        std::wstring k = w.substr(0, weq), v = w.substr(weq + 1);
++        if (k == L"PS3_START_ELF") elf = v;
++        else if (k == L"PS3_START_DIR") dir = v;
++        else if (k == L"PS3_START_STDOUT") so = v;
++        else if (k == L"PS3_START_STDERR") se = v;
++        else {
++            SetEnvironmentVariableW(k.c_str(), v.c_str());   /* the OS block (SDL reads it) ... */
++            _wputenv_s(k.c_str(), v.c_str());                /* ... and the C runtime's (getenv) */
++        }
++    }
++    if (!ended || elf.empty())
++        return bare_fail(L"The game's settings from the launcher were incomplete.", logf);
++    if (!so.empty()) _wfreopen(so.c_str(), L"w", stdout);
++    if (!se.empty()) _wfreopen(se.c_str(), L"w", stderr);
++    if (!dir.empty()) SetCurrentDirectoryW(dir.c_str());
++    DeleteFileW(logf);
++
++    /* argv[1] in the code page the C runtime gives every argument (what play.ps1's start passes) */
++    static char elf_a[4096];
++    if (!WideCharToMultiByte(CP_ACP, 0, elf.c_str(), -1, elf_a, sizeof elf_a, NULL, NULL))
++        return bare_fail(L"The game's file path could not be read.", NULL);
++    static char* nargv[3];
++    nargv[0] = (*argv)[0];
++    nargv[1] = elf_a;
++    nargv[2] = NULL;
++    *argc = 2;
++    *argv = nargv;
++    printf("[start] no arguments: set up by tools\\play.ps1 -Attach (session %ls)\n", dir.c_str());
++    return 1;
++}
++#endif
++
+ extern "C" void infamous2_gpu_light_install(void);   /* gpu_light.c */
+ extern "C" void infamous2_gpu_ssao_install(void);    /* gpu_ssao.c */
+ extern "C" void infamous2_edge_watch_install(void);  /* edge_watch.c (PS3_EDGE_WATCH) */
+ 
+ int main(int argc, char** argv)
+ {
++#ifdef _WIN32
++    /* No ELF given: a launcher started the exe itself (bare_start above, GitHub #29). */
++    if (argc < 2 && bare_start(&argc, &argv) < 0)
++        return 2;
++#endif
+     if (argc < 2) {
+         printf("usage: %s <PPU ELF>\n", argv[0]);
+         return 2;
