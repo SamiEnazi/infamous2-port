@@ -4354,6 +4354,10 @@ static void vk_rdoc_poll(void)
 
 /* Blit the offscreen target into the next swapchain image and present it. */
 static void vk_present_window_body(void);
+/* (freeze) outside the async-present block below: vk_present_window uses them on every path, and builds
+ * without the async present (VK_TQ_NO_ASYNC_PRESENT, e.g. Linux) did not see them (v0.5.4 Linux build error) */
+static int vk_pa_hold_take(void);     /* (freeze) vk_pipe_async.inc */
+static int vk_pa_hold_ok;             /* (freeze) the frame being drawn ends in vk_present_async */
 #ifndef VK_TQ_NO_ASYNC_PRESENT
 /* PS3RECOMP_VK_PRESENT_ASYNC (rsx3, default on; =0 = the present below, on this
  * thread): the RSX thread ends the frame's pass, waits for the frame cap's beat
@@ -4383,8 +4387,6 @@ static int vk_present_async_ok(void)
     return on && s_tq.running && !s_tq.direct && vk_fif_on() && s_gp.on <= 0 && !vk_overlay_menu_open();
 }
 /* The worker's half (also run on the RSX thread, direct, when no record fits). */
-static int vk_pa_hold_take(void);     /* (freeze) vk_pipe_async.inc */
-static int vk_pa_hold_ok;             /* (freeze) the frame being drawn ends in vk_present_async */
 static void vk_present_finish(VkCommandBuffer cmd, VkFence fence, VkSemaphore acq,
                               VkImage cimg, VkImageView cview, u32 cw, u32 ch, int hold)
 {
