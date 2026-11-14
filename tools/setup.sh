@@ -117,8 +117,8 @@ elif [ ! -f "$disc/PS3_GAME/PARAM.SFO" ]; then ok MISS "Game disc folder" "no PS
 else
     disc="$(readlink -f "$disc")"; title=$(sfo "$disc/PS3_GAME/PARAM.SFO" TITLE_ID)
     case "$title" in
-        BCES01143|BCES01229|BCUS98125|NPUA80638) ok ok "Game" "$(sfo "$disc/PS3_GAME/PARAM.SFO" TITLE) [$title] (tested)" ;;
-        BCES01144|NPEA00318) ok note "Game" "$(sfo "$disc/PS3_GAME/PARAM.SFO" TITLE) [$title] (untested: please report how it goes)" ;;
+        BCES01143|BCES01229|BCUS98125|NPUA80638|NPEA00318) ok ok "Game" "$(sfo "$disc/PS3_GAME/PARAM.SFO" TITLE) [$title] (tested)" ;;
+        BCES01144) ok note "Game" "$(sfo "$disc/PS3_GAME/PARAM.SFO" TITLE) [$title] (please report how it goes)" ;;
         *) ok MISS "Game" "[$title] is not inFAMOUS 2" ;;
     esac
 fi

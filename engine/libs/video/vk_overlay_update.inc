@@ -114,7 +114,7 @@ static void tab_update(double now)
         if (by && !strcmp(by, "recomplauncher"))
             hint("RecompLauncher keeps this copy up to date: it installs each new release of the port by itself.");
         else if (by && !strcmp(by, "git"))
-            hint("This folder is a git clone: \"git pull --recurse-submodules\" gets the newest code, then Setup.exe "
+            hint("This folder is a git clone: \"git pull\" gets the newest code, then Setup.exe "
                  "(or Setup.cmd) builds it.");
         else
             hint("No update information: the game was not started with \"Play inFAMOUS 2\" (or the desktop shortcut) "

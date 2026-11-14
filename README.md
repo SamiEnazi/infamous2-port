@@ -9,12 +9,12 @@ No emulator while you play.
 
 [![Latest release](https://img.shields.io/github/v/release/SamiEnazi/infamous2-port?label=latest&color=f2b200)](../../releases/latest)
 [![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)](#-what-you-need)
-[![Linux: experimental](https://img.shields.io/badge/Linux-experimental-FCC624?logo=linux&logoColor=black)](#-linux-experimental)
+[![Linux and Steam Deck](https://img.shields.io/badge/Linux-Steam%20Deck-FCC624?logo=linux&logoColor=black)](#-linux-and-steam-deck)
 [![Renderer: Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C?logo=vulkan&logoColor=white)](#-how-it-works)
 [![Native 1080p, up to 4K](https://img.shields.io/badge/native-1080p%20%E2%80%A2%20up%20to%204K-6250d6)](#%EF%B8%8F-native-1080p-and-up)
 [![2.3x the frame rate of RPCS3](https://img.shields.io/badge/vs%20RPCS3-2.3%C3%97%20the%20fps-2a78d6)](#-performance-native-vs-rpcs3)
 [![Any controller](https://img.shields.io/badge/controllers-plug%20%26%20play-1baf7a?logo=steamdeck&logoColor=white)](#-full-controller-support)
-[![Status: public test](https://img.shields.io/badge/status-public%20test-eb6834)](#-status)
+[![Status: released](https://img.shields.io/badge/status-released-1baf7a)](#-status)
 [![License: MIT](https://img.shields.io/badge/license-MIT-1baf7a)](LICENSE)
 [![Made with Claude Code](https://img.shields.io/badge/made%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](#-made-with-claude-code)
 [![Visitors](https://komarev.com/ghpvc/?username=SamiEnazi-infamous2-port&label=visitors&color=3fa9ff&style=flat)](https://github.com/SamiEnazi/infamous2-port)
@@ -27,7 +27,7 @@ No emulator while you play.
 > or the digital version 01.03) set up in [RPCS3](https://rpcs3.net) with the PS3 firmware. Download
 > **Setup.exe** from the [latest release](../../releases/latest), run it and press **Install**: it builds the
 > game from your copy once (20–60 minutes), then **Play**. Details: [What you need](#-what-you-need) ·
-> [Install](#-install). On **Linux**: [Linux (experimental)](#-linux-experimental).
+> [Install](#-install). On **Linux** and the **Steam Deck**: [Linux and Steam Deck](#-linux-and-steam-deck).
 
 ## 🆕 What's new
 
@@ -66,7 +66,7 @@ No emulator while you play.
 **v0.5.0**
 - 🔄 **Updates from inside the game:** a notice says when a new version is out, and **F2 → Update** installs it.
   Later updates rebuild only what changed, so they take minutes. [More](#-updates)
-- 🐧 **Linux (experimental):** builds and runs natively, with `tools/setup.sh` and `tools/play.sh`. [More](#-linux-experimental)
+- 🐧 **Linux and Steam Deck:** builds and runs natively: unzip, run `./setup.sh`. [More](#-linux-and-steam-deck)
 - 🏆 **Trophies in Playnite and RecompLauncher:** the port writes its trophies the way RPCS3 does, and reports
   them to Recomp Achievements. [More](#-trophies-in-playnite-and-recomplauncher)
 - ✨ **Glow at high resolutions fixed:** no more blocky or doubled glow around lightning and lamps above 720p
@@ -97,7 +97,7 @@ Every version and its changes: [Releases](../../releases).
 | 🏙️ City: the dock right after loading (720p) | 43 fps (39–46) | **99 fps** |
 | 🎥 Camera turned to three more views (720p) | not measured | **104 / 132 / 139 fps** |
 | 🖥️ The same four views at **native 1080p** with every picture extra on | | **99 / 103 / 133 / 140 fps** |
-| 🔧 Developer build (profile-guided optimisation and hand-written SPU code, not in the Setup build), the same four views at 1080p with every extra | | 116 / 126 / 161 / 166 fps |
+| 🔧 With profile-guided optimisation (*Optimise for this PC*) and the native SPU jobs, the same four views at 1080p with every extra | | 116 / 126 / 161 / 166 fps |
 
 <sub>
 This port: measured on 10 Nov 2026 with the build Setup makes today. RPCS3: measured on 9 Nov 2026. Both on an
@@ -108,7 +108,7 @@ both, as on the PS3. "Picture extras" means soft shadows, full-resolution ambien
 gradients and full-resolution effects.
 </sub>
 
-**v0.5.2 is faster again.** The build Setup makes now has native versions of the game's heaviest SPU jobs. In the same kind of player build on the test PC: **+14% to +26%** across the city, the dock, the opening fight and the cathedral spire, and **+13% to +19%** with the game held to 4 cores (in that fight, frames slower than 60 fps went from 770 to 121). Setup's *Optimise for this PC* adds about **5–11%** more. The table above is from the 10 Nov build; it will be measured again.
+**v0.5.2 is faster again.** The build Setup makes now has native versions of the game's heaviest SPU jobs. In the same kind of player build on the test PC: **+14% to +26%** across the city, the dock, the opening fight and the cathedral spire, and **+13% to +19%** with the game held to 4 cores (in that fight, frames slower than 60 fps went from 770 to 121). Setup's *Optimise for this PC* adds about **5–11%** more. The table above is from the 10 Nov build, before these gains.
 
 ## ✨ What you get
 
@@ -273,8 +273,8 @@ stutter you report comes with its cause.
 Setup translates the game's PS3 code into PC code **on your machine** and compiles it. The game then
 runs directly on your CPU, with its graphics drawn through Vulkan.
 
-> 🧪 **Public test.** It boots, plays and saves, and players run it on Windows 10 and 11 PCs and on Linux.
-> Expect bugs; please [report them](../../issues) with the session's `play\<date-time>` folder.
+> ✅ **Ready to play.** It boots, plays and saves, and players run it on Windows 10 and 11 PCs, on Linux and on the Steam Deck.
+> Found a bug? Please [report it](../../issues) with the session's `play\<date-time>` folder.
 
 > 🔒 **No game content is included, and none is downloaded.** You need your own copy of the game,
 > and RPCS3 for Setup. Builds of the game (the `.exe`) are never shared, because they contain the
@@ -285,8 +285,8 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
 | | |
 |---|---|
 | ✅ Tested copies | Played and confirmed by players: the **Europe** disc (**BCES01143**), the **Turkey** disc (**BCES01229**) and the **US** disc (**BCUS98125**), each with the **1.04** update, and the **digital (PSN)** version 01.03. |
-| 🖥️ Tested PCs | The test PC: i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p to 4K. Players: Windows 10 and 11 PCs, up to an RTX 5070 at 1440p. Linux: Ubuntu 22.04 with an AMD GPU (experimental). |
-| ⚠️ Known issues | • Views over a big part of the city (the top of the cathedral spire) are the heaviest: about 83 fps there on the test PC with v0.5.2 (it was 67). On 4- and 6-core CPUs the game's SPU jobs set the pace there, and that is being worked on.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them.<br>• On AMD graphics cards, close-up faces in cutscenes can show black spots ([#27](../../issues/27)); a fix is being worked on. |
+| 🖥️ Tested PCs | The test PC: i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p to 4K. Players: Windows 10 and 11 PCs, up to an RTX 5070 at 1440p. Linux: Ubuntu 22.04 with an AMD GPU, and the Steam Deck ([#24](../../issues/24)). |
+| ⚠️ Known issues | • Views over a big part of the city (the top of the cathedral spire) are the heaviest: about 83 fps there on the test PC with v0.5.2 (it was 67). On 4- and 6-core CPUs the game's SPU jobs set the pace there.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them.<br>• On AMD graphics cards, close-up faces in cutscenes can show black spots ([#27](../../issues/27)). |
 
 ## 🧰 What you need
 
@@ -304,7 +304,7 @@ runs directly on your CPU, with its graphics drawn through Vulkan.
   - After Setup you can remove RPCS3. Keep your game disc folder where it is.
   - Start the game once in RPCS3 until the main menu: that installs 2.4 GB of data that Setup copies.
 - 💻 **A PC with:**
-  - Windows 10/11 64-bit (or Linux, experimental: [see below](#-linux-experimental))
+  - Windows 10/11 64-bit (or Linux / Steam Deck: [see below](#-linux-and-steam-deck))
   - a CPU with AVX2 (Intel 4th gen / AMD Ryzen or newer)
   - a Vulkan graphics card
   - 16 GB RAM
@@ -375,10 +375,10 @@ program. To use another tool, put a line like this in `config.local.json` in the
 is passed through as it is.
 </details>
 
-## 🐧 Linux (experimental)
+## 🐧 Linux and Steam Deck
 
 The port also builds and runs natively on Linux, with no Wine or Proton (tested on Ubuntu 22.04 with an AMD GPU).
-It is experimental: less tested than Windows, and there is no Setup.exe. **It runs on the Steam Deck**: a player
+There is no Setup.exe on Linux: `./setup.sh` does the same job. **It runs on the Steam Deck**: a player
 built it inside an Ubuntu Distrobox container in Desktop Mode and plays it in Game Mode ([#24](../../issues/24));
 in Desktop Mode, start it from that container.
 
@@ -511,7 +511,7 @@ Because this port runs the game's own code on your PC, there is a chance to brin
 - save, load and play your own created missions without a network
 - share missions as plain files, for example in this repository
 
-This is only an idea for now. Nothing is built, and it is not planned yet. Open questions:
+This is an idea for the community; nothing is built for it. Open questions:
 - How does the game talk to the UGC service?
 - What format are created missions stored in?
 - How much of the editor works with no network at all?

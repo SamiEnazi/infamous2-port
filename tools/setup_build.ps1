@@ -119,7 +119,7 @@ if (Test-Path -LiteralPath $cfgPath) { (Get-Content -LiteralPath $cfgPath -Raw |
 $cfg["rpcs3"] = $Rpcs3
 [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json))
 
-Step 2 "the build tools (a temporary download into tools-cache\, nothing is installed)"
+Step 2 "the build tools (a portable download into tools-cache\, nothing is installed)"
 & (Join-Path $PSScriptRoot "fetch_tools.ps1") -AcceptMsvcLicense:$AcceptMsvcLicense -Pgo:$Pgo
 $py = Get-PortTool python
 if (-not $py) { throw "no Python after getting the build tools" }

@@ -134,7 +134,7 @@
     },
     {
       "id": "resolution", "label": "Internal resolution", "group": "Graphics",
-      "help": "What the game draws at. 720p is the PS3's own, 1080p is the port's default. 1440p and 4K need a fast graphics card and are untested.",
+      "help": "What the game draws at. 720p is the PS3's own, 1080p is the port's default. 1440p and 4K need a fast graphics card.",
       "choices": [
         { "label": "720p", "set": { "PS3RECOMP_RENDER_SCALE": "1" } },
         { "label": "1080p", "set": { "PS3RECOMP_RENDER_SCALE": "1.5" } },

@@ -116,7 +116,7 @@ flash="$game/dev_flash"
 [ -d "$flash/sys" ] || flash="${PORT_DEV_FLASH:-${XDG_CONFIG_HOME:-$HOME/.config}/rpcs3/dev_flash}"
 defaults="PS3RECOMP_FPS_CAP=60;PS3_AUDIO_VOLUME=100;PS3RECOMP_RENDER_SCALE=1.5;PS3RECOMP_SOFT_SHADOWS=2;PS3RECOMP_SSAO=2;"
 defaults+="PS3RECOMP_SSAO_STRENGTH=125;PS3RECOMP_LIGHT_DITHER=1;PS3RECOMP_FX_RES=full;PS3RECOMP_SHARPEN=0.1"
-# Steam Deck (untested): its 1280x800 screen and small GPU -- the PS3's 720p, fullscreen (the menu's
+# Steam Deck (confirmed by a player, #24): its 1280x800 screen and small GPU -- the PS3's 720p, fullscreen (the menu's
 # settings.ini still wins over these defaults)
 if [ "$(cat /sys/devices/virtual/dmi/id/board_vendor 2>/dev/null)" = Valve ]; then
     defaults="${defaults/PS3RECOMP_RENDER_SCALE=1.5/PS3RECOMP_RENDER_SCALE=1.0};PS3RECOMP_VK_FULLSCREEN=1"

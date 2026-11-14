@@ -1195,7 +1195,7 @@ static const char* const kAAName[] = { "Off", "FXAA (fast)", "SMAA (sharper)" };
 /* [res] PS3RECOMP_RENDER_SCALE (rsx_vulkan_backend.c's [res] block) */
 static const char* const kScale[] = { "1", "1.5", "2", "3" };
 static const char* const kScaleName[] = { "720p  (1280x720, the PS3's)", "1080p  (1920x1080)",
-                                          "1440p  (2560x1440, untested)", "4K  (3840x2160, untested)" };
+                                          "1440p  (2560x1440)", "4K  (3840x2160)" };
 static const char* const kAniso[] = { "1", "2", "4", "8", "16" };
 static const char* const kAnisoName[] = { "Off (1x)", "2x", "4x", "8x", "16x" };
 /* [wide] PS3RECOMP_ASPECT (vk_postfx.c ps3_aspect_wanted, docs/WIDESCREEN.md) */
@@ -1492,7 +1492,7 @@ static void tab_graphics(void)
          "cutscenes a focus chosen for each shot. \"Off in gameplay\" keeps the cutscenes' focus; \"Off "
          "everywhere\" shows everything sharp. No frame-rate cost.");
     if (s_ui.dof == 1 && !ps3_title_view_provided())
-        hint("This build's title code does not tell gameplay from cutscenes yet (no camera seen): off everywhere for now.");
+        hint("No game camera yet (title screen): \"Off in gameplay\" keeps depth of field off everywhere until you play.");
     if (ImGui::Checkbox("Edge blur", &s_ui.edge_blur)) apply_setting(V_EDGE_BLUR, s_ui.edge_blur ? "1" : "0");
     live_mark(V_EDGE_BLUR);
     hint("The game can soften the borders of the picture where its lighting settings ask for it. Off "

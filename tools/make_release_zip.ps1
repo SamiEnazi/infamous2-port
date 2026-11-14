@@ -81,6 +81,13 @@ foreach ($p in "PLAN.md", "research", "patches\toolkit", "tools\publish_export.p
 # upstream ps3recomp's fw_spu\ (decrypted PS3 firmware modules and code lifted from them) left the engine
 # before v0.4.1 (nothing in this port's build read it); a release never carries firmware
 if (Test-Path -LiteralPath (Join-Path $stage "engine\fw_spu")) { throw "engine\fw_spu (PS3 firmware modules) is in $($script:sha): not for a release" }
+# Sami's own decryptor (he commits it to the public repository himself): left out of the zip; setup fetches it
+foreach ($own in @(Get-ChildItem -LiteralPath (Join-Path $stage "tools") -File -Filter "ps3tool*" -ErrorAction SilentlyContinue) +
+                 @(Get-Item -LiteralPath (Join-Path $stage "tools\keys\disc_keys.example.json") -ErrorAction SilentlyContinue)) {
+    if (-not $own) { continue }
+    "  left out (setup fetches it): $($own.FullName.Substring($stage.Length + 1))"
+    Remove-Item -LiteralPath $own.FullName -Force
+}
 Copy-Item -LiteralPath (Resolve-Path $SetupExe).Path (Join-Path $stage "Setup.exe")
 # the same lines Setup.exe writes after its own download (its update compares them with GitHub)
 [System.IO.File]::WriteAllText((Join-Path $stage "port-version.txt"),
