@@ -1,0 +1,23 @@
+# ps3tool key file template. The tool already embeds the public PS3 keys (the
+# same constants RPCS3 uses). This file is only for overriding or adding keys.
+# Copy it to ps3tool.keys (gitignored) or to %APPDATA%\ps3tool\keys.txt
+# (Windows) / ~/.config/ps3tool/keys.txt (Linux), then fill in the values.
+#
+# SELF keys are selected by program type and key revision:
+#   APP_<revision>_ERK / APP_<revision>_RIV
+#   NPDRM_<revision>_ERK / NPDRM_<revision>_RIV
+# The inFAMOUS 2 update EBOOT is NPDRM revision 0010; the firmware modules are
+# APP revision 001C; the disc EBOOT is APP revision 0010.
+APP_0010_ERK=
+APP_0010_RIV=
+APP_001C_ERK=
+APP_001C_RIV=
+NPDRM_0010_ERK=
+NPDRM_0010_RIV=
+NP_KLIC_FREE=
+NP_KLIC_KEY=
+RAP_KEY=
+SCEPKG_ERK=
+SCEPKG_RIV=
+PS3_GPKG_KEY=
+PSP_PKG_KEY=
