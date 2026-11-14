@@ -29,7 +29,7 @@ name = f"inFAMOUS2-port-v{a.version}-Linux-x64"
 out = os.path.join(a.out, name + ".zip")
 
 GAME = re.compile(r"\.(elf|self|sprx|prx|pkg|rap|edat|sdat|pup|iso)$|\.psarc|(^|/)(EBOOT\.BIN|PARAM\.SFO|TROPHY\.TRP|TROPUSR\.DAT"
-                  r"|TROPCONF\.SFM)$|(^|/)TROP_?\d*\.SFM$|(^|/)recomp_achievements[^/]*\.json$", re.I)
+                  r"|TROPCONF\.SFM)$|(^|/)TROP_?\d*\.SFM$|(^|/)recomp_achievements[^/]*\.json$|(^|/)keys/|disc_?keys", re.I)
 # every entry dated 26 hours ago (GitHub #21/#22: a ZIP's times have no time zone; a future time stalls the build)
 stamp = time.localtime(time.time() - 26 * 3600)[:6]
 

@@ -384,11 +384,16 @@ def step_inputs():
             src = os.path.join(flash, "sys", "external", m + ".sprx")
             dst = os.path.join(FW, m + ".sprx")
             shutil.copy2(src, dst)
-            # RPCS3 is single-instance: one file per invocation, nothing else running
-            subprocess.run([rpcs3_exe, "--decrypt", dst], timeout=120)
-            for cand in (os.path.join(FW, m + ".prx"), os.path.join(FW, m + ".elf")):
-                if os.path.isfile(cand) and cand != prx:
-                    os.replace(cand, prx)
+            if IS_WIN and os.path.isfile(os.path.join(ROOT, "tools", "decrypt.ps1")):
+                # the pluggable step: config.local.json's "decryptor", else RPCS3 run hidden (tools\decrypt.ps1)
+                subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                                os.path.join(ROOT, "tools", "decrypt.ps1"), "-In", dst, "-Out", prx], timeout=300)
+            else:
+                # RPCS3 is single-instance: one file per invocation, nothing else running
+                subprocess.run([rpcs3_exe, "--decrypt", dst], timeout=120)
+                for cand in (os.path.join(FW, m + ".prx"), os.path.join(FW, m + ".elf")):
+                    if os.path.isfile(cand) and cand != prx:
+                        os.replace(cand, prx)
         if not os.path.isfile(prx):
             raise StepError(f"decrypting {m}.sprx produced no .prx in {FW}")
         h = sha256(prx)

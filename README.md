@@ -360,6 +360,21 @@ Updating later is the same (`git pull` first), and quick: `-Cleanup` keeps the b
 and build files, so only what changed is built again. `-NoBuildCache` deletes them too.
 </details>
 
+<details>
+<summary>🔓 Your own decryption tool (advanced)</summary>
+
+The port never decrypts anything itself. Setup hands the game's 1.04 `EBOOT.BIN` and three firmware modules to
+a decryptor, by default RPCS3 (run hidden, nothing to do), and checks that what comes back is a decrypted
+program. To use another tool, put a line like this in `config.local.json` in the port's folder:
+
+```
+"decryptor": "\"C:\\Tools\\mydecrypt.exe\" \"{in}\" \"{out}\""
+```
+
+`{in}` is the encrypted file and `{out}` where the decrypted one must go. A file that is already decrypted
+is passed through as it is.
+</details>
+
 ## 🐧 Linux (experimental)
 
 The port also builds and runs natively on Linux, with no Wine or Proton (tested on Ubuntu 22.04 with an AMD GPU).

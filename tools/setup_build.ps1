@@ -152,16 +152,22 @@ $instDst = Join-Path $game "dev_hdd0\game\${title}_INSTALL"
 if ((Test-Path -LiteralPath $inst) -and -not (Test-Path -LiteralPath $instDst)) { Copy-Tree $inst $instDst "the game's HDD install (2.4 GB)" }
 elseif (-not (Test-Path -LiteralPath $instDst)) { "  note: no ${title}_INSTALL in RPCS3 -- the port's first boot installs it (if that fails: start the game once in RPCS3)" }
 
-Step 4 "decrypting the game's 1.04 EBOOT with RPCS3"
+Step 4 "decrypting the game's 1.04 EBOOT (RPCS3, or your own decryptor: tools\decrypt.ps1)"
 $eb = Join-Path $root "eboot"
 New-Item -ItemType Directory -Force $eb | Out-Null
 $elf = Join-Path $eb "EBOOT_upd104.elf"
 if (-not (Test-Path -LiteralPath $elf)) {
-    if (Get-Process rpcs3 -ErrorAction SilentlyContinue) { throw "close RPCS3 first (it decrypts one file per start)" }
+    # The pluggable step (tools\decrypt.ps1): config.local.json's "decryptor", else RPCS3 run hidden
+    # (tools\rpcs3-adapter.ps1). The port never decrypts anything itself.
+    . (Join-Path $PSScriptRoot "decrypt.ps1")
+    $script:DecryptorTemplate = Get-DecryptorTemplate
+    if ((-not $script:DecryptorTemplate -or $script:DecryptorTemplate -match "rpcs3") -and (Get-Process rpcs3 -ErrorAction SilentlyContinue)) {
+        throw "close RPCS3 first (it decrypts one file per start)"
+    }
     $bin = Join-Path $eb "EBOOT_upd104.BIN"
     Copy-Item -LiteralPath (Join-Path $Rpcs3 "dev_hdd0\game\$title\USRDIR\EBOOT.BIN") -Destination $bin -Force
-    Start-Process -FilePath (Join-Path $Rpcs3 "rpcs3.exe") -ArgumentList "--decrypt", "`"$bin`"" -Wait -WindowStyle Hidden
-    if (-not (Test-Path -LiteralPath $elf)) { throw "RPCS3 did not write $elf (is the firmware installed in RPCS3?)" }
+    try { Invoke-Decryptor -InPath $bin -OutPath $elf }
+    catch { throw "decrypting the game's EBOOT failed: $($_.Exception.Message) (is the firmware installed in RPCS3?)" }
 }
 "  $elf"
 
