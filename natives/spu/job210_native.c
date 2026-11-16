@@ -90,6 +90,8 @@ static _Thread_local J* t_j;
 static int s_mode = -1, s_dbg;
 static unsigned long long s_calls, s_declined, s_why[8];   /* J210_STATS=1: a summary line every 5000 calls */
 static int s_stats;
+static int s_math = -1;                 /* J210_MATH: 0 = the lifted tests (stage 1), 1 = the native tests; J210_CHECK=1: both, lifted wins */
+static unsigned long long s_chk_vis, s_chk_lod, s_bad_vis, s_bad_lod, s_vis_deep;
 
 static void ev_add(J* j, uint8_t kind, uint32_t x0, uint32_t x1, uint32_t x2, uint32_t x3)
 {
@@ -129,7 +131,7 @@ static void decode_aabb(const uint8_t* p, u128* mn, u128* mx)
 }
 
 /* type 1/2/11: 0x66F8 then 0x4030 with M (or N) at mlsa; 1 = visible */
-static int aabb_visible(J* j, const uint8_t* p, uint32_t mlsa)
+static int aabb_visible_lifted(J* j, const uint8_t* p, uint32_t mlsa)
 {
     spu_context* ctx = j->ctx;
     u128 mn, mx; decode_aabb(p, &mn, &mx);
@@ -145,7 +147,7 @@ static int aabb_visible(J* j, const uint8_t* p, uint32_t mlsa)
 }
 
 /* types 3/4/5/12/17: 0x5E20 with the current M (staged at F); 1 = inside */
-static int lod_inside(J* j, uint32_t idx, u128 pos)
+static int lod_inside_lifted(J* j, uint32_t idx, u128 pos)
 {
     spu_context* ctx = j->ctx;
     ctx->gpr[1] = j->r1;
@@ -165,6 +167,155 @@ static inline u128 pos_i16(const uint8_t* q)
 {
     const u128 v = spu_csflt(V4((uint32_t)(int32_t)S16(q), (uint32_t)(int32_t)S16(q + 2), (uint32_t)(int32_t)S16(q + 4), 0), 155);
     return spu_fm(v, SPLW(0x40800000u));
+}
+
+/* ---------------- stage 2: the tests natively (same helpers, same order as the lifted lean paths) ---------------- */
+static inline u128 SEL3(u128 a, u128 b) { a._u32[3] = b._u32[3]; return a; }          /* selb(a, b, fsmbi(0x000F)): lane 3 from b */
+static inline u128 SEL2(u128 a, u128 b) { a._u32[2] = b._u32[2]; return a; }          /* selb(a, b, fsmbi(0x00F0)): lane 2 from b */
+static inline u128 SEL1(u128 a, u128 b) { a._u32[1] = b._u32[1]; return a; }          /* selb(a, b, fsmbi(0x0F00)): lane 1 from b */
+static inline u128 ROT(u128 v, int w) { return V4(v._u32[w & 3], v._u32[(w + 1) & 3], v._u32[(w + 2) & 3], v._u32[(w + 3) & 3]); }   /* rotqbyi(v, 4w) */
+static inline u128 HSUM(u128 v) { return spu_fa(spu_fa(v, ROT(v, 1)), ROT(v, 2)); }    /* fa(fa(v, shufb 0x6B60), shufb 0x6B70) */
+static inline int GT0(u128 a, u128 b) { return spu_fcgt_lean(a, b)._u32[0] != 0; }    /* lane 0 of fcgt */
+#define F_ONE  0x3F800000u
+#define F_HALF 0x3F000000u
+
+/* 0x6650 xform_aabb (L5890-5929) */
+static void nat_xform(const u128 mnL, const u128 mxL, const u128* R, u128* mn, u128* mx)
+{
+    const u128 c = spu_fm(spu_fa(mnL, mxL), SPLW(F_HALF));
+    const u128 e = spu_fs(mxL, c);
+    const u128 c1 = SEL3(c, SPLW(F_ONE));
+    const u128 t = spu_fma(R[2], SPLAT(c1, 2), spu_fma(R[1], SPLAT(c1, 1), spu_fm(R[0], SPLAT(c1, 0))));
+    const u128 wc = spu_fa(t, R[3]);
+    u128 A0 = R[0], A1 = R[1], A2 = R[2];
+    for (int i = 0; i < 4; i++) { A0._u32[i] &= 0x7FFFFFFFu; A1._u32[i] &= 0x7FFFFFFFu; A2._u32[i] &= 0x7FFFFFFFu; }
+    const u128 we = spu_fma(SPLAT(e, 2), A2, spu_fma(SPLAT(e, 0), A0, spu_fm(SPLAT(e, 1), A1)));
+    *mx = spu_fa(wc, we);
+    *mn = spu_fs(wc, we);
+}
+
+/* 0x6220 planes_visible (L5012-5331, 0x644C loop): 1 = not rejected; -1 = its 64-deep local stack would overflow */
+static int nat_planes(J* j, const u128 mn, const u128 mx)
+{
+    const uint32_t count = R32(j->ls + j->buf1 + 0x30);
+    if (count == 0) return 1;
+    const uint8_t* base = j->ls;
+    const u128 mn1 = SEL3(mn, SPLW(F_ONE)), mx1 = SEL3(mx, SPLW(F_ONE));
+    uint32_t n[4];
+    n[0] = j->planes;
+    for (int k = 1; k < 4; k++) n[k] = (n[k - 1] + 32u * R32(base + ((n[k - 1] + 0x14) & SPU_LS_MASK))) & SPU_LS_MASK;
+    for (int k = 0; k < 4; k++) {
+        const u128 P = LQ(base + n[k]);
+        const u128 a = spu_fm(P, mx1), b = spu_fm(P, mn1);
+        const u128 g = spu_fcgt_lean(b, a);
+        const u128 hi = spu_selb(a, b, g);
+        if (GT0(SPLAT(P, 3), spu_fa(spu_fa(SPLAT(hi, 0), SPLAT(hi, 1)), SPLAT(hi, 2)))) return 0;
+    }
+    uint32_t node = (n[3] + 32u * R32(base + ((n[3] + 0x14) & SPU_LS_MASK))) & SPU_LS_MASK;
+    uint32_t stack[64];
+    int sp = 0;
+    for (;;) {
+        const u128 P = LQ(base + node);
+        const u128 a = spu_fm(P, mn), b = spu_fm(P, mx);
+        const u128 g = spu_fcgt_lean(a, b);
+        const u128 hi = spu_selb(b, a, g), lo = spu_selb(a, b, g);
+        const u128 hs = spu_fa(spu_fa(SPLAT(hi, 0), SPLAT(hi, 1)), SPLAT(hi, 2));
+        const u128 lsum = spu_fa(spu_fa(SPLAT(lo, 0), SPLAT(lo, 1)), SPLAT(lo, 2));
+        const u128 d = spu_fs(SEL1(lsum, hs), SPLAT(P, 3));
+        const u128 zero = SPLW(0);
+        if (!GT0(SPLAT(d, 0), zero)) {                                   /* not wholly in front */
+            const uint32_t c = R32(base + ((node + 0x10) & SPU_LS_MASK));
+            if (GT0(zero, SPLAT(d, 1))) {                                /* wholly behind: down, or pop */
+                node = (node + 32u * c) & SPU_LS_MASK;
+                if (c) continue;
+                if (sp == 0) return 0;
+                node = stack[--sp];
+                continue;
+            }
+            if (c) { if (sp >= 64) return -1; stack[sp++] = (node + 32u * c) & SPU_LS_MASK; }
+        }
+        const uint32_t sib = R32(base + ((node + 0x14) & SPU_LS_MASK));
+        if (sib == 0) return 1;
+        node = (node + 32u * sib) & SPU_LS_MASK;
+    }
+}
+
+/* 0x4030 aabb_visible lean path (L18-165): 1 = visible, 0 = culled, -1 = not modelled (the lifted test decides) */
+static int nat_visible(J* j, const u128 mnL, const u128 mxL, const u128* M)
+{
+    u128 mn, mx;
+    nat_xform(mnL, mxL, M, &mn, &mx);
+    const u128 K = j->K;
+    if (j->ls[j->buf1 + 0x81] != 0) {
+        const u128 thr = SPLAT(K, 3);
+        if (GT0(thr, SPLAT(mx, 2))) return 0;
+        const u128 z = GT0(thr, SPLAT(mn, 2)) ? thr : SPLAT(mn, 2);
+        mn = SEL2(mn, z);
+    }
+    const u128 d = spu_fs(mx, mn);
+    const u128 S2 = SPLAT(HSUM(spu_fm(d, d)), 0);
+    if (GT0(ROT(K, 1), S2)) return 0;
+    const u128 c2 = spu_fa(mn, mx);
+    const u128 K2 = ROT(K, 2);
+    if (GT0(K2, SPLW(0))) {
+        u128 v = spu_fms(c2, SPLW(F_HALF), j->cam);
+        v = SEL2(v, spu_fm(SPLAT(v, 2), SPLAT(K, 0)));
+        const u128 D = SPLAT(HSUM(spu_fm(v, v)), 0);
+        if (GT0(spu_fm(D, K2), S2)) return 0;
+    }
+    const int r = nat_planes(j, mn, mx);
+    return r < 0 ? -1 : (r & 0xFF) != 0;
+}
+
+/* 0x5E20 lod_inside (L4580-4668): 1 = inside */
+static int nat_lod(J* j, uint32_t idx, const u128 p)
+{
+    if (!((j->lod & 255u) > (idx & 255u))) return 1;
+    const uint32_t R = R32(j->ls + ((j->buf1 + 0x54 + 4u * (idx & 255u)) & SPU_LS_MASK));
+    const u128* M = j->M;
+    const u128 t = spu_fma(M[2], SPLAT(p, 2), spu_fma(M[1], SPLAT(p, 1), spu_fm(M[0], SPLAT(p, 0))));
+    u128 v = spu_fs(spu_fa(t, M[3]), j->cam);
+    v = SEL2(v, spu_fm(SPLAT(v, 2), SPLAT(j->K, 0)));
+    const u128 D = SPLAT(HSUM(spu_fm(v, v)), 0);
+    return GT0(spu_fm(SPLW(R), SPLW(R)), D);
+}
+
+/* the tests as the walker calls them: M (or N) as rows, mlsa where the lifted test finds it */
+static int aabb_visible(J* j, const uint8_t* p, const u128* Mrows, uint32_t mlsa)
+{
+    if (s_math == 1) {
+        u128 mn, mx; decode_aabb(p, &mn, &mx);
+        const int v = nat_visible(j, mn, mx, Mrows);
+        if (__builtin_expect(v >= 0, 1)) return v;
+        __atomic_add_fetch(&s_vis_deep, 1, __ATOMIC_RELAXED);
+        put_matrix(j, mlsa, Mrows);                                   /* a plane tree deeper than 64: the lifted test */
+        return aabb_visible_lifted(j, p, mlsa);
+    }
+    if (mlsa != j->F) put_matrix(j, mlsa, Mrows);
+    const int l = aabb_visible_lifted(j, p, mlsa);
+    if (s_math == 2) {
+        u128 mn, mx; decode_aabb(p, &mn, &mx);
+        const int v = nat_visible(j, mn, mx, Mrows);
+        __atomic_add_fetch(&s_chk_vis, 1, __ATOMIC_RELAXED);
+        if (v >= 0 && v != l && __atomic_add_fetch(&s_bad_vis, 1, __ATOMIC_RELAXED) <= 8)
+            fprintf(stderr, "[j210] CHECK aabb: native %d lifted %d (rec %02X%02X%02X%02X %02X%02X%02X%02X)\n",
+                    v, l, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+    }
+    return l;
+}
+
+static int lod_inside(J* j, uint32_t idx, u128 pos)
+{
+    if (s_math == 1) return nat_lod(j, idx, pos);
+    const int l = lod_inside_lifted(j, idx, pos);
+    if (s_math == 2) {
+        const int v = nat_lod(j, idx, pos);
+        __atomic_add_fetch(&s_chk_lod, 1, __ATOMIC_RELAXED);
+        if (v != l && __atomic_add_fetch(&s_bad_lod, 1, __ATOMIC_RELAXED) <= 8)
+            fprintf(stderr, "[j210] CHECK lod: native %d lifted %d (idx %u lod %u pos %08X %08X %08X)\n",
+                    v, l, idx, j->lod, pos._u32[0], pos._u32[1], pos._u32[2]);
+    }
+    return l;
 }
 
 /* ---------------- the stack (0x4278 push, 0x5EE8 pop + GET) ---------------- */
@@ -225,10 +376,10 @@ static const uint8_t* record(J* j, const uint8_t* cur, const uint8_t* end)
         return cur + s;
     }
     case 1:
-        if (aabb_visible(j, cur + 4, j->F)) return cur + 12;
+        if (aabb_visible(j, cur + 4, j->M, j->F)) return cur + 12;
         return cur + 12 + R16(cur + 2);
     case 2:
-        if (aabb_visible(j, cur + 4, j->F)) push(j, R16(cur + 2), R32(cur + 12), j->a, j->b, j->M, lod);
+        if (aabb_visible(j, cur + 4, j->M, j->F)) push(j, R16(cur + 2), R32(cur + 12), j->a, j->b, j->M, lod);
         return cur + 16;
     case 3:
         if (lod_inside(j, idx, pos_i16(cur + 2))) return cur + 12;
@@ -253,10 +404,7 @@ static const uint8_t* record(J* j, const uint8_t* cur, const uint8_t* end)
         N[1] = spu_fma(P[2], m[5], spu_fma(P[1], m[4], spu_fm(P[0], m[3])));
         N[2] = spu_fma(P[2], m[8], spu_fma(P[1], m[7], spu_fm(P[0], m[6])));
         N[3] = spu_fa(spu_fma(P[2], m[11], spu_fma(P[1], m[10], spu_fm(P[0], m[9]))), P[3]);
-        if (cur[1] != 0) {
-            put_matrix(j, j->F + 0x40, N);
-            if (!aabb_visible(j, cur + 64, j->F + 0x40)) return cur + 72;
-        }
+        if (cur[1] != 0 && !aabb_visible(j, cur + 64, N, j->F + 0x40)) return cur + 72;
         push(j, R16(cur + 2), R32(cur + 4), R32(cur + 8), R32(cur + 12), N, lod);
         return cur + 72;
     }
@@ -288,7 +436,7 @@ static int walk(J* j)
     j->nstack = 0; j->nrec = 0; j->batch0 = 0; j->nev = 0;
     j->S[0].landing = j->buf1 + 0x4000u; j->S[0].tag = j->t1;
     j->S[1].landing = j->buf1 + 0x8000u; j->S[1].tag = j->tagA;
-    put_matrix(j, j->F, j->M);
+    if (s_math != 1) put_matrix(j, j->F, j->M);
     const uint32_t L = R32(j->ls + j->buf1 + 0x34);
     if ((uint64_t)j->stream + L > SPU_LS_SIZE) { j->fallback |= FB_SIZE; return 0; }
     const uint8_t* cur = j->ls + j->stream;
@@ -306,7 +454,7 @@ static int walk(J* j)
         const Slot* s = &j->S[cur_slot];
         j->a = s->a; j->b = s->b; j->lod = s->lod;
         memcpy(j->M, s->m, sizeof j->M);
-        put_matrix(j, j->F, j->M);
+        if (s_math != 1) put_matrix(j, j->F, j->M);
         ev_add(j, EV_WAIT, 1u << (s->tag & 31), 0, 0, 0);
         cur = vm_base + s->ea;
         end = cur + s->size;
@@ -429,6 +577,8 @@ static int j210_walker(spu_context* ctx)
         s_mode = e ? atoi(e) : 1;
         s_dbg = getenv("J210_DEBUG") != 0;
         s_stats = getenv("J210_STATS") != 0;
+        { const char* m = getenv("J210_MATH"); s_math = m ? (atoi(m) != 0) : 1; }
+        if (getenv("J210_CHECK")) s_math = 2;
         fprintf(stderr, "[j210] native culling-tree walker: %s\n", s_mode ? "on" : "off (PS3RECOMP_NATIVE_J210=0)");
     }
     if (!s_mode || (g_spu_jobrec_mode & SPU_JOBREC_RECORD)) return 0;
@@ -469,8 +619,10 @@ static int j210_walker(spu_context* ctx)
             for (int i = 0; i < 8; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_why[i], 1, __ATOMIC_RELAXED);
         }
         if (c % 5000 == 0)
-            fprintf(stderr, "[j210] %llu calls, %llu declined (type %llu, ea %llu, size %llu, key %llu, tail %llu, zero %llu)\n",
-                    c, s_declined, s_why[0], s_why[1], s_why[2], s_why[3], s_why[4], s_why[5]);
+            fprintf(stderr, "[j210] %llu calls, %llu declined (type %llu, ea %llu, size %llu, key %llu, tail %llu, zero %llu);"
+                    " check: aabb %llu/%llu lod %llu/%llu differ, deep %llu\n",
+                    c, s_declined, s_why[0], s_why[1], s_why[2], s_why[3], s_why[4], s_why[5],
+                    s_bad_vis, s_chk_vis, s_bad_lod, s_chk_lod, s_vis_deep);
     }
     if (!ok) {
         memcpy(ctx->gpr, saved, sizeof saved);
