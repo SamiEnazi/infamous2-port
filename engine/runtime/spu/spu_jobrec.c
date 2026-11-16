@@ -1040,6 +1040,7 @@ int spu_native_replay_begin(spu_context* ctx)
 }
 
 static int jr_is_cmd_end(uint32_t w) { return w == 0x00020000u || (w & 0xE0000003u) == 0x20000000u || (w & 3u) == 2u; }
+static void jr_native_check(jr_tls* t, uint32_t g1, uint64_t q0, int stream0_only);
 
 void spu_native_replay_end(spu_context* ctx, int ran)
 {
@@ -1061,9 +1062,21 @@ void spu_native_replay_end(spu_context* ctx, int ran)
         if (e->type == EV_WRCH && e->ch == 0x10) { g1 = f->sidx[0][k]; break; }   /* MFC_LSA */
         if (e->type == EV_DMA) break;
     }
+    jr_native_check(t, g1, q0, 0);
+}
+
+/* The checks of a native's results over the recorded events [the native's entry, g1): every recorded
+ * PUT's bytes against guest memory, every last successful atomic store to a line; then the stream
+ * positions continue at g1. stream0_only: only the job's own stream is checked and moved on -- the job
+ * manager's interrupt handler (stream 1) that the lifted code took inside the native's span is taken
+ * after the native returns, so its recorded operations stay where they are (job 210). */
+static void jr_native_check(jr_tls* t, uint32_t g1, uint64_t q0, int stream0_only)
+{
+    const jr_file* f = t->f;
     const uint32_t g0 = t->cur[0] < f->ns[0] ? f->sidx[0][t->cur[0]] : g1;
     for (uint32_t i = g0; i < g1; i++) {
         const jr_ev* e = &f->ev[i];
+        if (stream0_only && e->stream != 0) continue;
         if (e->type == EV_DMA && mfc_is_put(e->ch) && e->len) {
             const uint8_t* rec = f->data + e->off; const uint8_t* g = vm_base + e->b;
             uint32_t n = e->len;
@@ -1083,12 +1096,45 @@ void spu_native_replay_end(spu_context* ctx, int ran)
                 jr_fail(t, "native atomic store to ea=0x%08X differs from the recording", e->b);
         }
     }
-    for (int s = 0; s < 2; s++) {
+    for (int s = 0; s < (stream0_only ? 1 : 2); s++) {
         uint32_t k = t->cur[s];
         while (k < f->ns[s] && f->sidx[s][k] < g1) k++;
         t->cur[s] = k;
     }
     t->prime_ticks += jr_qpc() - q0;
+}
+
+/* Job 210's walker (natives/spu/job210_native.c): its span of the recording ends at its second RdDec
+ * read (the end of its profiler scope), not at a 32-byte record PUT. */
+static uint32_t jr_nth_dec(const jr_tls* t, int k)   /* stream-0 position of the k-th RdDec from the native's entry */
+{
+    const jr_file* f = t->f;
+    int seen = 0;
+    for (uint32_t p = t->cur[0]; p < f->ns[0]; p++) {
+        const jr_ev* e = &f->ev[f->sidx[0][p]];
+        if (e->type == EV_RDCH && e->ch == SPU_RdDec && ++seen == k) return p;
+    }
+    return f->ns[0];
+}
+
+uint32_t spu_native_replay_dec(spu_context* ctx, int k)
+{
+    jr_tls* t = jr_on(ctx);
+    if (!t || !t->replaying) return 0;
+    const uint32_t p = jr_nth_dec(t, k);
+    if (p >= t->f->ns[0]) { jr_fail(t, "native: the recording has no RdDec #%d after the native's entry", k); return 0; }
+    return t->f->ev[t->f->sidx[0][p]].a;
+}
+
+void spu_native_replay_end_dec(spu_context* ctx, int ran, int ndec)
+{
+    jr_tls* t = jr_on(ctx);
+    if (!t || !t->replaying || !ran) return;
+    const uint64_t q0 = jr_qpc();
+    t->native_ran = 1;
+    const uint32_t p = jr_nth_dec(t, ndec);
+    if (p >= t->f->ns[0]) { jr_fail(t, "native ran but the recording has no RdDec #%d after it", ndec); return; }
+    jr_native_check(t, t->f->sidx[0][p] + 1, q0, 1);
 }
 
 static void jr_guest_release(jr_tls* t)

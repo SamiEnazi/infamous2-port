@@ -78,6 +78,8 @@ int  spu_native_replay_begin(struct spu_context* ctx);    /* replay: prime guest
 void spu_native_replay_end(struct spu_context* ctx, int ran);   /* ran: replace the recorded operations by checks of the native's results */
 int  spu_native_ea_ok(uint32_t ea, uint32_t size);            /* may a native read guest [ea, ea+size)? (a replay: only what the recording touched) */
 uint32_t spu_native_atomic_add32(struct spu_context* ctx, uint32_t ea, uint32_t v);   /* guest word += v atomically as the job does; returns the old value (a replay: the recorded one) */
+uint32_t spu_native_replay_dec(struct spu_context* ctx, int k);           /* replay: the k-th (1-based) recorded RdDec read from the native's entry */
+void spu_native_replay_end_dec(struct spu_context* ctx, int ran, int ndec);   /* as spu_native_replay_end, but the native's span ends at its ndec-th RdDec (stream 0 only) */
 
 #ifdef __cplusplus
 }
