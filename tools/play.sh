@@ -136,6 +136,15 @@ if [ $spulight = 0 ]; then export PS3RECOMP_ENG_GPU_LIGHT=07000B80:07384B80 PS3R
 [ $nokbm = 1 ] && export PS3_KBM=0
 [ $trace = 1 ] && export PS3_PAD_TRACE=1
 [ $nolog = 0 ] && export PS3RECOMP_PLAYLOG="$out/playlog.tsv"
+# Local fix (Steam Deck, KDE Plasma 6 Wayland): the Wayland surface reports more than 64 formats, the
+# engine asks for 64, gets VK_INCOMPLETE and runs without a window (sound only). XWayland works.
+[ -z "${SDL_VIDEODRIVER:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && export SDL_VIDEODRIVER=x11
+# Local tuning (Steam Deck, 4 cores). Benchmarked 2026-11-16 at one city street from the same save,
+# PGO build: 28.5 -> 30.9 fps. No busy-waiting in the GCM wait and the Vulkan worker (they take CPU
+# time from the busy threads on 4 cores), one pipeline worker, a 0.25 ms frame clock (on Linux it
+# sleeps its whole period; Windows wakes it early). Each can still be set from outside.
+: "${PS3RECOMP_GCM_SPIN_US:=0}" "${PS3RECOMP_VK_TQ_SPIN_US:=0}" "${PS3RECOMP_VK_PIPE_THREADS:=1}" "${PS3_FRAMECLOCK_US:=250}"
+export PS3RECOMP_GCM_SPIN_US PS3RECOMP_VK_TQ_SPIN_US PS3RECOMP_VK_PIPE_THREADS PS3_FRAMECLOCK_US
 # An X screen without DRI3 (a headless machine's dummy screen, some remote desktops): Mesa's GPU drivers
 # can present there only through their software path, else the game falls back to llvmpipe (the CPU).
 if [ -z "${MESA_VK_WSI_DEBUG+x}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && command -v xdpyinfo >/dev/null &&
