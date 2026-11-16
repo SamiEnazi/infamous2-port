@@ -1,5 +1,5 @@
-/* rsx_wtrack.c -- see rsx_wtrack.h. Windows only; elsewhere every query says
- * "not clean" and the caches hash as before. */
+/* rsx_wtrack.c -- see rsx_wtrack.h. Windows and Linux (through the Win32 layer); elsewhere every query
+ * says "not clean" and the caches hash as before. */
 #include "rsx_wtrack.h"
 
 #include <stdio.h>
@@ -18,9 +18,14 @@ extern uint8_t* vm_base;
 }
 #endif
 
+#if defined(_WIN32) || defined(__linux__)
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else   /* Linux (Steam Deck work): the engine's Win32 layer -- VirtualProtect is mprotect, the vectored
+         * handler runs on SIGSEGV/SIGBUS (win32_compat.c), ahead of the engine's own handlers, which chain */
+#include "../../runtime/platform/win32_compat.h"
+#endif
 
 #define WT_SHIFT  12u
 #define WT_PAGE   (1u << WT_SHIFT)
@@ -231,7 +236,7 @@ void rsx_wt_report_miss(const char* what, const void* p, size_t n)
                 k, what, (unsigned)((const uint8_t*)p - vm_base), n);
 }
 
-#else  /* !_WIN32: no tracking */
+#else  /* neither Windows nor Linux: no tracking */
 
 int  rsx_wt_mode(void) { return 0; }
 int  rsx_wt_query(const void* p, size_t n, uint64_t* stamp) { (void)p; (void)n; (void)stamp; return 0; }
