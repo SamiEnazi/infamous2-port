@@ -728,6 +728,12 @@ def linux_compile_flags(build, jobs, pgo="", lto="0", profdata=None, lift_opt=No
     lift_opt = lift_opt or os.environ.get("PORT_LIFT_OPT", LINUX_LIFT_OPT)
     spu_arch = spu_arch or os.environ.get("PORT_SPU_ARCH", LINUX_SPU_ARCH)
     c_rel, cxx_rel = "-O2 -DNDEBUG -g", "-O2 -DNDEBUG"   # = /O2 /Ob2 /DNDEBUG /Z7, /O2 /Ob2 /DNDEBUG
+    # PORT_C_EXTRA: flags added to the engine/runtime C and C++ (not the lifted code: PORT_LIFT_OPT /
+    # PORT_SPU_ARCH), e.g. "-march=znver2 -ffp-contract=off" for a build that only runs on one CPU.
+    extra = os.environ.get("PORT_C_EXTRA", "").strip()
+    if extra:
+        c_rel += " " + extra; cxx_rel += " " + extra
+        print(f"  engine flags + {extra}")
     link_rel = "-fuse-ld=lld"   # the symbol table stays in the ELF (= /DEBUG's public symbols)
     if pgo:
         names = os.environ.get("PORT_PGO_NAMES") or (pgo_profile_names(pgo[4:], profdata) if pgo.startswith("use:") else "base")
