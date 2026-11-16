@@ -145,6 +145,9 @@ if [ $spulight = 0 ]; then export PS3RECOMP_ENG_GPU_LIGHT=07000B80:07384B80 PS3R
 # sleeps its whole period; Windows wakes it early). Each can still be set from outside.
 : "${PS3RECOMP_GCM_SPIN_US:=0}" "${PS3RECOMP_VK_TQ_SPIN_US:=0}" "${PS3RECOMP_VK_PIPE_THREADS:=1}" "${PS3_FRAMECLOCK_US:=250}"
 export PS3RECOMP_GCM_SPIN_US PS3RECOMP_VK_TQ_SPIN_US PS3RECOMP_VK_PIPE_THREADS PS3_FRAMECLOCK_US
+# The RSX (draw) thread alone on a core, every other thread on the rest (engine host_place.c, Linux):
+# 30.5 -> 33.0 fps on the Deck, 34.7 with the job 210 native. PS3_CPU_PLACE=0 = the OS decides.
+: "${PS3_CPU_PLACE:=rsxcore}"; export PS3_CPU_PLACE
 # An X screen without DRI3 (a headless machine's dummy screen, some remote desktops): Mesa's GPU drivers
 # can present there only through their software path, else the game falls back to llvmpipe (the CPU).
 if [ -z "${MESA_VK_WSI_DEBUG+x}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && command -v xdpyinfo >/dev/null &&

@@ -88,6 +88,8 @@ typedef struct {
 
 static _Thread_local J* t_j;
 static int s_mode = -1, s_dbg;
+static unsigned long long s_calls, s_declined, s_why[8];   /* J210_STATS=1: a summary line every 5000 calls */
+static int s_stats;
 
 static void ev_add(J* j, uint8_t kind, uint32_t x0, uint32_t x1, uint32_t x2, uint32_t x3)
 {
@@ -315,17 +317,27 @@ static int walk(J* j)
 }
 
 /* ---------------- phase 2 ---------------- */
+/* Channel operations: in a replay the unhooked forms (spu_*_raw mark the operation as not part of the
+ * recording -- they need the replay's per-thread state, so never outside a replay); in the game the
+ * ordinary channel functions, as the lifted code issues them. */
 static void latch(J* j, int replay, uint32_t ch, uint32_t v)
 {
-    (void)replay;
-    spu_wrch_raw(j->ctx, ch, v);
+    if (replay) { spu_wrch_raw(j->ctx, ch, v); return; }
+    u128 x; memset(&x, 0, sizeof x); x._u32[0] = v;
+    spu_wrch(j->ctx, ch, x);
+}
+
+static uint32_t rdch(J* j, int replay, uint32_t ch)
+{
+    if (replay) return spu_rdch_raw(j->ctx, ch);
+    return spu_rdch(j->ctx, ch)._u32[0];
 }
 
 static void tag_wait(J* j, int replay, uint32_t mask)
 {
     latch(j, replay, MFC_WrTagMask, mask);
     latch(j, replay, MFC_WrTagUpdate, 1);
-    (void)spu_rdch_raw(j->ctx, MFC_RdTagStat);
+    (void)rdch(j, replay, MFC_RdTagStat);
 }
 
 /* 0x6050 counting sort of records [r0, r1) into H = buf2+0x180 (table at +16) and OUT = buf2+0x380 */
@@ -390,7 +402,7 @@ static void commit(J* j, int replay)
     spu_context* ctx = j->ctx;
     uint8_t* ls = j->ls;
     memset(ls + j->buf2, 0, 384);
-    const uint32_t d0 = replay ? spu_native_replay_dec(ctx, 1) : spu_rdch_raw(ctx, SPU_RdDec);
+    const uint32_t d0 = replay ? spu_native_replay_dec(ctx, 1) : rdch(j, 0, SPU_RdDec);
     P32(ls + j->buf2 + 0x180, R32(ls + j->buf1 + 0x3C));
     P32(ls + j->buf2 + 0x184, R32(ls + j->buf1 + 0x40));
     ls[j->buf2 + 0x18C] = ls[j->buf1 + 0x80];
@@ -406,7 +418,7 @@ static void commit(J* j, int replay)
             flush(j, replay, e->x0, e->x1, (int)e->x2);
         }
     }
-    const uint32_t d1 = replay ? spu_native_replay_dec(ctx, 2) : spu_rdch_raw(ctx, SPU_RdDec);
+    const uint32_t d1 = replay ? spu_native_replay_dec(ctx, 2) : rdch(j, 0, SPU_RdDec);
     P32(ls + j->buf2, R32(ls + j->buf2) + (~d1 - (~d0 + 2u)));
 }
 
@@ -416,6 +428,7 @@ static int j210_walker(spu_context* ctx)
         const char* e = getenv("PS3RECOMP_NATIVE_J210");
         s_mode = e ? atoi(e) : 1;
         s_dbg = getenv("J210_DEBUG") != 0;
+        s_stats = getenv("J210_STATS") != 0;
         fprintf(stderr, "[j210] native culling-tree walker: %s\n", s_mode ? "on" : "off (PS3RECOMP_NATIVE_J210=0)");
     }
     if (!s_mode || (g_spu_jobrec_mode & SPU_JOBREC_RECORD)) return 0;
@@ -448,6 +461,16 @@ static int j210_walker(spu_context* ctx)
     ctx->gpr[0] = r0; ctx->gpr[1] = r1;
     if (replay) {   /* both ways the stack below the caller is dead (the native's staging, the callees' frames) */
         spu_native_dead_ls(sp - 0x1800u, sp);
+    }
+    if (s_stats) {
+        const unsigned long long c = __atomic_add_fetch(&s_calls, 1, __ATOMIC_RELAXED);
+        if (!ok) {
+            __atomic_add_fetch(&s_declined, 1, __ATOMIC_RELAXED);
+            for (int i = 0; i < 8; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_why[i], 1, __ATOMIC_RELAXED);
+        }
+        if (c % 5000 == 0)
+            fprintf(stderr, "[j210] %llu calls, %llu declined (type %llu, ea %llu, size %llu, key %llu, tail %llu, zero %llu)\n",
+                    c, s_declined, s_why[0], s_why[1], s_why[2], s_why[3], s_why[4], s_why[5]);
     }
     if (!ok) {
         memcpy(ctx->gpr, saved, sizeof saved);
