@@ -299,8 +299,8 @@ int ps3_host_core_scarce(void)
  * threads created later (driver, Vulkan workers) inherit their creator's CPU set. Other values: off. */
 static pthread_once_t s_pl_once = PTHREAD_ONCE_INIT;
 static int s_pl_mode;                       /* 1 = rsxcore */
-static cpu_set_t s_rsx_set, s_core_set, s_rest_set;
-static pid_t s_rsx_tid;
+static cpu_set_t s_rsx_set, s_rsx2_set, s_core_set, s_rest_set;
+static pid_t s_rsx_tid, s_rsx2_tid;     /* the RSX thread; with PS3RECOMP_RSX_SPLIT, its exec thread (the core's other CPU) */
 static _Thread_local int t_placed;
 
 static int pl_siblings(int cpu, cpu_set_t* out)
@@ -338,6 +338,8 @@ static void pl_init(void)
     for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &s_core_set) && CPU_ISSET(c, &all)) { first = c; break; }
     if (first < 0) return;
     CPU_ZERO(&s_rsx_set); CPU_SET(first, &s_rsx_set);
+    s_rsx2_set = s_core_set; CPU_CLR(first, &s_rsx2_set);
+    if (!CPU_COUNT(&s_rsx2_set)) s_rsx2_set = s_rsx_set;          /* no SMT sibling: both share the one CPU */
     s_rest_set = all;
     for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &s_core_set)) CPU_CLR(c, &s_rest_set);
     if (CPU_COUNT(&s_rest_set) < 4) {
@@ -358,11 +360,11 @@ static void* pl_sweeper(void* arg)
         sleep(1);
         DIR* d = opendir("/proc/self/task");
         if (!d) continue;
-        const pid_t rsx = __atomic_load_n(&s_rsx_tid, __ATOMIC_ACQUIRE);
+        const pid_t rsx = __atomic_load_n(&s_rsx_tid, __ATOMIC_ACQUIRE), rsx2 = __atomic_load_n(&s_rsx2_tid, __ATOMIC_ACQUIRE);
         struct dirent* de;
         while ((de = readdir(d)) != NULL) {
             const pid_t tid = (pid_t)atoi(de->d_name);
-            if (tid <= 0 || tid == rsx) continue;
+            if (tid <= 0 || tid == rsx || tid == rsx2) continue;
             cpu_set_t cur, x;
             if (sched_getaffinity(tid, sizeof cur, &cur) != 0) continue;
             CPU_AND(&x, &cur, &s_core_set);
@@ -386,6 +388,12 @@ void ps3_host_place_self(int role)
             pthread_t t;
             if (pthread_create(&t, NULL, pl_sweeper, NULL) == 0) pthread_detach(t);
             fprintf(stderr, "[place] RSX thread %d placed alone\n", (int)me);
+            return;
+        }
+        none = 0;
+        if (__atomic_compare_exchange_n(&s_rsx2_tid, &none, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            sched_setaffinity(0, sizeof s_rsx2_set, &s_rsx2_set);
+            fprintf(stderr, "[place] second RSX-role thread %d (the split's exec thread) on the RSX core's other CPU\n", (int)me);
             return;
         }
     }
