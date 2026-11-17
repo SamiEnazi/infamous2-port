@@ -3334,8 +3334,24 @@ u32 cellGcm_display_buffer_count(void)
     return n;
 }
 
+/* (deck) PS3_DBG_FLIP_DELAY_US=<us>: a busy wait of that long in every flip request (the guest's PPU thread that
+ * ends the frame); PS3_DBG_PRESENT_DELAY_US (rsx_vulkan_backend.c) the same on the RSX thread at each present.
+ * A causal test: the thread whose delay lowers the frame rate is on the critical path. */
+void gcm_dbg_spin(const char* name, int* us)
+{
+    if (__builtin_expect(*us < 0, 0)) {
+        const char* e = getenv(name); *us = e ? atoi(e) : 0;
+        if (*us > 0) fprintf(stderr, "[dbg] %s=%d: busy wait per flip\n", name, *us);
+    }
+    if (*us <= 0) return;
+    extern unsigned long long ps3_ms_now(void);
+    struct timespec t0, t; clock_gettime(CLOCK_MONOTONIC, &t0);
+    do { __builtin_ia32_pause(); clock_gettime(CLOCK_MONOTONIC, &t); }
+    while ((t.tv_sec - t0.tv_sec) * 1000000ll + (t.tv_nsec - t0.tv_nsec) / 1000 < *us);
+}
 static s32 gcm_flip_request(u32 bufferId, int in_fifo)
 {
+    { static int us = -1; gcm_dbg_spin("PS3_DBG_FLIP_DELAY_US", &us); }   /* both kinds: the guest's PPU thread */
     /* GCM_FLIPCOUNT=1: every flip, with a timestamp. FLIP_DBG caps at 20 lines,
      * which answers "did it ever flip?" and not "is it still flipping, and how
      * fast?" -- the question that matters when a title stops appearing on

@@ -4587,6 +4587,8 @@ static void vk_mg_frame(void);   /* PS3RECOMP_VK_MERGE_STATS */
 static void vk_present_window(void)
 {
     vk_callstats_frame();                       /* (deck) PS3RECOMP_VK_CALLSTATS */
+    { extern void gcm_dbg_spin(const char* name, int* us); static int us = -1;
+      gcm_dbg_spin("PS3_DBG_PRESENT_DELAY_US", &us); }   /* (deck) causal test, cellGcmSys.c */
     vk_mg_frame();
     vk_vram_frame();                            /* (lowend) PS3RECOMP_VRAM_LOG */
 #ifndef VK_TQ_NO_ASYNC_PRESENT

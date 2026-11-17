@@ -328,7 +328,10 @@ static void pl_init(void)
 {
     (void)bud_logical();                            /* cache the whole budget before anything is confined */
     const char* e = getenv("PS3_CPU_PLACE");
-    if (!e || strcmp(e, "rsxcore") != 0) return;
+    /* (deck) rsxcpu: the RSX thread alone on its CPU, but the core's other hardware thread is shared by the
+     * rest (rsxcore leaves it idle) -- for scenes bound by the SPU / main threads, not the RSX thread */
+    const int cpu_only = e && strcmp(e, "rsxcpu") == 0;
+    if (!e || (strcmp(e, "rsxcore") != 0 && !cpu_only)) return;
     cpu_set_t all;
     if (sched_getaffinity(0, sizeof all, &all) != 0) return;
     int last = -1;
@@ -343,12 +346,16 @@ static void pl_init(void)
     if (!CPU_COUNT(&s_rsx2_set)) s_rsx2_set = s_rsx_set;          /* no SMT sibling: both share the one CPU */
     s_rest_set = all;
     for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &s_core_set)) CPU_CLR(c, &s_rest_set);
+    if (cpu_only) {           /* only the RSX thread's own CPU is taken out; the sweeper keeps others off it */
+        s_rest_set = all; CPU_CLR(first, &s_rest_set);
+        s_core_set = s_rsx_set;
+    }
     if (CPU_COUNT(&s_rest_set) < 4) {
         fprintf(stderr, "[place] PS3_CPU_PLACE=rsxcore: only %d CPUs would be left for the rest, off\n", CPU_COUNT(&s_rest_set));
         return;
     }
     s_pl_mode = 1;
-    fprintf(stderr, "[place] PS3_CPU_PLACE=rsxcore: the RSX thread alone on CPU %d (core of CPUs", first);
+    fprintf(stderr, "[place] PS3_CPU_PLACE=%s: the RSX thread alone on CPU %d (kept clear: CPUs", cpu_only ? "rsxcpu" : "rsxcore", first);
     for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &s_core_set)) fprintf(stderr, " %d", c);
     fprintf(stderr, "), every other thread on the other %d CPUs\n", CPU_COUNT(&s_rest_set));
 }
