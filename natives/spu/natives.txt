@@ -36,3 +36,13 @@ jobmod_ab654d30fd90_efe70 0x16320
 jobmod_ab654d30fd90_efe70 0x179C0 0x17780 0x18B80 0x5814:0x5928
 # image 218: the clip sampler 0x18EC0 (Edge Animation evaluate + its decoders; job218_clip_native.c, spec work/bench/job218-decoders-spec.md)
 jobmod_ab654d30fd90_efe70 0x18EC0
+#
+# From the Switch fork github.com/4evry1/infamous2-port-NX (switch-nx @ 49fc23333713, switch/natives-switch.txt):
+# job 211 water normal map + FFT passes, job 209 worker, job 208 worker, job 201 depth sort, the crt0 data-clear
+# loops of jobs 212 and 210 (nx_job*_native.c)
+jobmod_87926738de5c_e4640 0x45F8 0x40E8 0x54E8 0x5118 0x6EB8 0x7860 0x67A8
+jobmod_867e48f161e0_e10e8 0x4030
+jobmod_7393701cbd39_e1390 0x4030
+jobmod_14e77a6441c8_e6ce0 0x6D28
+jobmod_87c8e5f63136_e2f28 0x701C:0x6F74
+jobmod_867e5d2348b3_e2898 0x698C:0x68E4
