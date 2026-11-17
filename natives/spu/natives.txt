@@ -28,3 +28,6 @@ jobmod_3af9ed8fe0d4_e14ff0 0x12C60
 #
 # image 210 (jobmod_867e5d2348b3_e2898): the culling-tree walker 0x4358 (job210_native.c; spec work/bench/job210-analysis.md)
 jobmod_867e5d2348b3_e2898 0x4358
+#
+# image 218 (jobmod_ab654d30fd90_efe70): the pose blend 0x16320 of the character-animation job (job218_native.c; spec work/bench/job218-analysis.md)
+jobmod_ab654d30fd90_efe70 0x16320
