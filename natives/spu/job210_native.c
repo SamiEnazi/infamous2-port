@@ -33,6 +33,7 @@
 #include "native_float.h"
 #include "spu_dma.h"
 #include "spu_jobrec.h"
+#include <immintrin.h>
 
 extern uint8_t* vm_base;
 int spu_native_register(int image_id, uint32_t addr, int (*fn)(spu_context*));
@@ -91,7 +92,8 @@ static int s_mode = -1, s_dbg;
 static unsigned long long s_calls, s_declined, s_why[8];   /* J210_STATS=1: a summary line every 5000 calls */
 static int s_stats;
 static int s_math = -1;                 /* J210_MATH: 0 = the lifted tests (stage 1), 1 = the native tests; J210_CHECK=1: both, lifted wins */
-static unsigned long long s_chk_vis, s_chk_lod, s_bad_vis, s_bad_lod, s_vis_deep;
+static unsigned long long s_chk_vis, s_chk_lod, s_bad_vis, s_bad_lod, s_vis_deep, s_planes_slow;
+static int s_fastplanes = -1;          /* J210_FASTPLANES=0: the per-op planes walk only */
 
 static void ev_add(J* j, uint8_t kind, uint32_t x0, uint32_t x1, uint32_t x2, uint32_t x3)
 {
@@ -240,6 +242,83 @@ static int nat_planes(J* j, const u128 mn, const u128 mx)
     }
 }
 
+/* The planes walk again, speculatively (spu_helpers.h, "speculative float regions"): SSE loads, the products
+ * and sums as plain RZ/FTZ/DAZ operations (the SPU threads' float mode: for operands and results inside the
+ * ordinary float range these are the SPU's bits), each result's magnitude folded into one verdict, and the
+ * planes' own words too (a plane word with exponent 255 is a big number to the SPU and Inf/NaN to the host).
+ * It only decides -- no lane of a product feeds anything but the sums and compares below, and the sign of a
+ * zero changes no compare -- so when the verdict says every value stayed in range, its answer is nat_planes'
+ * answer. Otherwise (never seen in the recordings) the caller runs nat_planes. Lane 3 of the products is not
+ * used (the sums take lanes 0-2) and is left out of the verdict. 1/0/-1 as nat_planes; 2 = verdict failed. */
+static inline __m128 PLD(const uint8_t* base, uint32_t a)
+{
+    const __m128i v = _mm_loadu_si128((const __m128i*)(const void*)(base + (a & SPU_LS_MASK)));
+    return _mm_castsi128_ps(_mm_shuffle_epi8(v, _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12)));
+}
+static inline __m128 XV(u128 v) { __m128 r; memcpy(&r, &v, 16); return r; }
+#define ACC(acc, v, m) (acc) = _mm_max_epu32((acc), _mm_and_si128(_mm_castps_si128(v), (m)))
+static inline __m128 SUM3(__m128 v)                       /* lane 0: (v0 + v1) + v2, as fa(fa(splat0, splat1), splat2) */
+{
+    return _mm_add_ss(_mm_add_ss(v, _mm_shuffle_ps(v, v, 0x55)), _mm_shuffle_ps(v, v, 0xAA));
+}
+static int nat_planes_fast(J* j, const u128 mnU, const u128 mxU)
+{
+    const uint32_t count = R32(j->ls + j->buf1 + 0x30);
+    if (count == 0) return 1;
+    const uint8_t* base = j->ls;
+    const __m128i abs4 = _mm_set1_epi32(0x7FFFFFFF), abs3 = _mm_setr_epi32(0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0);
+    __m128i acc = _mm_setzero_si128();
+    const __m128 mn = XV(mnU), mx = XV(mxU);
+    ACC(acc, mn, abs4); ACC(acc, mx, abs4);
+    const __m128 one = _mm_set1_ps(1.0f);
+    const __m128 mn1 = _mm_blend_ps(mn, one, 8), mx1 = _mm_blend_ps(mx, one, 8);
+    uint32_t n = j->planes;
+    int ret = -2;
+    for (int k = 0; k < 4 && ret == -2; k++) {
+        if (k) n = (n + 32u * R32(base + ((n + 0x14) & SPU_LS_MASK))) & SPU_LS_MASK;
+        const __m128 P = PLD(base, n);
+        ACC(acc, P, abs4);
+        const __m128 a = _mm_mul_ps(P, mx1), b = _mm_mul_ps(P, mn1);
+        ACC(acc, a, abs3); ACC(acc, b, abs3);
+        const __m128 hi = _mm_blendv_ps(a, b, _mm_cmpgt_ps(b, a));
+        const __m128 hs = SUM3(hi);
+        ACC(acc, hs, abs4);
+        if (_mm_comigt_ss(_mm_shuffle_ps(P, P, 0xFF), hs)) ret = 0;
+    }
+    if (ret == -2) {
+        uint32_t node = (n + 32u * R32(base + ((n + 0x14) & SPU_LS_MASK))) & SPU_LS_MASK;
+        uint32_t stack[64];
+        int sp = 0;
+        for (;;) {
+            const __m128 P = PLD(base, node);
+            ACC(acc, P, abs4);
+            const __m128 a = _mm_mul_ps(P, mn), b = _mm_mul_ps(P, mx);
+            ACC(acc, a, abs3); ACC(acc, b, abs3);
+            const __m128 g = _mm_cmpgt_ps(a, b);
+            const __m128 hi = _mm_blendv_ps(b, a, g), lo = _mm_blendv_ps(a, b, g);
+            const __m128 p3 = _mm_shuffle_ps(P, P, 0xFF);
+            const __m128 d0 = _mm_sub_ss(SUM3(lo), p3), d1 = _mm_sub_ss(SUM3(hi), p3);
+            ACC(acc, d0, abs4); ACC(acc, d1, abs4);
+            if (!_mm_comigt_ss(d0, _mm_setzero_ps())) {                 /* not wholly in front */
+                const uint32_t c = R32(base + ((node + 0x10) & SPU_LS_MASK));
+                if (_mm_comigt_ss(_mm_setzero_ps(), d1)) {               /* wholly behind: down, or pop */
+                    node = (node + 32u * c) & SPU_LS_MASK;
+                    if (c) continue;
+                    if (sp == 0) { ret = 0; break; }
+                    node = stack[--sp];
+                    continue;
+                }
+                if (c) { if (sp >= 64) { ret = -1; break; } stack[sp++] = (node + 32u * c) & SPU_LS_MASK; }
+            }
+            const uint32_t sib = R32(base + ((node + 0x14) & SPU_LS_MASK));
+            if (sib == 0) { ret = 1; break; }
+            node = (node + 32u * sib) & SPU_LS_MASK;
+        }
+    }
+    /* SPU_SPEC_OK's test: every magnitude below 0x7F7FFFFF (FLT_MAX and Inf/NaN fail) */
+    return _mm_testz_si128(_mm_cmpgt_epi32(acc, _mm_set1_epi32(0x7F7FFFFE)), _mm_set1_epi32(-1)) ? ret : 2;
+}
+
 /* 0x4030 aabb_visible lean path (L18-165): 1 = visible, 0 = culled, -1 = not modelled (the lifted test decides) */
 static int nat_visible(J* j, const u128 mnL, const u128 mxL, const u128* M)
 {
@@ -263,7 +342,12 @@ static int nat_visible(J* j, const u128 mnL, const u128 mxL, const u128* M)
         const u128 D = SPLAT(HSUM(spu_fm(v, v)), 0);
         if (GT0(spu_fm(D, K2), S2)) return 0;
     }
-    const int r = nat_planes(j, mn, mx);
+    if (__builtin_expect(s_fastplanes < 0, 0)) { const char* e = getenv("J210_FASTPLANES"); s_fastplanes = !(e && e[0] == '0'); }
+    int r = s_fastplanes ? nat_planes_fast(j, mn, mx) : 2;
+    if (__builtin_expect(r == 2, 0)) {
+        if (s_fastplanes) __atomic_add_fetch(&s_planes_slow, 1, __ATOMIC_RELAXED);
+        r = nat_planes(j, mn, mx);
+    }
     return r < 0 ? -1 : (r & 0xFF) != 0;
 }
 
@@ -620,9 +704,9 @@ static int j210_walker(spu_context* ctx)
         }
         if (c % 5000 == 0)
             fprintf(stderr, "[j210] %llu calls, %llu declined (type %llu, ea %llu, size %llu, key %llu, tail %llu, zero %llu);"
-                    " check: aabb %llu/%llu lod %llu/%llu differ, deep %llu\n",
+                    " check: aabb %llu/%llu lod %llu/%llu differ, deep %llu, planes slow %llu\n",
                     c, s_declined, s_why[0], s_why[1], s_why[2], s_why[3], s_why[4], s_why[5],
-                    s_bad_vis, s_chk_vis, s_bad_lod, s_chk_lod, s_vis_deep);
+                    s_bad_vis, s_chk_vis, s_bad_lod, s_chk_lod, s_vis_deep, s_planes_slow);
     }
     if (!ok) {
         memcpy(ctx->gpr, saved, sizeof saved);

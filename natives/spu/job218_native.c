@@ -12,7 +12,8 @@
  *
  * PS3RECOMP_NATIVE_J218=0: off (the lifted blend). PS3_SPU_NATIVE=0: every rewrite off.
  * J218_CHECK=1: the native computes into scratch, the lifted function runs, and every written byte is
- * compared (the lifted result is kept); J218_STATS=1: a summary line every 20000 calls. */
+ * compared (the lifted result is kept); J218_STATS=1: a summary line every 20000 calls; J218_SPEC=0: the
+ * per-op exact math only (no speculative run). */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,7 @@ static inline void SQ(uint8_t* p, u128 v) { P32(p, v._u32[0]); P32(p + 4, v._u32
 
 #define F_ONE  0x3F800000u
 #define F_NEG1 0xBF800000u
+#define F_HALF 0x3F000000u
 #define K255   0x3F808081u     /* 256/255 */
 #define A0     0x3FC90FDAu
 #define A1     0x3E5BBFCAu
@@ -52,8 +54,9 @@ static inline void SQ(uint8_t* p, u128 v) { P32(p, v._u32[0]); P32(p + 4, v._u32
 #define Q0     0x3F7F0000u     /* 255/256 */
 #define Q1     0x3B000000u     /* 1/512 */
 
-static int s_mode = -1, s_check, s_stats;
-static unsigned long long s_calls, s_checked, s_bad, s_declined;
+static int s_mode = -1, s_check, s_stats, s_spec = 1;
+static unsigned long long s_every = 20000;
+static unsigned long long s_calls, s_checked, s_bad, s_declined, s_groups, s_spec_fail, s_why[4];
 static _Thread_local int t_bypass;
 
 static inline u128 SIN(u128 x)
@@ -86,21 +89,13 @@ static inline void load_soa(const uint8_t* ls, uint32_t P, uint32_t i0, u128 v[1
     }
 }
 
-/* one group of 4 bones (lanes); out: 12 quads (bone j: q, t, s at 12j..), wout: the 4 weight bytes */
-static void blend_group(const uint8_t* ls, uint32_t B, uint32_t MB, uint32_t C, uint32_t MC, uint32_t i0,
-                        u128 T, uint8_t* dst, uint8_t wout[4])
+/* the blend's float math for one group, exact: every op its per-op lean form (the reference) */
+static __attribute__((noinline)) void blend_math_exact(const u128* Bv, const u128* Cv, u128 vmB, u128 vmC, u128 T,
+                                                        u128 O[12], u128* qbo)
 {
-    u128 Bv[12], Cv[12];                 /* SoA: [k] = component k (0-3 quat, 4-7 translation, 8-11 scale) */
-    uint32_t mB[4], mC[4];
-    load_soa(ls, B, i0, Bv);
-    load_soa(ls, C, i0, Cv);
-    for (int j = 0; j < 4; j++) {
-        mB[j] = MB ? ls[LSM(MB + i0 + j)] : 255u;
-        mC[j] = MC ? ls[LSM(MC + i0 + j)] : 255u;
-    }
     const u128 one = SPLW(F_ONE), zero = SPLW(0);
-    const u128 wB = spu_fm(spu_cuflt(V4(mB[0], mB[1], mB[2], mB[3]), 147), SPLW(K255));
-    const u128 wC = spu_fm(spu_cuflt(V4(mC[0], mC[1], mC[2], mC[3]), 147), SPLW(K255));
+    const u128 wB = spu_fm(spu_cuflt(vmB, 147), SPLW(K255));
+    const u128 wC = spu_fm(spu_cuflt(vmC, 147), SPLW(K255));
     const u128 d = spu_fma(Bv[3], Cv[3], spu_fma(Bv[2], Cv[2], spu_fma(Bv[1], Cv[1], spu_fm(Bv[0], Cv[0]))));
     const u128 gt = spu_fcgt_lean(wC, wB);
     const u128 mx = spu_selb(wB, wC, gt);
@@ -120,11 +115,92 @@ static void blend_group(const uint8_t* ls, uint32_t B, uint32_t MB, uint32_t C, 
     const u128 lin = spu_fcgt_lean(ad, SPLW(LIN));
     const u128 kB = spu_selb(spu_fm(sa, ri), oms, lin);
     const u128 kC = spu_selb(spu_fm(sb, ri), s, lin);
-    u128 O[12];
     for (int k = 0; k < 4; k++) O[k] = spu_fma(spu_fm(Cv[k], sg), kC, spu_fm(Bv[k], kB));
     for (int k = 4; k < 12; k++) O[k] = spu_fnms(Bv[k], s, spu_fma(Cv[k], s, Bv[k]));
     const u128 wo = spu_fnms(wB, s, spu_fma(wC, s, wB));
-    const u128 qb = spu_cflts(spu_fma(wo, SPLW(Q0), SPLW(Q1)), 165);
+    *qbo = spu_cflts(spu_fma(wo, SPLW(Q0), SPLW(Q1)), 165);
+}
+
+/* The same math speculatively (spu_helpers.h, "speculative float regions"): every checked op is its fast form
+ * with no branch, folding its range verdict into one accumulator; one test at the end. All fast -> these are
+ * exactly the per-op results; else the caller runs blend_math_exact. One change, for the lanes only: a bone
+ * whose poses are almost equal (lin: |d| > 0.999) takes kB = 1-s, kC = s and never uses the acos/sin path,
+ * where its e = 1-|d| can be 0 and frsqest(0) leaves the float range (a failed run for nothing). Those lanes
+ * feed 0.5 into that path instead; every other lane computes on its own values, so every output bit is the
+ * exact form's. Likewise a bone with both weights 0 (39% of the groups in the recordings failed on it). */
+#define SFM(a, b)      spu_fm_spec((a), (b), acc)
+#define SFS(a, b)      spu_fs_spec((a), (b), acc)
+#define SFMA(a, b, c)  spu_fma_spec((a), (b), (c), acc)
+#define SFNMS(a, b, c) spu_fnms_spec((a), (b), (c), acc)
+static inline u128 SIN_S(u128 x, spu_spec_acc* acc)
+{
+    const u128 x2 = SFM(x, x);
+    return SFM(SFMA(SFMA(SFMA(SFMA(SPLW(S4), x2, SPLW(S3)), x2, SPLW(S2)), x2, SPLW(S1)), x2, SPLW(F_ONE)), x);
+}
+static inline int blend_math_spec(const u128* Bv, const u128* Cv, u128 vmB, u128 vmC, u128 T, u128 O[12], u128* qbo)
+{
+    spu_spec_acc a = SPU_SPEC_INIT(), *acc = &a;
+    const u128 one = SPLW(F_ONE), zero = SPLW(0);
+    const u128 wB = SFM(spu_cuflt(vmB, 147), SPLW(K255));
+    const u128 wC = SFM(spu_cuflt(vmC, 147), SPLW(K255));
+    const u128 d = SFMA(Bv[3], Cv[3], SFMA(Bv[2], Cv[2], SFMA(Bv[1], Cv[1], SFM(Bv[0], Cv[0]))));
+    const u128 gt = spu_fcgt_lean(wC, wB);
+    const u128 mx = spu_selb(wB, wC, gt);
+    /* both weights 0 (mx = +0): the exact form's 1/mx leaves the range, and s = u * rc = (+0) * that = +0;
+     * u is +0 there whatever rc is (T * +0, flushed), so a 1.0 in place of mx gives the same s = +0 */
+    const u128 mx1 = spu_selb(mx, one, U(_mm_cmpeq_epi32(M(mx), _mm_setzero_si128())));
+    const u128 r = spu_fi(mx1, spu_frest(mx1));
+    const u128 rc = SFMA(SFNMS(mx1, r, one), r, r);
+    const u128 u = spu_selb(SFM(T, wC), SFS(SFMA(T, wB, wC), wB), gt);
+    const u128 s = SFM(u, rc);
+    const u128 oms = SFS(one, s);
+    const u128 sg = spu_selb(one, SPLW(F_NEG1), spu_fcgt_lean(zero, d));
+    const u128 ad = SFM(d, sg);
+    const u128 lin = spu_fcgt_lean(ad, SPLW(LIN));
+    const u128 adt = spu_selb(ad, SPLW(F_HALF), lin);
+    const u128 p = SFNMS(adt, SFNMS(adt, SFNMS(adt, SFM(adt, SPLW(A3)), SPLW(A2)), SPLW(A1)), SPLW(A0));
+    const u128 e = SFS(one, adt);
+    const u128 y = spu_fi(e, spu_frsqest(e));
+    const u128 th = SFM(p, SFNMS(y, adt, y));
+    const u128 sth = SIN_S(th, acc), sa = SIN_S(SFM(oms, th), acc), sb = SIN_S(SFM(s, th), acc);
+    const u128 ri = spu_fi(sth, spu_frest(sth));
+    const u128 kB = spu_selb(SFM(sa, ri), oms, lin);
+    const u128 kC = spu_selb(SFM(sb, ri), s, lin);
+    for (int k = 0; k < 4; k++) O[k] = SFMA(SFM(Cv[k], sg), kC, SFM(Bv[k], kB));
+    for (int k = 4; k < 12; k++) O[k] = SFNMS(Bv[k], s, SFMA(Cv[k], s, Bv[k]));
+    const u128 wo = SFNMS(wB, s, SFMA(wC, s, wB));
+    *qbo = spu_cflts_spec(SFMA(wo, SPLW(Q0), SPLW(Q1)), 165, acc);
+    return SPU_SPEC_OK(a);
+}
+
+/* one group of 4 bones (lanes); out: 12 quads (bone j: q, t, s at 12j..), wout: the 4 weight bytes */
+static void blend_group(const uint8_t* ls, uint32_t B, uint32_t MB, uint32_t C, uint32_t MC, uint32_t i0,
+                        u128 T, uint8_t* dst, uint8_t wout[4])
+{
+    u128 Bv[12], Cv[12];                 /* SoA: [k] = component k (0-3 quat, 4-7 translation, 8-11 scale) */
+    uint32_t mB[4], mC[4];
+    load_soa(ls, B, i0, Bv);
+    load_soa(ls, C, i0, Cv);
+    for (int j = 0; j < 4; j++) {
+        mB[j] = MB ? ls[LSM(MB + i0 + j)] : 255u;
+        mC[j] = MC ? ls[LSM(MC + i0 + j)] : 255u;
+    }
+    const u128 vmB = V4(mB[0], mB[1], mB[2], mB[3]), vmC = V4(mC[0], mC[1], mC[2], mC[3]);
+    u128 O[12], qb;
+    if (__builtin_expect(!s_spec || !blend_math_spec(Bv, Cv, vmB, vmC, T, O, &qb), 0)) {
+        if (s_stats) {
+            __atomic_add_fetch(&s_spec_fail, 1, __ATOMIC_RELAXED);
+            /* why: 0 both weights 0 in a lane, 1 an input word with exponent 255, 2 padding lane, 3 other */
+            int why = 3;
+            for (int j = 0; j < 4; j++) if (mB[j] == 0 && mC[j] == 0) why = 0;
+            if (why == 3)
+                for (int k = 0; k < 12; k++)
+                    for (int j = 0; j < 4; j++)
+                        if (((Bv[k]._u32[j] | Cv[k]._u32[j]) & 0x7F800000u) == 0x7F800000u) why = 1;
+            __atomic_add_fetch(&s_why[why], 1, __ATOMIC_RELAXED);
+        }
+        blend_math_exact(Bv, Cv, vmB, vmC, T, O, &qb);
+    }
     /* a weight byte 0: that bone is the other pose's raw bits (C's 0 first, then B's 0 wins) */
     const __m128i mbv = _mm_setr_epi32((int)mB[0], (int)mB[1], (int)mB[2], (int)mB[3]);
     const __m128i mcv = _mm_setr_epi32((int)mC[0], (int)mC[1], (int)mC[2], (int)mC[3]);
@@ -157,6 +233,8 @@ static int j218_blend(spu_context* ctx)
         s_mode = e ? atoi(e) : 1;
         s_check = getenv("J218_CHECK") != 0;
         s_stats = getenv("J218_STATS") != 0;
+        if (s_stats) { const long long v = atoll(getenv("J218_STATS")); if (v > 1) s_every = (unsigned long long)v; }
+        { const char* v = getenv("J218_SPEC"); s_spec = !(v && v[0] == '0'); }
         fprintf(stderr, "[j218] native pose blend (0x16320): %s%s\n", s_mode ? "on" : "off (PS3RECOMP_NATIVE_J218=0)",
                 s_mode && s_check ? ", CHECK mode (the lifted result is kept)" : "");
     }
@@ -199,20 +277,21 @@ static int j218_blend(spu_context* ctx)
         if (bad && __atomic_add_fetch(&s_bad, 1, __ATOMIC_RELAXED) <= 8)
             fprintf(stderr, "[j218] CHECK: native differs (%s) n=%u t=%08X A=%05X B=%05X C=%05X MB=%05X MC=%05X\n",
                     bad == 1 ? "bones" : "weights", n, T._u32[0], A, B, C, MB, MC);
-        if (s_stats && c % 20000 == 0)
-            fprintf(stderr, "[j218] %llu calls, %llu declined, check %llu/%llu differ\n", c, s_declined, s_bad, s_checked);
+        if (s_stats && c % s_every == 0)
+            fprintf(stderr, "[j218] %llu calls, %llu declined, check %llu/%llu differ, %llu groups, %llu speculative runs failed (w00 %llu e255 %llu other %llu)\n", c, s_declined, s_bad, s_checked, s_groups, s_spec_fail, s_why[0], s_why[1], s_why[3]);
         ctx->gpr[0] = r0;
         return 1;
     }
     /* the prologue's red zone: r80..r109 at sp-0x10 .. sp-0x1E0 (sp not moved), as the lifted code leaves it */
     for (int k = 0; k < 30; k++) SQ(ls + LSM(sp - 0x10u * (uint32_t)(k + 1)), ctx->gpr[80 + k]);
     uint8_t w[4];
+    if (s_stats) __atomic_add_fetch(&s_groups, groups, __ATOMIC_RELAXED);
     for (uint32_t g = 0; g < groups; g++) {
         blend_group(ls, B, MB, C, MC, 4u * g, T, ls + A + 192u * g, w);   /* group g is read before it is written: A = B is fine */
         memcpy(ls + MA + 4u * g, w, 4);
     }
-    if (s_stats && c % 20000 == 0)
-        fprintf(stderr, "[j218] %llu calls, %llu declined\n", c, s_declined);
+    if (s_stats && c % s_every == 0)
+        fprintf(stderr, "[j218] %llu calls, %llu declined, %llu groups, %llu speculative runs failed (w00 %llu e255 %llu other %llu)\n", c, s_declined, s_groups, s_spec_fail, s_why[0], s_why[1], s_why[3]);
     return 1;
 }
 
