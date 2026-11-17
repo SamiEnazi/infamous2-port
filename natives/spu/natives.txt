@@ -46,3 +46,8 @@ jobmod_7393701cbd39_e1390 0x4030
 jobmod_14e77a6441c8_e6ce0 0x6D28
 jobmod_87c8e5f63136_e2f28 0x701C:0x6F74
 jobmod_867e5d2348b3_e2898 0x698C:0x68E4
+#
+# (deck-perf) the Edge index decompression kernel 0xC7B8 of edge223_native.c, opt-in upstream: hooked and on by default
+# (PS3_NATIVE_EDGE_IDX=0 off). Job 223 replay 363 -> 335 us per call, exact; the vertex compression kernel 0x99E8 was
+# tested too and gained nothing (363 -> 362 us), so it stays unhooked.
+jobmod_d0d15ec83992_ea2a0 0xC7B8

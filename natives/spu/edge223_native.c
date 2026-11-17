@@ -2669,7 +2669,11 @@ static void edge_init(void)
          * kernel stays opt-in (PS3_NATIVE_EDGE_IDX=1 and 0xC7B8 in natives.txt): edge2 hooked it,
          * the replay passed (ck-rec2/ck-rec3/spu3-p2, Edge 248 -> 235 us), but of its two fight runs
          * one stalled before the title and one walked a different path (scene intact) */
-        const int dflt = k->core == edge_idx_core ? 0 : g_avx2 ? 1 : (k->core == edge_skin_core || k->core == edge_enc_core);
+        /* (deck-perf, 2026-11-17) idx now defaults on with the AVX2 forms: 300/300 job replays exact (150 recorded calls
+         * of the Steam Deck's spot-2 camera spin, x2), three live runs (spin, the umbrella plaza, a street route) reached
+         * the world and exited normally with 0.5-1.5 M native calls each and a correct picture; job 223 per call 363 ->
+         * 335 us (replay, best of 10). PS3_NATIVE_EDGE_IDX=0 turns it off (0xC7B8 must be in natives.txt). */
+        const int dflt = k->core == edge_idx_core ? g_avx2 : g_avx2 ? 1 : (k->core == edge_skin_core || k->core == edge_enc_core);
         k->mode = m && (ke ? ke[0] != '0' : dflt);
     }
     fprintf(stderr, "[edge] native Edge Geometry kernels (image %d, %s, gpu-cull %d):", EDGE_IMAGE, g_avx2 ? "AVX2" : "SIMDe on AVX2", g_gpu);
