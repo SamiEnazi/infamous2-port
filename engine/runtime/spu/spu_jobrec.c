@@ -943,8 +943,18 @@ static SPU_THREAD_LOCAL unsigned t_chunks_n;
 
 void spu_native_dead_ls(uint32_t lo, uint32_t hi)
 {
-    if (!(g_spu_jobrec_mode & SPU_JOBREC_REPLAY) || t_dead_n >= JR_DEAD_MAX || hi <= lo) return;
-    t_dead[t_dead_n].lo = lo & ~15u; t_dead[t_dead_n].hi = (hi + 15u) & ~15u; t_dead_n++;
+    if (!(g_spu_jobrec_mode & SPU_JOBREC_REPLAY) || hi <= lo) return;
+    lo &= ~15u; hi = (hi + 15u) & ~15u;
+    /* (deck-perf) a native called many times per job (job 218's clip sampler: ~8 calls from a recursive
+     * walker, a scratch window at each stack depth) declares overlapping ranges: merged, not dropped */
+    for (unsigned i = 0; i < t_dead_n; i++)
+        if (lo <= t_dead[i].hi && t_dead[i].lo <= hi) {
+            if (lo < t_dead[i].lo) t_dead[i].lo = lo;
+            if (hi > t_dead[i].hi) t_dead[i].hi = hi;
+            return;
+        }
+    if (t_dead_n >= JR_DEAD_MAX) return;
+    t_dead[t_dead_n].lo = lo; t_dead[t_dead_n].hi = hi; t_dead_n++;
 }
 
 static int jr_ls_dead(uint32_t a)
