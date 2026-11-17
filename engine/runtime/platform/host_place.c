@@ -254,6 +254,7 @@ void ps3_host_place_self_once(int role)
 {
     if (!t_placed) ps3_host_place_self(role);
 }
+int ps3_host_place_rsx_sibling(void) { return 0; }   /* (deck) Linux rsxcore only */
 
 #else  /* !_WIN32 */
 #include <stdlib.h>
@@ -400,8 +401,23 @@ void ps3_host_place_self(int role)
     sched_setaffinity(0, sizeof s_rest_set, &s_rest_set);   /* every other role, and a second RSX-role thread */
 }
 void ps3_host_place_self_once(int role) { if (!t_placed) ps3_host_place_self(role); }
+/* (deck) the calling thread on the RSX core's other hardware thread (rsxcore mode only), kept there by the
+ * sweeper; 0 = not placed (another thread holds that slot, or rsxcore is off). */
+int ps3_host_place_rsx_sibling(void)
+{
+    pthread_once(&s_pl_once, pl_init);
+    t_placed = 1;
+    if (!s_pl_mode) return 0;
+    pid_t none = 0;
+    const pid_t me = (pid_t)syscall(SYS_gettid);
+    if (!__atomic_compare_exchange_n(&s_rsx2_tid, &none, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 0;
+    sched_setaffinity(0, sizeof s_rsx2_set, &s_rsx2_set);
+    fprintf(stderr, "[place] thread %d on the RSX core's other CPU\n", (int)me);
+    return 1;
+}
 #else
 void ps3_host_place_self(int role) { (void)role; }
 void ps3_host_place_self_once(int role) { (void)role; }
+int ps3_host_place_rsx_sibling(void) { return 0; }
 #endif
 #endif

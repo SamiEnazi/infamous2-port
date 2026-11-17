@@ -61,6 +61,7 @@ int ps3_host_cpus(void);          /* logical CPUs in the mask */
 int ps3_host_cores(void);         /* physical cores in the mask */
 int ps3_host_core_scarce(void);
 void ps3_host_place_self_once(int role);   /* no-op if this thread was placed */
+int  ps3_host_place_rsx_sibling(void);      /* (deck, Linux rsxcore) this thread on the RSX core's other CPU */
 
 #ifdef __cplusplus
 }

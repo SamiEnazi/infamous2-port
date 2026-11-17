@@ -52,7 +52,12 @@
 #ifndef PS3RECOMP_VK_THREADED_BE_H
 #define PS3RECOMP_VK_THREADED_BE_H
 
+#if defined(_WIN32) || defined(__linux__)   /* (deck) Linux: with vk_threaded_rec.h's worker */
 #ifdef _WIN32
+#define TQ_ALIGN16 __declspec(align(16))
+#else
+#define TQ_ALIGN16 __attribute__((aligned(16)))
+#endif
 
 static rsx_draw_backend s_bt_real;   /* the backend's own entry points */
 static rsx_draw_backend s_bt_be;     /* the thunks the engine calls */
@@ -356,7 +361,7 @@ static void bt_bind_ps_constants(void* u, const void* data, u32 bytes)
 /* The backend keeps `rows` until the draw: on the worker, the copied rows go
  * into a buffer of its own (at their row offsets), live until the next bind. */
 #define BT_VS_ROWS 1024u
-static __declspec(align(16)) u8 s_bt_vsrows[BT_VS_ROWS * 16u];
+static TQ_ALIGN16 u8 s_bt_vsrows[BT_VS_ROWS * 16u];
 typedef struct { u32 first, count, tail_bytes, total_bytes, has; u32 pad; u8 tail[64]; } bt_a_vsr;   /* then count rows */
 static void bt_x_bind_vs_constants_range(const u8* p)
 {

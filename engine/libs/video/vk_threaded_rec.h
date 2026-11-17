@@ -32,9 +32,21 @@
 #define PS3RECOMP_VK_THREADED_REC_H
 
 #include "rsx_split.h"          /* (rsx-par2) rsx_diag_*: PS3_STALL_MS sees the worker */
+#include "../../runtime/platform/host_place.h"   /* (deck) PS3_CPU_PLACE_VKW */
+#if defined(_WIN32) || defined(__linux__)
 #ifdef _WIN32
 #include <intrin.h>
 #pragma comment(lib, "synchronization.lib")   /* WaitOnAddress / WakeByAddressSingle */
+#define TQ_ALIGN64 __declspec(align(64))
+#define TQ_TLS __declspec(thread)
+#else
+/* (deck) Linux: the same worker through the engine's Win32 shim (threads, WaitOnAddress, VirtualAlloc, QPC). */
+#include <x86intrin.h>
+#include <pthread.h>
+#include "../../runtime/platform/win32_compat.h"
+#define TQ_ALIGN64 __attribute__((aligned(64)))
+#define TQ_TLS __thread
+#endif
 
 #define TQ_RING_BYTES (16u << 20)    /* allocated with 4 KB of slack: a wrap filler's header may pass the end */
 
@@ -57,10 +69,10 @@ static struct {
     VkResult err; u32 err_op;   /* the worker's first failed Begin/End/Reset */
     u64 n_cmds, n_syncs, n_wakes, n_full;
 } s_tq;
-static __declspec(align(64)) volatile u64  s_tq_w;     /* published write position */
-static __declspec(align(64)) volatile u64  s_tq_r;     /* consumed position (worker) */
-static __declspec(align(64)) volatile LONG s_tq_sleep; /* worker is (about to be) asleep */
-static __declspec(align(64)) volatile LONG s_tq_bell;  /* rsx3: rung (incremented) to wake the worker in WAKE_KB mode */
+static TQ_ALIGN64 volatile u64  s_tq_w;     /* published write position */
+static TQ_ALIGN64 volatile u64  s_tq_r;     /* consumed position (worker) */
+static TQ_ALIGN64 volatile LONG s_tq_sleep; /* worker is (about to be) asleep */
+static TQ_ALIGN64 volatile LONG s_tq_bell;  /* rsx3: rung (incremented) to wake the worker in WAKE_KB mode */
 static volatile LONG s_tq_quit;
 static u64 s_tq_spin_ticks = 500000ull;   /* PS3RECOMP_VK_TQ_SPIN_US (vk_tq_install) */
 static u64 s_tq_wake_bytes;               /* PS3RECOMP_VK_TQ_WAKE_KB (vk_tq_install) */
@@ -68,10 +80,10 @@ static u64 s_tq_wake_bytes;               /* PS3RECOMP_VK_TQ_WAKE_KB (vk_tq_inst
  * the submit and vkQueuePresentKHR -- is one more record in the ring, run by the
  * worker. The worker's own calls through the thunks go straight to the driver
  * (t_tq_worker), and a drain asked for on the worker is a no-op. */
-static __declspec(thread) int t_tq_worker;
+static TQ_TLS int t_tq_worker;
 static int s_tq_nodrain;                                  /* producer: the next drains are not needed */
 static u64 s_tq_pres_sent;                                /* producer: presents queued */
-static __declspec(align(64)) volatile u64 s_tq_pres_done; /* worker: presents submitted */
+static TQ_ALIGN64 volatile u64 s_tq_pres_done; /* worker: presents submitted */
 typedef struct { tq_hdr h; VkFence fence; VkSemaphore acq;
                  VkImage img; VkImageView view; u32 w, ht; u64 seq; u32 hold; } tq_present_rec;
 static void vk_present_exec(const tq_present_rec* r);    /* rsx_vulkan_backend.c */
@@ -97,6 +109,13 @@ static DWORD WINAPI tq_worker(LPVOID arg)
     (void)arg;
     t_tq_worker = 1;
     rsx_diag_thread_here(RSX_DIAG_WORKER);   /* (rsx-par2) PS3_STALL_MS sees this thread */
+#ifndef _WIN32
+    pthread_setname_np(pthread_self(), "rsx_vk_record");
+    /* (deck) PS3_CPU_PLACE_VKW=1 with PS3_CPU_PLACE=rsxcore: this worker takes the RSX core's other hardware
+     * thread (the one rsxcore leaves idle) instead of the shared CPUs, where the SPU threads keep it waiting. */
+    { const char* pv = getenv("PS3_CPU_PLACE_VKW");
+      if (pv && pv[0] == '1') (void)ps3_host_place_rsx_sibling(); }
+#endif
     u64 r = s_tq_r;
     for (;;) {
         const LONG bell = __atomic_load_n(&s_tq_bell, __ATOMIC_ACQUIRE);   /* before w: a ring after this is seen */
@@ -670,7 +689,14 @@ static void vk_tq_install(void)
 {
     const char* e = getenv("PS3RECOMP_VK_THREADED");
     const char* b = getenv("PS3RECOMP_VK_BATCH");
+#ifdef _WIN32
     if ((e && e[0] == '0') || (b && b[0] == '0')) return;   /* default on (2026-11-08) */
+#else
+    /* (deck) Linux: opt-in (PS3RECOMP_VK_THREADED=1). On the Steam Deck (RADV, 4 cores at 15 W) it measured
+     * slower in the umbrella plaza, 2026-11-17: off 40.0/37.9 fps, on 38.0/36.8, on with the worker on the
+     * RSX core's other CPU (PS3_CPU_PLACE_VKW=1) 37.2, with PS3RECOMP_VK_BT=1 as well 35.8. */
+    if (!e || e[0] == '0' || (b && b[0] == '0')) return;
+#endif
     s_tq.ring = (u8*)VirtualAlloc(NULL, TQ_RING_BYTES + 4096u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!s_tq.ring) return;
 #define TQ_SAVE(name) r##name = p##name;
@@ -692,6 +718,7 @@ static void vk_tq_install(void)
     s_tq.thread = CreateThread(NULL, 0, tq_worker, NULL, 0, NULL);
     if (!s_tq.thread) { VirtualFree(s_tq.ring, 0, MEM_RELEASE); s_tq.ring = NULL; return; }
     SetThreadPriority(s_tq.thread, GetThreadPriority(GetCurrentThread()));
+#ifdef _WIN32
     /* =2 (rsx3: the default; =1 = on, unpinned): the worker on the E-cores (hybrid CPUs). Its real
      * driver work is ~1-2 ms a frame; on a P-core its idle spin shared a core with the hot threads. */
     if ((!e && !vk_bt_env()) || (e && atoi(e) == 2)) {
@@ -718,14 +745,19 @@ static void vk_tq_install(void)
     { typedef HRESULT (WINAPI *set_desc_fn)(HANDLE, PCWSTR);
       set_desc_fn sd = (set_desc_fn)(void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription");
       if (sd) sd(s_tq.thread, L"rsx_vk_record"); }
+#endif
 #define TQ_SWAP(name) p##name = tq_##name;
     TQ_FNS(TQ_SWAP)
 #undef TQ_SWAP
     s_tq.running = 1;
     g_rsx_diag_backend = vk_tq_diag;          /* (rsx-par2) */
     s_tq.on = 1;
+#ifdef _WIN32
     fprintf(stderr, "[RSX vulkan] threaded command recording on (PS3RECOMP_VK_THREADED=0 = off, %u MB ring; worker hosttid=%lu, producer hosttid=%lu)\n",
             TQ_RING_BYTES >> 20, (unsigned long)GetThreadId(s_tq.thread), (unsigned long)GetCurrentThreadId());
+#else
+    fprintf(stderr, "[RSX vulkan] threaded command recording on (PS3RECOMP_VK_THREADED=0 = off, %u MB ring)\n", TQ_RING_BYTES >> 20);
+#endif
 }
 
 /* Drain, stop the worker and put the real entry points back. */
@@ -746,7 +778,7 @@ static void vk_tq_stop(void)
             (unsigned long long)s_tq.n_wakes, (unsigned long long)s_tq.n_full);
 }
 
-#else   /* not Windows: the switch does not exist */
+#else   /* neither Windows nor Linux: the switch does not exist */
 static void vk_tq_install(void) {}
 static void vk_tq_stop(void) {}
 static void vk_tq_sync(void) {}
