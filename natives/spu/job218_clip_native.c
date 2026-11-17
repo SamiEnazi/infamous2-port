@@ -11,9 +11,8 @@
  * The call's scratch stack [sp-0x6E0, sp-0x300) is declared dead to the job replay; the lr slot sp+0x10
  * and the r80..r127 save area [sp-0x300, sp) are written as the SPU does.
  *
- * Status: exact (811/811 recorded calls in check mode, 1020/1020 job replays) but one track per float op, so
- * ~20% SLOWER than the lifted 4-lane SPU code (job 218 replay 171 -> 203 us): OFF by default until the float
- * work is vectorised over the 4 tracks of a group. PS3RECOMP_NATIVE_J218CLIP=1: on. PS3_SPU_NATIVE=0: every rewrite off.
+ * The integer work (key search, pointers, bit fields) per track; the float work over the 4 tracks of a group
+ * in SIMD lanes (as the SPU code), speculative with the per-op exact form as the fallback. PS3_SPU_NATIVE=0: every rewrite off.
  * J218CLIP_CHECK=1: the native on a copy of the LS, the lifted sampler on the real one, the whole LS compared
  * outside the scratch window (the lifted result is kept). J218CLIP_STATS=N: a summary every N calls. */
 #include <stdint.h>
@@ -34,18 +33,6 @@ typedef unsigned __int128 u128i;
 
 /* ---- exact SPU float ops on one lane ---- */
 static inline u128 S(uint32_t x) { u128 v; v._u32[0] = v._u32[1] = v._u32[2] = v._u32[3] = x; return v; }
-static inline uint32_t FM(uint32_t a, uint32_t b) { return spu_fm(S(a), S(b))._u32[0]; }
-static inline uint32_t FA(uint32_t a, uint32_t b) { return spu_fa(S(a), S(b))._u32[0]; }
-static inline uint32_t FS(uint32_t a, uint32_t b) { return spu_fs(S(a), S(b))._u32[0]; }
-static inline uint32_t FMA(uint32_t a, uint32_t b, uint32_t c) { return spu_fma(S(a), S(b), S(c))._u32[0]; }      /* a*b + c */
-static inline uint32_t FNMS(uint32_t a, uint32_t b, uint32_t c) { return spu_fnms(S(a), S(b), S(c))._u32[0]; }    /* c - a*b */
-static inline int FCGT(uint32_t a, uint32_t b) { return spu_fcgt_lean(S(a), S(b))._u32[0] != 0; }
-static inline uint32_t FREST(uint32_t a) { return spu_frest(S(a))._u32[0]; }
-static inline uint32_t FRSQEST(uint32_t a) { return spu_frsqest(S(a))._u32[0]; }
-static inline uint32_t FI(uint32_t a, uint32_t b) { return spu_fi(S(a), S(b))._u32[0]; }
-static inline uint32_t CUFLT(uint32_t a, int sc) { return spu_cuflt(S(a), sc)._u32[0]; }
-static inline uint32_t CSFLT(uint32_t a, int sc) { return spu_csflt(S(a), sc)._u32[0]; }
-
 #define ONE   0x3F800000u
 #define HALF  0x3F000000u
 #define MONE  0xBF800000u
@@ -102,26 +89,58 @@ static inline int popc128(u128i x) { return __builtin_popcountll((uint64_t)x) + 
 static inline int ctz128(u128i x) { const uint64_t lo = (uint64_t)x; return lo ? __builtin_ctzll(lo) : 64 + __builtin_ctzll((uint64_t)(x >> 64)); }
 static inline int clz128(u128i x) { const uint64_t hi = (uint64_t)(x >> 64); return hi ? __builtin_clzll(hi) : 64 + __builtin_clzll((uint64_t)x); }
 
-/* ---- shared pieces (clipref.py) ---- */
-static const uint8_t k_shuf[4][4] = {{3, 0, 1, 2}, {0, 3, 1, 2}, {0, 1, 3, 2}, {0, 1, 2, 3}};   /* q(0x1E300+16*idx) */
-static inline void reorder(uint32_t a, uint32_t b, uint32_t c, uint32_t w, uint32_t idx, uint32_t out[4])
+/* ---- shared pieces (clipref.py), vectorised: lane j = track j of a group of 4 ----
+ * Every float op is the engine's exact SPU helper; X* below take a constant `spec`: 1 = the speculative form
+ * (one range verdict for the whole group, spu_helpers.h), 0 = the per-op exact form (the fallback when the
+ * verdict fails). In the speculative pass only, lanes whose values are discarded or multiplied by +0 get a
+ * harmless input (marked SANITISE): the near-identical rotations of a slerp (lin lanes never use acos/sin),
+ * the zero / denormal s of the w reconstruction (w = (..) * s = +0 whatever the rsqrt estimate was). */
+#define XFM(a, b)      (spec ? spu_fm_spec((a), (b), acc) : spu_fm((a), (b)))
+#define XFA(a, b)      (spec ? spu_fa_spec((a), (b), acc) : spu_fa((a), (b)))
+#define XFS(a, b)      (spec ? spu_fs_spec((a), (b), acc) : spu_fs((a), (b)))
+#define XFMA(a, b, c)  (spec ? spu_fma_spec((a), (b), (c), acc) : spu_fma((a), (b), (c)))
+#define XFNMS(a, b, c) (spec ? spu_fnms_spec((a), (b), (c), acc) : spu_fnms((a), (b), (c)))
+static inline u128 V4(uint32_t a, uint32_t b, uint32_t c, uint32_t d) { u128 v; v._u32[0] = a; v._u32[1] = b; v._u32[2] = c; v._u32[3] = d; return v; }
+static inline u128 VA(const uint32_t x[4]) { return V4(x[0], x[1], x[2], x[3]); }
+static inline u128 VEQ0(u128 x) { u128 m; for (int i = 0; i < 4; i++) m._u32[i] = x._u32[i] == 0 ? 0xFFFFFFFFu : 0u; return m; }
+static inline u128 VEXP0(u128 x) { u128 m; for (int i = 0; i < 4; i++) m._u32[i] = (x._u32[i] & 0x7F800000u) == 0 ? 0xFFFFFFFFu : 0u; return m; }
+#define ONEV S(ONE)
+
+static inline __attribute__((always_inline)) u128 v_rnr(const int spec, spu_spec_acc* acc, u128 x)
 {
-    const uint32_t v[4] = {a, b, c, w};
-    for (int k = 0; k < 4; k++) out[k] = v[k_shuf[idx & 3u][k]];
+    const u128 r = spu_fi(x, spu_frest(x));
+    return XFMA(XFNMS(x, r, ONEV), r, r);
 }
-static inline uint32_t w_from_abc(uint32_t a, uint32_t b, uint32_t c, int clamp)
+static inline __attribute__((always_inline)) u128 v_wfrom(const int spec, spu_spec_acc* acc, u128 a, u128 b, u128 c, int clamp)
 {
-    uint32_t s = FNMS(c, c, FNMS(b, b, FNMS(a, a, ONE)));
-    if (clamp && FCGT(0, s)) s = 0;
-    const uint32_t y = FI(s, FRSQEST(s)), h = FM(s, y), y2 = FM(y, HALF);
-    return FM(FMA(y2, FNMS(h, y, ONE), y), s);
+    u128 s = XFNMS(c, c, XFNMS(b, b, XFNMS(a, a, ONEV)));
+    if (clamp) s = spu_selb(s, S(0), spu_fcgt_lean(S(0), s));
+    const u128 se = spec ? spu_selb(s, ONEV, VEXP0(s)) : s;            /* SANITISE: s = 0 -> w = +0 anyway */
+    const u128 y = spu_fi(se, spu_frsqest(se)), h = XFM(s, y), y2 = XFM(y, S(HALF));
+    return XFM(XFMA(y2, XFNMS(h, y, ONEV), y), s);
 }
-static inline void deq48(uint32_t h0, uint32_t w1, uint32_t q[4])
+/* reorder (a,b,c,w) by each lane's idx (q(0x1E300 + 16*idx)): idx 0 (w,a,b,c) 1 (a,w,b,c) 2 (a,b,w,c) 3 (a,b,c,w) */
+static inline void v_reorder(u128 a, u128 b, u128 c, u128 w, u128 idx, u128 out[4])
 {
-    const uint32_t a = FMA(CUFLT(h0, 140), SQ2, NSQ2H);
-    const uint32_t b = FMA(CUFLT((w1 >> 17) & 0x7FFFu, 140), SQ2, NSQ2H);
-    const uint32_t c = FMA(CUFLT((w1 >> 2) & 0x7FFFu, 140), SQ2, NSQ2H);
-    reorder(a, b, c, w_from_abc(a, b, c, 0), w1 & 3u, q);
+    u128 i0, i1, i2;
+    for (int j = 0; j < 4; j++) {
+        const uint32_t x = idx._u32[j] & 3u;
+        i0._u32[j] = x == 0 ? ~0u : 0u; i1._u32[j] = x == 1 ? ~0u : 0u; i2._u32[j] = x == 2 ? ~0u : 0u;
+    }
+    out[0] = spu_selb(a, w, i0);
+    out[1] = spu_selb(spu_selb(b, w, i1), a, i0);
+    out[2] = spu_selb(spu_selb(c, w, i2), b, spu_or(i0, i1));
+    out[3] = spu_selb(w, c, spu_or(spu_or(i0, i1), i2));
+}
+/* 48-bit smallest-three quaternions of 4 lanes -> out[k] = component k across the lanes */
+static inline __attribute__((always_inline)) void v_deq48(const int spec, spu_spec_acc* acc, const uint32_t h0[4], const uint32_t w1[4], u128 out[4])
+{
+    const u128 b15 = V4((w1[0] >> 17) & 0x7FFFu, (w1[1] >> 17) & 0x7FFFu, (w1[2] >> 17) & 0x7FFFu, (w1[3] >> 17) & 0x7FFFu);
+    const u128 c15 = V4((w1[0] >> 2) & 0x7FFFu, (w1[1] >> 2) & 0x7FFFu, (w1[2] >> 2) & 0x7FFFu, (w1[3] >> 2) & 0x7FFFu);
+    const u128 a = XFMA(spu_cuflt(VA(h0), 140), S(SQ2), S(NSQ2H));
+    const u128 b = XFMA(spu_cuflt(b15, 140), S(SQ2), S(NSQ2H));
+    const u128 c = XFMA(spu_cuflt(c15, 140), S(SQ2), S(NSQ2H));
+    v_reorder(a, b, c, v_wfrom(spec, acc, a, b, c, 0), VA(w1), out);
 }
 static inline void read6(const uint8_t* L, uint32_t p, uint32_t* h0, uint32_t* w1)
 {
@@ -135,22 +154,32 @@ static inline void desc_fields(uint32_t D, Fld f[3])
     f[1].s = (D >> 21) & 1u; f[1].e = (D >> 17) & 15u; f[1].m = (D >> 12) & 31u;
     f[2].s = (D >> 11) & 1u; f[2].e = (D >> 7) & 15u;  f[2].m = (D >> 2) & 31u;
 }
-static inline uint32_t recip_nr(uint32_t x) { const uint32_t r = FI(x, FREST(x)); return FMA(FNMS(x, r, ONE), r, r); }
 static inline uint32_t rot32(uint32_t x, uint32_t n) { n &= 31u; return n ? (x << n | x >> (32u - n)) : x; }
 static inline uint32_t kmask(uint32_t k) { return k ? 0xFFFFFFFFu >> (32u - k) : 0u; }
 static inline uint32_t shl32(uint32_t x, uint32_t n) { n &= 63u; return n < 32u ? x << n : 0u; }
 static inline uint32_t sra32(uint32_t x, uint32_t n) { n &= 63u; if (n > 31u) n = 31u; return (uint32_t)((int32_t)x >> n); }
-static inline uint32_t decode_comp(uint32_t w32, uint32_t s, uint32_t e, uint32_t m)
+/* the variable-width field codec (spec 3.3): the integer half per lane, the float half (fixed point) per vector */
+typedef struct { uint32_t isf[4], fbits[4], iv[4], mxi[4]; } Dec;
+static inline void dec_int(Dec* d, int j, uint32_t w32, uint32_t s, uint32_t e, uint32_t m)
 {
     uint32_t x = rot32(w32, s); const uint32_t sign = x & kmask(s);
     x = rot32(x, e); const uint32_t E = x & kmask(e);
     x = rot32(x, m); const uint32_t Mt = x & kmask(m);
-    if (e) return ((E + 128u - shl32(1u, e - 1u)) << 23) | shl32(Mt, (23u - m) & 63u) | (sign << 31);
-    const uint32_t iv = Mt | sra32(sign << 31, (31u - m) & 63u);
-    const uint32_t sh = (31u - m) & 63u;
-    const uint32_t mx = CUFLT(sh < 32u ? 0x7FFFFFFFu >> sh : 0u, 155);
-    const uint32_t rc = mx == 0 ? 0 : recip_nr(mx);
-    return FM(CSFLT(iv, 155), rc);
+    if (e) {           /* mini float: plain bit assembly */
+        d->isf[j] = ~0u; d->fbits[j] = ((E + 128u - shl32(1u, e - 1u)) << 23) | shl32(Mt, (23u - m) & 63u) | (sign << 31);
+        d->iv[j] = 0; d->mxi[j] = 1;
+    } else {           /* fixed point: csflt(Mt with the sign as the two's-complement top bit) * 1/(2^m - 1) */
+        const uint32_t sh = (31u - m) & 63u;
+        d->isf[j] = 0; d->fbits[j] = 0;
+        d->iv[j] = Mt | sra32(sign << 31, sh);
+        d->mxi[j] = sh < 32u ? 0x7FFFFFFFu >> sh : 0u;
+    }
+}
+static inline __attribute__((always_inline)) u128 dec_float(const int spec, spu_spec_acc* acc, const Dec* d)
+{
+    const u128 mx = spu_cuflt(VA(d->mxi), 155), mx0 = VEQ0(mx);
+    const u128 rc = spu_selb(v_rnr(spec, acc, spu_selb(mx, ONEV, mx0)), S(0), mx0);   /* mx == 0 -> rc = 0 */
+    return spu_selb(XFM(spu_csflt(VA(d->iv), 155), rc), VA(d->fbits), VA(d->isf));
 }
 typedef struct { int Kb, Kt, pf, nf; } Keys;
 static inline Keys key_frames(u128i W, u128i mN, u128i mF)
@@ -164,80 +193,108 @@ static inline Keys key_frames(u128i W, u128i mN, u128i mF)
     k.pf = last + 1; k.nf = first + 1;
     return k;
 }
-static inline void interp_weights(uint32_t frac, uint32_t dtA, uint32_t dtB, uint32_t* t, uint32_t* omt)
+static inline __attribute__((always_inline)) void v_interp(const int spec, spu_spec_acc* acc, u128 frac, const uint32_t dtA[4], const uint32_t dtB[4], u128* t, u128* omt)
 {
-    const uint32_t fA = CUFLT(dtA, 155), fB = CUFLT(dtB, 155);
-    const uint32_t span = FA(fA, fB);
-    *t = FM(FA(frac, fA), recip_nr(span));
-    *omt = FS(ONE, *t);
+    const u128 fA = spu_cuflt(VA(dtA), 155), fB = spu_cuflt(VA(dtB), 155);
+    const u128 span = XFA(fA, fB);
+    *t = XFM(XFA(frac, fA), v_rnr(spec, acc, span));
+    *omt = XFS(ONEV, *t);
 }
-static inline uint32_t SIN(uint32_t x)
+static inline __attribute__((always_inline)) u128 v_sin(const int spec, spu_spec_acc* acc, u128 x)
 {
-    const uint32_t x2 = FM(x, x);
-    return FM(FMA(FMA(FMA(FMA(S4, x2, S3), x2, S2), x2, S1), x2, ONE), x);
+    const u128 x2 = XFM(x, x);
+    return XFM(XFMA(XFMA(XFMA(XFMA(S(S4), x2, S(S3)), x2, S(S2)), x2, S(S1)), x2, ONEV), x);
 }
-static inline void slerp_q(const uint32_t A[4], const uint32_t Bq[4], uint32_t t, uint32_t omt, uint32_t out[4])
+static inline __attribute__((always_inline)) void v_slerp(const int spec, spu_spec_acc* acc, const u128 A[4], const u128 Bq[4], u128 t, u128 omt, u128 out[4])
 {
-    const uint32_t d = FMA(A[3], Bq[3], FMA(A[2], Bq[2], FMA(A[1], Bq[1], FM(A[0], Bq[0]))));
-    const uint32_t sg = FCGT(0, d) ? MONE : ONE;
-    const uint32_t ad = FM(d, sg);
-    uint32_t Bs[4];
-    for (int k = 0; k < 4; k++) Bs[k] = FM(Bq[k], sg);
-    const uint32_t p = FNMS(ad, FNMS(ad, FNMS(ad, FM(ad, A3), A2), A1), A0);
-    const uint32_t e = FS(ONE, ad);
-    const uint32_t y = FI(e, FRSQEST(e));
-    const uint32_t th = FM(p, FNMS(y, ad, y));
-    uint32_t kA, kB;
-    if (FCGT(ad, LIN)) { kA = omt; kB = t; }
-    else {
-        const uint32_t sth = SIN(th), sa = SIN(FM(omt, th)), sb = SIN(FM(t, th));
-        const uint32_t ri = FI(sth, FREST(sth));
-        kA = FM(sa, ri); kB = FM(sb, ri);
-    }
-    for (int k = 0; k < 4; k++) out[k] = FMA(Bs[k], kB, FM(A[k], kA));
+    const u128 d = XFMA(A[3], Bq[3], XFMA(A[2], Bq[2], XFMA(A[1], Bq[1], XFM(A[0], Bq[0]))));
+    const u128 sg = spu_selb(ONEV, S(MONE), spu_fcgt_lean(S(0), d));
+    const u128 ad = XFM(d, sg);
+    const u128 lin = spu_fcgt_lean(ad, S(LIN));
+    const u128 adt = spec ? spu_selb(ad, S(HALF), lin) : ad;                /* SANITISE: lin lanes take (omt, t) */
+    const u128 p = XFNMS(adt, XFNMS(adt, XFNMS(adt, XFM(adt, S(A3)), S(A2)), S(A1)), S(A0));
+    const u128 e = XFS(ONEV, adt);
+    const u128 y = spu_fi(e, spu_frsqest(e));
+    const u128 th = XFM(p, XFNMS(y, adt, y));
+    const u128 sth = v_sin(spec, acc, th), sa = v_sin(spec, acc, XFM(omt, th)), sb = v_sin(spec, acc, XFM(t, th));
+    const u128 ri = spu_fi(sth, spu_frest(sth));
+    const u128 kA = spu_selb(XFM(sa, ri), omt, lin), kB = spu_selb(XFM(sb, ri), t, lin);
+    for (int k = 0; k < 4; k++) out[k] = XFMA(XFM(Bq[k], sg), kB, XFM(A[k], kA));
 }
-static inline uint32_t lerp1(uint32_t a, uint32_t b, uint32_t t) { return FNMS(a, t, FMA(b, t, a)); }
+static inline __attribute__((always_inline)) u128 v_lerp(const int spec, spu_spec_acc* acc, u128 a, u128 b, u128 t) { return XFNMS(a, t, XFMA(b, t, a)); }
+/* component vectors (k across lanes) -> lane j's quad */
+static inline void lanes_out(const u128 v[4], uint32_t out[4][4])
+{
+    for (int j = 0; j < 4; j++) for (int k = 0; k < 4; k++) out[j][k] = v[k]._u32[j];
+}
+static unsigned long long s_fail;
+#define RUN2(call) do { spu_spec_acc av_ = SPU_SPEC_INIT(); { const int spec = 1; spu_spec_acc* acc = &av_; (void)spec; call; } \
+    if (!SPU_SPEC_OK(av_)) { __atomic_add_fetch(&s_fail, 1, __ATOMIC_RELAXED); const int spec = 0; spu_spec_acc dummy_ = SPU_SPEC_INIT(); spu_spec_acc* acc = &dummy_; (void)spec; (void)acc; call; } } while (0)
 
 /* ---- the leaves ---- */
+static inline __attribute__((always_inline)) void g1A570(const int spec, spu_spec_acc* acc, const uint32_t h0[8], const uint32_t w1[8], uint32_t q[8][4])
+{
+    for (int half = 0; half < 2; half++) {
+        u128 o[4]; v_deq48(spec, acc, h0 + 4 * half, w1 + 4 * half, o);
+        uint32_t r[4][4]; lanes_out(o, r);
+        memcpy(q[4 * half], r, sizeof r);
+    }
+}
 static void c_1A570(uint8_t* L, uint32_t pose, uint32_t data, uint32_t n, uint32_t idx)
 {
     static const int order[8] = {3, 6, 1, 7, 5, 0, 4, 2};
     data &= ~15u; idx &= ~15u;
-    for (uint32_t g = 0; g < ((n + 7u) >> 3); g++)
+    for (uint32_t g = 0; g < ((n + 7u) >> 3); g++) {
+        uint32_t h0[8], w1[8], q[8][4];
+        for (uint32_t k = 0; k < 8; k++) read6(L, data + 6u * (8u * g + k), &h0[k], &w1[k]);
+        RUN2(g1A570(spec, acc, h0, w1, q));
         for (int kk = 0; kk < 8; kk++) {
             const uint32_t i = 8u * g + (uint32_t)order[kk];
-            uint32_t h0, w1, q[4];
-            read6(L, data + 6u * i, &h0, &w1);
-            deq48(h0, w1, q);
-            SQ4(L, pose + 48u * U16(L, idx + 2u * i), q);
+            SQ4(L, pose + 48u * U16(L, idx + 2u * i), q[order[kk]]);
         }
+    }
 }
 typedef struct { u128i mN, mF; uint32_t f, frac, n; } Com;
+static inline __attribute__((always_inline)) void g19A20(const int spec, spu_spec_acc* acc, u128 frac, const uint32_t dtA[4], const uint32_t dtB[4],
+                                                         const uint32_t ha[4], const uint32_t wa[4], const uint32_t hb[4], const uint32_t wb[4], uint32_t res[4][4])
+{
+    u128 t, omt, qa[4], qb[4], o[4];
+    v_interp(spec, acc, frac, dtA, dtB, &t, &omt);
+    v_deq48(spec, acc, ha, wa, qa);
+    v_deq48(spec, acc, hb, wb, qb);
+    v_slerp(spec, acc, qa, qb, t, omt, o);
+    lanes_out(o, res);
+}
 static void c_19A20(uint8_t* L, const Com* c, const uint32_t cur0[4], uint32_t kbase, const uint32_t st0[4], const uint32_t en0[4],
                     uint32_t n, uint32_t pose, uint32_t idx)
 {
     uint32_t cur[4], st[4], en[4];
     memcpy(cur, cur0, 16); memcpy(st, st0, 16); memcpy(en, en0, 16);
+    const u128 frac = S(c->frac);
     for (uint32_t g = 0; g < ((n + 3u) >> 2); g++) {
-        uint32_t res[4][4], P = 0;
+        uint32_t res[4][4], P = 0, dtA[4], dtB[4], ha[4], wa[4], hb[4], wb[4];
         for (int j = 0; j < 4; j++) {
             const Keys k = key_frames(bits128(L, cur[j]), c->mN, c->mF);
             const uint32_t nxt = kbase + 6u * (P + (uint32_t)k.Kb);
             P += (uint32_t)k.Kt;
             const uint32_t pB = k.Kb == k.Kt ? en[j] : nxt;
             const uint32_t pA = k.Kb > 0 ? nxt - 6u : st[j];
-            uint32_t t, omt, h0, w1, qa[4], qb[4];
-            interp_weights(c->frac, c->f - (uint32_t)k.pf, (uint32_t)k.nf - c->f, &t, &omt);
-            read6(L, pA, &h0, &w1); deq48(h0, w1, qa);
-            read6(L, pB, &h0, &w1); deq48(h0, w1, qb);
-            slerp_q(qa, qb, t, omt, res[j]);
+            dtA[j] = c->f - (uint32_t)k.pf; dtB[j] = (uint32_t)k.nf - c->f;
+            read6(L, pA, &ha[j], &wa[j]); read6(L, pB, &hb[j], &wb[j]);
         }
+        RUN2(g19A20(spec, acc, frac, dtA, dtB, ha, wa, hb, wb, res));
         kbase += 6u * P;
         static const int order[4] = {3, 0, 2, 1};
         for (int kk = 0; kk < 4; kk++) SQ4(L, pose + 48u * u16q(L, idx, (uint32_t)order[kk]), res[order[kk]]);
         idx += 8u;
         for (int j = 0; j < 4; j++) { cur[j] += 4u * c->n; st[j] += 24u; en[j] += 24u; }
     }
+}
+static inline __attribute__((always_inline)) void g1C510(const int spec, spu_spec_acc* acc, const Dec* da, const Dec* db, const Dec* dc, u128 idx, uint32_t res[4][4])
+{
+    u128 o[4];
+    v_reorder(dec_float(spec, acc, da), dec_float(spec, acc, db), dec_float(spec, acc, dc), ONEV, idx, o);
+    lanes_out(o, res);
 }
 static void c_1C510(uint8_t* L, uint32_t data, uint32_t n, uint32_t pose, uint32_t idx, uint32_t dp)
 {
@@ -247,23 +304,30 @@ static void c_1C510(uint8_t* L, uint32_t data, uint32_t n, uint32_t pose, uint32
     const uint32_t w0 = F[0].s + F[0].e + F[0].m, w1 = F[1].s + F[1].e + F[1].m, w2 = F[2].s + F[2].e + F[2].m, nb = w0 + w1 + w2;
     const uint32_t bit0 = data << 3;
     for (uint32_t g = 0; g < ((n + 3u) >> 2); g++) {
+        Dec da, db, dc; uint32_t res[4][4];
         for (uint32_t j = 0; j < 4; j++) {
             const u128i W = bits128(L, bit0 + (4u * g + j) * nb);
-            const uint32_t a = decode_comp(top32(W, 0), F[0].s, F[0].e, F[0].m);
-            const uint32_t b = decode_comp(top32(W, w0), F[1].s, F[1].e, F[1].m);
-            const uint32_t cc = decode_comp(top32(W, w0 + w1), F[2].s, F[2].e, F[2].m);
-            uint32_t q[4]; reorder(a, b, cc, ONE, D, q);
-            SQ4(L, pose + 48u * u16q(L, idx, j), q);
+            dec_int(&da, (int)j, top32(W, 0), F[0].s, F[0].e, F[0].m);
+            dec_int(&db, (int)j, top32(W, w0), F[1].s, F[1].e, F[1].m);
+            dec_int(&dc, (int)j, top32(W, w0 + w1), F[2].s, F[2].e, F[2].m);
         }
+        RUN2(g1C510(spec, acc, &da, &db, &dc, S(D), res));
+        for (uint32_t j = 0; j < 4; j++) SQ4(L, pose + 48u * u16q(L, idx, j), res[j]);
         idx += 8u;
     }
 }
-static void decode_vec(const uint8_t* L, uint32_t bitaddr, const Fld F[3], const uint32_t wd[3], uint32_t out[3])
+static inline __attribute__((always_inline)) void g1B5F0(const int spec, spu_spec_acc* acc, u128 frac, const uint32_t dtA[4], const uint32_t dtB[4],
+                                                         const Dec a[3], const Dec b[3], u128 idx, uint32_t res[4][4])
 {
-    const u128i W = bits128(L, bitaddr);
-    out[0] = decode_comp(top32(W, 0), F[0].s, F[0].e, F[0].m);
-    out[1] = decode_comp(top32(W, wd[0]), F[1].s, F[1].e, F[1].m);
-    out[2] = decode_comp(top32(W, wd[0] + wd[1]), F[2].s, F[2].e, F[2].m);
+    u128 t, omt, A[4], Bv[4], o[4];
+    v_interp(spec, acc, frac, dtA, dtB, &t, &omt);
+    const u128 a0 = dec_float(spec, acc, &a[0]), a1 = dec_float(spec, acc, &a[1]), a2 = dec_float(spec, acc, &a[2]);
+    const u128 b0 = dec_float(spec, acc, &b[0]), b1 = dec_float(spec, acc, &b[1]), b2 = dec_float(spec, acc, &b[2]);
+    v_reorder(a0, a1, a2, v_wfrom(spec, acc, a0, a1, a2, 1), idx, A);       /* key A: clamped */
+    v_reorder(b0, b1, b2, v_wfrom(spec, acc, b0, b1, b2, 0), idx, Bv);      /* key B: not */
+    for (int k = 0; k < 3; k++) o[k] = v_lerp(spec, acc, A[k], Bv[k], t);
+    o[3] = ONEV;
+    lanes_out(o, res);
 }
 static void c_1B5F0(uint8_t* L, const Com* c, const uint32_t cur0[4], uint32_t kbyte, uint32_t sbyte, uint32_t ebyte,
                     uint32_t n, uint32_t pose, uint32_t idx, uint32_t dp)
@@ -271,26 +335,30 @@ static void c_1B5F0(uint8_t* L, const Com* c, const uint32_t cur0[4], uint32_t k
     if (n == 0) return;
     uint32_t cur[4]; memcpy(cur, cur0, 16);
     uint32_t kb = kbyte << 3, sb = sbyte << 3, eb = ebyte << 3;
+    const u128 frac = S(c->frac);
     for (uint32_t g = 0; g < ((n + 3u) >> 2); g++) {
-        uint32_t res[4][4], P = 0, Wp = 0;
+        uint32_t res[4][4], P = 0, Wp = 0, dtA[4], dtB[4], Dv[4];
+        Dec a[3], b[3];
         for (uint32_t j = 0; j < 4; j++) {
             const uint32_t D = U32(L, dp + 4u * j);
             Fld F[3]; desc_fields(D, F);
-            const uint32_t wd[3] = {F[0].s + F[0].e + F[0].m, F[1].s + F[1].e + F[1].m, F[2].s + F[2].e + F[2].m};
-            const uint32_t w = wd[0] + wd[1] + wd[2];
+            const uint32_t wd0 = F[0].s + F[0].e + F[0].m, wd1 = F[1].s + F[1].e + F[1].m, wd2 = F[2].s + F[2].e + F[2].m;
+            const uint32_t w = wd0 + wd1 + wd2;
             const Keys k = key_frames(bits128(L, cur[j]), c->mN, c->mF);
             const uint32_t nxt = kb + (uint32_t)((int32_t)(int16_t)k.Kb * (int32_t)(int16_t)w) + P;
             const uint32_t pA = k.Kb > 0 ? nxt - w : sb + Wp;
             const uint32_t pB = k.Kb == k.Kt ? eb + Wp : nxt;
             P += (uint32_t)((int32_t)(int16_t)k.Kt * (int32_t)(int16_t)w); Wp += w;
-            uint32_t t, omt, a3[3], b3[3], A[4], Bv[4];
-            interp_weights(c->frac, c->f - (uint32_t)k.pf, (uint32_t)k.nf - c->f, &t, &omt);
-            decode_vec(L, pA, F, wd, a3); decode_vec(L, pB, F, wd, b3);
-            reorder(a3[0], a3[1], a3[2], w_from_abc(a3[0], a3[1], a3[2], 1), D, A);    /* key A: clamped */
-            reorder(b3[0], b3[1], b3[2], w_from_abc(b3[0], b3[1], b3[2], 0), D, Bv);   /* key B: not */
-            for (int q = 0; q < 3; q++) res[j][q] = lerp1(A[q], Bv[q], t);
-            res[j][3] = ONE;
+            dtA[j] = c->f - (uint32_t)k.pf; dtB[j] = (uint32_t)k.nf - c->f; Dv[j] = D;
+            const u128i WA = bits128(L, pA), WB = bits128(L, pB);
+            dec_int(&a[0], (int)j, top32(WA, 0), F[0].s, F[0].e, F[0].m);
+            dec_int(&a[1], (int)j, top32(WA, wd0), F[1].s, F[1].e, F[1].m);
+            dec_int(&a[2], (int)j, top32(WA, wd0 + wd1), F[2].s, F[2].e, F[2].m);
+            dec_int(&b[0], (int)j, top32(WB, 0), F[0].s, F[0].e, F[0].m);
+            dec_int(&b[1], (int)j, top32(WB, wd0), F[1].s, F[1].e, F[1].m);
+            dec_int(&b[2], (int)j, top32(WB, wd0 + wd1), F[2].s, F[2].e, F[2].m);
         }
+        RUN2(g1B5F0(spec, acc, frac, dtA, dtB, a, b, VA(Dv), res));
         static const int order[4] = {0, 2, 1, 3};
         for (int kk = 0; kk < 4; kk++) SQ4(L, pose + 48u * u16q(L, idx, (uint32_t)order[kk]), res[order[kk]]);
         idx += 8u; dp += 16u;
@@ -298,16 +366,31 @@ static void c_1B5F0(uint8_t* L, const Com* c, const uint32_t cur0[4], uint32_t k
         for (int j = 0; j < 4; j++) cur[j] += 4u * c->n;
     }
 }
+static inline __attribute__((always_inline)) void g1D4D0(const int spec, spu_spec_acc* acc, const Dec* d, uint32_t out[4])
+{
+    const u128 v = dec_float(spec, acc, d);
+    for (int j = 0; j < 4; j++) out[j] = v._u32[j];
+}
 static void c_1D4D0(uint8_t* L, uint32_t data, uint32_t n, uint32_t out, uint32_t idx, uint32_t dp)
 {
     if (n == 0) return;
     Fld F[3]; desc_fields(U32(L, dp), F);
     const uint32_t w = F[0].s + F[0].e + F[0].m, bit0 = data << 3;
     for (uint32_t g = 0; g < ((n + 3u) >> 2); g++) {
-        for (uint32_t j = 0; j < 4; j++)
-            SW(L, out + 4u * u16q(L, idx, j), decode_comp(top32(bits128(L, bit0 + (4u * g + j) * w), 0), F[0].s, F[0].e, F[0].m));
+        Dec d; uint32_t r[4];
+        for (uint32_t j = 0; j < 4; j++) dec_int(&d, (int)j, top32(bits128(L, bit0 + (4u * g + j) * w), 0), F[0].s, F[0].e, F[0].m);
+        RUN2(g1D4D0(spec, acc, &d, r));
+        for (uint32_t j = 0; j < 4; j++) SW(L, out + 4u * u16q(L, idx, j), r[j]);
         idx += 8u;
     }
+}
+static inline __attribute__((always_inline)) void g1CBB0(const int spec, spu_spec_acc* acc, u128 frac, const uint32_t dtA[4], const uint32_t dtB[4],
+                                                         const Dec* a, const Dec* b, uint32_t out[4])
+{
+    u128 t, omt;
+    v_interp(spec, acc, frac, dtA, dtB, &t, &omt);
+    const u128 v = v_lerp(spec, acc, dec_float(spec, acc, a), dec_float(spec, acc, b), t);
+    for (int j = 0; j < 4; j++) out[j] = v._u32[j];
 }
 static void c_1CBB0(uint8_t* L, const Com* c, const uint32_t cur0[4], uint32_t kbyte, uint32_t sbyte, uint32_t ebyte,
                     uint32_t n, uint32_t out, uint32_t idx, uint32_t dp)
@@ -315,8 +398,10 @@ static void c_1CBB0(uint8_t* L, const Com* c, const uint32_t cur0[4], uint32_t k
     if (n == 0) return;
     uint32_t cur[4]; memcpy(cur, cur0, 16);
     uint32_t kb = kbyte << 3, sb = sbyte << 3, eb = ebyte << 3;
+    const u128 frac = S(c->frac);
     for (uint32_t g = 0; g < ((n + 3u) >> 2); g++) {
-        uint32_t res[4], P = 0, Wp = 0;
+        uint32_t res[4], P = 0, Wp = 0, dtA[4], dtB[4];
+        Dec a, b;
         for (uint32_t j = 0; j < 4; j++) {
             Fld F[3]; desc_fields(U32(L, dp + 4u * j), F);
             const uint32_t w = F[0].s + F[0].e + F[0].m;
@@ -325,12 +410,11 @@ static void c_1CBB0(uint8_t* L, const Com* c, const uint32_t cur0[4], uint32_t k
             const uint32_t pA = k.Kb > 0 ? nxt - w : sb + Wp;
             const uint32_t pB = k.Kb == k.Kt ? eb + Wp : nxt;
             P += (uint32_t)((int32_t)(int16_t)k.Kt * (int32_t)(int16_t)w); Wp += w;
-            uint32_t t, omt;
-            interp_weights(c->frac, c->f - (uint32_t)k.pf, (uint32_t)k.nf - c->f, &t, &omt);
-            const uint32_t a = decode_comp(top32(bits128(L, pA), 0), F[0].s, F[0].e, F[0].m);
-            const uint32_t b = decode_comp(top32(bits128(L, pB), 0), F[0].s, F[0].e, F[0].m);
-            res[j] = lerp1(a, b, t);
+            dtA[j] = c->f - (uint32_t)k.pf; dtB[j] = (uint32_t)k.nf - c->f;
+            dec_int(&a, (int)j, top32(bits128(L, pA), 0), F[0].s, F[0].e, F[0].m);
+            dec_int(&b, (int)j, top32(bits128(L, pB), 0), F[0].s, F[0].e, F[0].m);
         }
+        RUN2(g1CBB0(spec, acc, frac, dtA, dtB, &a, &b, res));
         for (uint32_t j = 0; j < 4; j++) SW(L, out + 4u * u16q(L, idx, j), res[j]);
         idx += 8u; dp += 16u;
         kb += P; sb += Wp; eb += Wp;
@@ -410,7 +494,7 @@ static int j218_clip(spu_context* ctx)
 {
     if (__builtin_expect(s_mode < 0, 0)) {
         const char* e = getenv("PS3RECOMP_NATIVE_J218CLIP");
-        s_mode = e ? atoi(e) : 0;      /* default OFF: this scalar port is exact but slower than the lifted SIMD code */
+        s_mode = e ? atoi(e) : 1;
         s_check = getenv("J218CLIP_CHECK") != 0;
         e = getenv("J218CLIP_STATS"); s_stats = e != 0;
         if (e && atoll(e) > 1) s_every = (unsigned long long)atoll(e);
@@ -441,13 +525,13 @@ static int j218_clip(spu_context* ctx)
                         ctx->gpr[7]._u32[0], ctx->gpr[8]._u32[0]);
             }
         } else __atomic_add_fetch(&s_decl, 1, __ATOMIC_RELAXED);
-        if (s_stats && c % s_every == 0) fprintf(stderr, "[j218clip] %llu calls, %llu declined, check %llu/%llu differ\n", c, s_decl, s_bad, s_chk);
+        if (s_stats && c % s_every == 0) fprintf(stderr, "[j218clip] %llu calls, %llu declined, check %llu/%llu differ, %llu failed speculative groups\n", c, s_decl, s_bad, s_chk, s_fail);
         return 1;
     }
     ok = clip_core(ctx->ls, ctx->gpr);
     if (!ok) { __atomic_add_fetch(&s_decl, 1, __ATOMIC_RELAXED); return 0; }
     spu_native_dead_ls(sp - 0x6E0u, sp - 0x300u);
-    if (s_stats && c % s_every == 0) fprintf(stderr, "[j218clip] %llu calls, %llu declined\n", c, s_decl);
+    if (s_stats && c % s_every == 0) fprintf(stderr, "[j218clip] %llu calls, %llu declined, %llu failed speculative groups\n", c, s_decl, s_fail);
     return 1;
 }
 
