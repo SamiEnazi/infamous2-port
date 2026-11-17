@@ -34,6 +34,7 @@
 #include "spu_dma.h"
 #include "spu_jobrec.h"
 #include <immintrin.h>
+#include <pthread.h>
 
 extern uint8_t* vm_base;
 int spu_native_register(int image_id, uint32_t addr, int (*fn)(spu_context*));
@@ -735,6 +736,56 @@ static void commit(J* j, int replay)
     P32(ls + j->buf2, R32(ls + j->buf2) + (~d1 - (~d0 + 2u)));
 }
 
+/* (deck) J210_KLOG=<calls>: walker calls grouped by the view's K quad (buf1+0x70: K.x z scale, K.y min size^2,
+ * K.z size^2 / distance^2 ratio, K.w near z) and the near-test flag (buf1+0x81), with the records each emits */
+static void j210_klog(J* j)
+{
+    static int every = -1; static unsigned long long n;
+    static struct { u128 K; uint32_t flag; unsigned long long calls, recs; } t[24]; static int nt;
+    static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
+    if (__builtin_expect(every < 0, 0)) { const char* e = getenv("J210_KLOG"); every = e ? atoi(e) : 0; }
+    if (!every) return;
+    pthread_mutex_lock(&mx);
+    const uint32_t flag = j->ls[j->buf1 + 0x81];
+    int i = 0;
+    for (; i < nt; i++) if (!memcmp(&t[i].K, &j->K, 16) && t[i].flag == flag) break;
+    if (i == nt && nt < 24) { t[nt].K = j->K; t[nt].flag = flag; t[nt].calls = t[nt].recs = 0; nt++; }
+    if (i < nt) { t[i].calls++; t[i].recs += j->nrec; }
+    if (++n % (unsigned long long)every == 0) {
+        fprintf(stderr, "[j210] K views over %d calls:", every);
+        for (int k = 0; k < nt; k++) {
+            float f[4]; memcpy(f, t[k].K._u32, 16);
+            fprintf(stderr, " [K %g %g %g %g near%u: %llu calls, %.0f recs/call]", f[0], f[1], f[2], f[3], t[k].flag, t[k].calls,
+                    t[k].calls ? (double)t[k].recs / t[k].calls : 0.0);
+        }
+        fputc('\n', stderr);
+        nt = 0;
+    }
+    pthread_mutex_unlock(&mx);
+}
+
+/* (deck, experiment) J210_KY_SCALE=<f>: views with a minimum size (K.y > 0) get K.y * f; J210_KY_SET=<v>: views
+ * with no size test at all (K.y == K.z == 0) get K.y = v. Written into the view block in LS, so the lifted
+ * walker (a declined call) culls the same way. */
+static void j210_ktweak(J* j)
+{
+    static float sc = -1.0f, set = -1.0f;
+    if (__builtin_expect(sc < 0.0f, 0)) {
+        const char* a = getenv("J210_KY_SCALE"); const char* b = getenv("J210_KY_SET");
+        sc = a ? (float)atof(a) : 0.0f; set = b ? (float)atof(b) : 0.0f;
+    }
+    if (sc <= 0.0f && set <= 0.0f) return;
+    uint8_t* q = j->ls + j->buf1 + 0x70;
+    uint32_t w1 = (uint32_t)q[4] << 24 | (uint32_t)q[5] << 16 | (uint32_t)q[6] << 8 | q[7];
+    const uint32_t w2 = (uint32_t)q[8] << 24 | (uint32_t)q[9] << 16 | (uint32_t)q[10] << 8 | q[11];
+    float y; memcpy(&y, &w1, 4);
+    if (y > 0.0f && sc > 0.0f) y *= sc;
+    else if (w1 == 0 && w2 == 0 && set > 0.0f) y = set;
+    else return;
+    memcpy(&w1, &y, 4);
+    q[4] = (uint8_t)(w1 >> 24); q[5] = (uint8_t)(w1 >> 16); q[6] = (uint8_t)(w1 >> 8); q[7] = (uint8_t)w1;
+}
+
 static int j210_walker(spu_context* ctx)
 {
     if (__builtin_expect(s_mode < 0, 0)) {
@@ -769,6 +820,7 @@ static int j210_walker(spu_context* ctx)
      * (the walker's own frame does the same), so that word must not be part of the staging */
     j->r1 = spu_ai(r1, -0x1040);
     j->cam = LQ(j->ls + j->buf1);
+    j210_ktweak(j);
     j->K = LQ(j->ls + j->buf1 + 0x70);
     SQ(j->ls + j->F + 0xA0, j->cam);
     const int replay = spu_native_replay_begin(ctx);
@@ -799,6 +851,7 @@ static int j210_walker(spu_context* ctx)
         return 0;
     }
     commit(j, replay);
+    j210_klog(j);
     if (replay) {
         spu_native_dead_ls(0x6D60, 0xE620);                         /* the BSS: zeroed by the wrapper every call */
         spu_native_dead_ls(j->buf1 + 0x4000u, j->buf1 + 0xC000u);   /* the two DMA landing buffers */

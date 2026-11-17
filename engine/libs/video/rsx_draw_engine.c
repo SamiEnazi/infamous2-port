@@ -5014,8 +5014,10 @@ static int eng_prefetch_on(void)
         if ((PREV) && (PREV) != (E)) (PREV)->next = me_; \
         (PREV) = (E); \
         if ((E)->next) { \
+            /* (deck) every line: the index entries grew to 320 B (the pair memo), whose \
+             * middle lines (pair.sig / vkey / vidx) the probe reads too */ \
             const char* p_ = (const char*)&(TABLE)[(u16)((E)->next - 1u)]; \
-            __builtin_prefetch(p_, 0, 3); \
+            for (u32 o_ = 0; o_ < (u32)sizeof *(E); o_ += 64u) __builtin_prefetch(p_ + o_, 0, 3); \
             __builtin_prefetch(p_ + sizeof *(E) - 1u, 0, 3); \
         } \
     } } while (0)
@@ -7036,8 +7038,74 @@ static u32 s_hud_frame = ~0u, s_hud_slice, s_hud_seen;
 #include "rsx_draw_delta.inc"   /* (rnd1) PS3RECOMP_ENG_DELTA */
 #include "rsx_draw_fast.inc"    /* (fastdraw) PS3RECOMP_ENG_FASTDRAW */
 
+/* (deck) PS3RECOMP_ENG_PASSSTATS=<frames>: draws per frame by pass (depth buffer, colour targets, size, colour
+ * write mask), the top ones printed every <frames> frames. Which passes the draw count comes from (shadow
+ * cascades are depth-only: colour mask 0). */
+typedef struct { u64 key; u32 zoff, coff, w, h, ct, cmask, vx, vy, vw, vh; u64 n; } eng_pass_ent;
+static eng_pass_ent s_pass[256];
+static int s_pass_every = -1;
+static u32 s_pass_f0;
+static const u32* s_pass_runs; static u32 s_pass_nruns;
+static void eng_pass_note(const rsx_dsp_surface* sf, const rsx_be_render_state* rs, const rsx_dsp_viewport* vp)
+{
+    if (__builtin_expect(s_pass_every < 0, 0)) {
+        const char* e = getenv("PS3RECOMP_ENG_PASSSTATS"); s_pass_every = e ? atoi(e) : 0;
+        if (s_pass_every < 0) s_pass_every = 0;
+        s_pass_f0 = g.frames;
+    }
+    if (!s_pass_every) return;
+    const u32 cmask = (rs->color_mask ? 1u : 0u) | (rs->color_mask_mrt ? 2u : 0u);
+    /* depth-only passes: split by viewport too (shadow cascades share one atlas) */
+    const u32 vx = cmask ? 0u : vp->x, vy = cmask ? 0u : vp->y, vw = cmask ? 0u : vp->w, vh = cmask ? 0u : vp->h;
+    u64 key = ((u64)sf->zeta_offset << 32 ^ (u64)sf->color_offset[0] ^ (u64)sf->clip_w << 16 ^ (u64)sf->clip_h << 48 ^
+               (u64)sf->color_target << 8 ^ cmask);
+    key = (key ^ ((u64)vx << 20 | (u64)vy << 36 | (u64)vw << 4 | (u64)vh << 52) * 0x9E3779B97F4A7C15ull) | 1u;
+    /* runs: consecutive draws of one pass; the depth-only runs of the last frame are printed */
+    { static u64 run_key; static u32 run_n, run_frame, run_cm; static u32 runs[64], nruns, last_runs[64], last_nruns, runs_frame;
+      if (key != run_key || g.frames != run_frame) {
+          if (run_key && !run_cm && nruns < 64u) runs[nruns++] = run_n;
+          if (g.frames != runs_frame) { memcpy(last_runs, runs, sizeof runs); last_nruns = nruns; nruns = 0; runs_frame = g.frames; }
+          run_key = key; run_n = 0; run_frame = g.frames; run_cm = cmask;
+      }
+      run_n++;
+      s_pass_runs = last_runs; s_pass_nruns = last_nruns; }
+    u32 i = (u32)(key ^ key >> 29) & 255u;
+    for (u32 k = 0; k < 256u; k++, i = (i + 1u) & 255u) {
+        eng_pass_ent* e = &s_pass[i];
+        if (e->key == key) { e->n++; break; }
+        if (!e->key) { e->key = key; e->zoff = sf->zeta_offset; e->coff = sf->color_offset[0]; e->w = sf->clip_w; e->h = sf->clip_h;
+                       e->ct = sf->color_target; e->cmask = cmask; e->vx = vx; e->vy = vy; e->vw = vw; e->vh = vh; e->n = 1; break; }
+    }
+    const u32 nf = g.frames - s_pass_f0;
+    if (nf >= (u32)s_pass_every) {
+        eng_pass_ent* top[12] = { 0 };
+        u64 tot = 0, depth_only = 0;
+        for (u32 k = 0; k < 256u; k++) {
+            eng_pass_ent* e = &s_pass[k];
+            if (!e->key) continue;
+            tot += e->n; if (!e->cmask) depth_only += e->n;
+            for (int t = 0; t < 12; t++) if (!top[t] || e->n > top[t]->n) { for (int u = 11; u > t; u--) top[u] = top[u - 1]; top[t] = e; break; }
+        }
+        fprintf(stderr, "[passstats] %u frames: %.0f draws/frame, %.0f depth-only (colour mask 0);", nf, (double)tot / nf, (double)depth_only / nf);
+        for (int t = 0; t < 12 && top[t]; t++)
+            fprintf(stderr, " [%.0f %ux%u z%08X c%08X ct%u m%u vp %u,%u %ux%u]", (double)top[t]->n / nf, top[t]->w, top[t]->h, top[t]->zoff, top[t]->coff,
+                    top[t]->ct, top[t]->cmask, top[t]->vx, top[t]->vy, top[t]->vw, top[t]->vh);
+        fprintf(stderr, "; depth-only runs last frame (%u):", s_pass_nruns);
+        for (u32 r = 0; r < s_pass_nruns; r++) fprintf(stderr, " %u", s_pass_runs[r]);
+        fputc('\n', stderr);
+        memset(s_pass, 0, sizeof s_pass);
+        s_pass_f0 = g.frames;
+    }
+}
 static void sink_end_body(void* user, const rsx_dispatch* r)
 {
+    if (__builtin_expect(s_pass_every != 0, 0) && g.ready) {   /* (deck) PS3RECOMP_ENG_PASSSTATS: every draw, fast paths too */
+        rsx_dsp_surface psf; rsx_be_render_state prs; rsx_dsp_viewport pvp;
+        rsx_dsp_get_surface(&g.rsx, &psf);
+        rsx_dsp_get_viewport(&g.rsx, &pvp);
+        rsx_draw_engine_decode_render_state(&g.rsx, &prs);
+        eng_pass_note(&psf, &prs, &pvp);
+    }
     (void)user; (void)r;
     if (!g.ready) return;
     if (++s_draw_serial == 0) s_draw_serial = 1;

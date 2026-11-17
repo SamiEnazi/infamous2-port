@@ -159,6 +159,35 @@ static u32 s_gp_ops[8];
 #define pvkCmdDrawIndexed(...)            (s_gp_ops[7]++, pvkCmdDrawIndexed(__VA_ARGS__))
 #define pvkCmdDraw(...)                   (s_gp_ops[7]++, pvkCmdDraw(__VA_ARGS__))
 
+/* (deck) PS3RECOMP_VK_CALLSTATS=<frames>: Vulkan calls per frame by kind, printed every <frames> frames
+ * (vk_callstats_frame, at each present) -- which per-draw calls the driver is paying for. */
+static u64 s_vcs[12];
+static const char* const s_vcs_name[12] = { "pipe", "dsets", "vbufs", "ibuf", "pushc", "viewport", "scissor",
+                                            "sref", "dbias", "beginrp", "upd_ds", "alloc_ds" };
+#define pvkCmdBindPipeline(...)           (s_vcs[0]++, pvkCmdBindPipeline(__VA_ARGS__))
+#define pvkCmdBindDescriptorSets(...)     (s_vcs[1]++, pvkCmdBindDescriptorSets(__VA_ARGS__))
+#define pvkCmdBindVertexBuffers(...)      (s_vcs[2]++, pvkCmdBindVertexBuffers(__VA_ARGS__))
+#define pvkCmdBindIndexBuffer(...)        (s_vcs[3]++, pvkCmdBindIndexBuffer(__VA_ARGS__))
+#define pvkCmdPushConstants(...)          (s_vcs[4]++, pvkCmdPushConstants(__VA_ARGS__))
+#define pvkCmdSetViewport(...)            (s_vcs[5]++, pvkCmdSetViewport(__VA_ARGS__))
+#define pvkCmdSetScissor(...)             (s_vcs[6]++, pvkCmdSetScissor(__VA_ARGS__))
+#define pvkCmdSetStencilReference(...)    (s_vcs[7]++, pvkCmdSetStencilReference(__VA_ARGS__))
+#define pvkCmdSetDepthBias(...)           (s_vcs[8]++, pvkCmdSetDepthBias(__VA_ARGS__))
+#define pvkCmdBeginRenderPass(...)        (s_vcs[9]++, pvkCmdBeginRenderPass(__VA_ARGS__))
+#define pvkUpdateDescriptorSets(...)      (s_vcs[10]++, pvkUpdateDescriptorSets(__VA_ARGS__))
+#define pvkAllocateDescriptorSets(...)    (s_vcs[11]++, pvkAllocateDescriptorSets(__VA_ARGS__))
+static void vk_callstats_frame(void)
+{
+    static int every = -1; static u32 nf; static u64 d0;
+    if (__builtin_expect(every < 0, 0)) { const char* e = getenv("PS3RECOMP_VK_CALLSTATS"); every = e ? atoi(e) : 0; }
+    if (every <= 0 || ++nf < (u32)every) return;
+    const u64 draws = (u64)s_gp_ops[7];
+    fprintf(stderr, "[vk calls] per frame over %u:", nf);
+    for (int k = 0; k < 12; k++) { fprintf(stderr, " %s %.0f", s_vcs_name[k], (double)s_vcs[k] / nf); s_vcs[k] = 0; }
+    fprintf(stderr, " (draw calls counted by the GPU profiler: %.0f)\n", (double)(draws - d0) / nf);
+    d0 = draws; nf = 0;
+}
+
 /* PS3RECOMP_VK_THREADED: vkCmd* recording on a second thread (vk_threaded_rec.h) */
 #include "vk_threaded_rec.h"
 #include "rsx_split.h"          /* (rsx-par) g_rsx_drain_end_hook (PS3RECOMP_VK_BT) */
@@ -4557,6 +4586,7 @@ static void vk_present_async(void)
 static void vk_mg_frame(void);   /* PS3RECOMP_VK_MERGE_STATS */
 static void vk_present_window(void)
 {
+    vk_callstats_frame();                       /* (deck) PS3RECOMP_VK_CALLSTATS */
     vk_mg_frame();
     vk_vram_frame();                            /* (lowend) PS3RECOMP_VRAM_LOG */
 #ifndef VK_TQ_NO_ASYNC_PRESENT
@@ -7863,6 +7893,39 @@ static struct {
     VkBuffer     vb, ib;
     VkDeviceSize vo, io;
 } s_ecs;
+/* (deck) PS3RECOMP_VK_DRAW_OFFSETS (default 1; 0 = rebind at every new offset): a draw from the vertex / index
+ * buffer already bound, at an offset a whole number of vertices / indices past the bound one, passes that
+ * distance in the draw (vertexOffset / firstVertex, firstIndex) instead of binding again. The same bytes are
+ * read; RADV re-uploads its vertex-buffer descriptors after every vkCmdBindVertexBuffers (the plaza: ~6,600
+ * vertex and ~6,600 index binds a frame for ~8,600 draws). */
+static int s_drawoff = -1;
+static inline int vk_drawoff_on(void)
+{
+    if (__builtin_expect(s_drawoff < 0, 0)) { const char* e = getenv("PS3RECOMP_VK_DRAW_OFFSETS"); s_drawoff = !(e && e[0] == '0'); }
+    return s_drawoff;
+}
+static inline int32_t vk_bind_vb_at(VkBuffer b, VkDeviceSize o, u32 stride, int known)
+{
+    if (known && s_ecs.vb == b && o >= s_ecs.vo) {
+        const VkDeviceSize d = o - s_ecs.vo;
+        if (!d) return 0;
+        if (stride && vk_drawoff_on() && d % stride == 0 && d / stride <= 0x7FFFFFFFull) return (int32_t)(d / stride);
+    }
+    pvkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &b, &o);
+    s_ecs.vb = b; s_ecs.vo = o;
+    return 0;
+}
+static inline u32 vk_bind_ib_at(VkBuffer b, VkDeviceSize o, int known)
+{
+    if (known && s_ecs.ib == b && o >= s_ecs.io) {
+        const VkDeviceSize d = o - s_ecs.io;
+        if (!d) return 0;
+        if (vk_drawoff_on() && (d & 3u) == 0 && d / 4u <= 0x7FFFFFFFull) return (u32)(d / 4u);
+    }
+    pvkCmdBindIndexBuffer(s_vk.cmd, b, o, VK_INDEX_TYPE_UINT32);
+    s_ecs.ib = b; s_ecs.io = o;
+    return 0;
+}
 static unsigned long long s_ecs_skipped;
 /* PS3RECOMP_VK_BIAS_RESET (live, default 1; 0 = as before): a pipeline
  * without polygon offset (vk_idx bit 2 clear) declares the depth bias static,
@@ -8407,26 +8470,23 @@ static void vk_eng_draw_ex_body(rsx_topology topology, const void* vertices, VkB
                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT,
                               1, &mb, 0, NULL, 0, NULL);
     }
-    if (!known || s_ecs.vb != vbuf || s_ecs.vo != voff) pvkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &vbuf, &voff);
-    if (has_idx && (!known || s_ecs.ib != ibuf || s_ecs.io != ioff))
-        pvkCmdBindIndexBuffer(s_vk.cmd, ibuf, ioff, VK_INDEX_TYPE_UINT32);
+    const int32_t vofs = vk_bind_vb_at(vbuf, voff, stride, known);     /* (deck) PS3RECOMP_VK_DRAW_OFFSETS */
+    const u32 ifirst = has_idx ? vk_bind_ib_at(ibuf, ioff, known) : 0u;
     s_ecs.valid = batched;                     /* unbatched, every draw is its own pass */
     s_ecs.pipe = pipe; s_ecs.vp = vp; s_ecs.sc = sc; s_ecs.sref = sref; s_ecs.bias_set = bias_set;
-    s_ecs.vb = vbuf; s_ecs.vo = voff;
-    if (has_idx) { s_ecs.ib = ibuf; s_ecs.io = ioff; }
-    else if (!known) { s_ecs.ib = VK_NULL_HANDLE; s_ecs.io = 0; }
+    if (!has_idx && !known) { s_ecs.ib = VK_NULL_HANDLE; s_ecs.io = 0; }
     if (has_idx) {
-        pvkCmdDrawIndexed(s_vk.cmd, index_count, 1, 0, 0, 0);
+        pvkCmdDrawIndexed(s_vk.cmd, index_count, 1, ifirst, vofs, 0);
     } else {
-        pvkCmdDraw(s_vk.cmd, vertex_count, 1, 0, 0);
+        pvkCmdDraw(s_vk.cmd, vertex_count, 1, (u32)vofs, 0);
     }
     if (P->sblend) {                            /* FUNC_ADD_SIGNED: the negative half */
         VkPipeline npipe = vk_eng_variant_ex(P, (u32)topology - 1u, vk_idx, 1);
         if (npipe) {
             pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, npipe);
             s_ecs.pipe = npipe;
-            if (has_idx) pvkCmdDrawIndexed(s_vk.cmd, index_count, 1, 0, 0, 0);
-            else         pvkCmdDraw(s_vk.cmd, vertex_count, 1, 0, 0);
+            if (has_idx) pvkCmdDrawIndexed(s_vk.cmd, index_count, 1, ifirst, vofs, 0);
+            else         pvkCmdDraw(s_vk.cmd, vertex_count, 1, (u32)vofs, 0);
         }
     }
     VK_BST(6);
@@ -8561,10 +8621,9 @@ static void vk_fd_record(u32 vb, u32 vertex_count, u32 stride, u32 ib, u32 index
     const u64 mg_t0 = s_mg.on > 0 ? vk_mg_tsc() : 0;
     { const u32 dyn[2] = { (u32)ubase, (u32)ps_dyn };
       pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_g.pipe_layout, 0, 1, &s_fdt.set, 2, dyn); }
-    if (s_ecs.vb != b || s_ecs.vo != o) pvkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &b, &o);
-    if (s_ecs.ib != ibb || s_ecs.io != io) pvkCmdBindIndexBuffer(s_vk.cmd, ibb, io, VK_INDEX_TYPE_UINT32);
-    s_ecs.vb = b; s_ecs.vo = o; s_ecs.ib = ibb; s_ecs.io = io;
-    pvkCmdDrawIndexed(s_vk.cmd, index_count, 1, 0, 0, 0);
+    const int32_t vofs = vk_bind_vb_at(b, o, stride, 1);              /* (deck) PS3RECOMP_VK_DRAW_OFFSETS */
+    const u32 ifirst = vk_bind_ib_at(ibb, io, 1);
+    pvkCmdDrawIndexed(s_vk.cmd, index_count, 1, ifirst, vofs, 0);
     VK_BST(6);
     if (s_mg.on > 0) {   /* PS3RECOMP_VK_MERGE_STATS, as the body counts it */
         s_mg.t_rec += vk_mg_tsc() - mg_t0;
