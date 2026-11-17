@@ -51,3 +51,4 @@ jobmod_867e5d2348b3_e2898 0x698C:0x68E4
 # (PS3_NATIVE_EDGE_IDX=0 off). Job 223 replay 363 -> 335 us per call, exact; the vertex compression kernel 0x99E8 was
 # tested too and gained nothing (363 -> 362 us), so it stays unhooked.
 jobmod_d0d15ec83992_ea2a0 0xC7B8
+jobmod_cbb4b5c85d75_e59f8 0x7470
