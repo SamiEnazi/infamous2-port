@@ -31,3 +31,6 @@ jobmod_867e5d2348b3_e2898 0x4358
 #
 # image 218 (jobmod_ab654d30fd90_efe70): the pose blend 0x16320 of the character-animation job (job218_native.c; spec work/bench/job218-analysis.md)
 jobmod_ab654d30fd90_efe70 0x16320
+# image 218: the bone hierarchy 0x179C0, the finalize matrix kernels 0x17780 / 0x18B80 and the root-transform loop
+# 0x5814 (a fragment, continues at 0x5928) -- job218_native.c; spec work/bench/job218-fk-spec.md
+jobmod_ab654d30fd90_efe70 0x179C0 0x17780 0x18B80 0x5814:0x5928
