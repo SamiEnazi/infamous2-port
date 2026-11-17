@@ -319,10 +319,84 @@ static int nat_planes_fast(J* j, const u128 mnU, const u128 mxU)
     return _mm_testz_si128(_mm_cmpgt_epi32(acc, _mm_set1_epi32(0x7F7FFFFE)), _mm_set1_epi32(-1)) ? ret : 2;
 }
 
+/* (deck-perf) The box transform, the size / distance pre-tests and the LOD test speculatively (spu_helpers.h
+ * "speculative float regions"): every checked op its fast form, one range verdict at the end; all three are pure
+ * functions of their inputs, so a failed verdict just runs the per-op form (nat_xform / below / nat_lod) instead.
+ * A decision taken on in-range values is the per-op form's decision (the compares are exact on them). */
+#define XFM(a, b)      (spec ? spu_fm_spec((a), (b), acc) : spu_fm((a), (b)))
+#define XFA(a, b)      (spec ? spu_fa_spec((a), (b), acc) : spu_fa((a), (b)))
+#define XFS(a, b)      (spec ? spu_fs_spec((a), (b), acc) : spu_fs((a), (b)))
+#define XFMA(a, b, c)  (spec ? spu_fma_spec((a), (b), (c), acc) : spu_fma((a), (b), (c)))
+#define XFMS(a, b, c)  (spec ? spu_fms_spec((a), (b), (c), acc) : spu_fms((a), (b), (c)))
+static inline __attribute__((always_inline)) u128 x_hsum(const int spec, spu_spec_acc* acc, u128 v)
+{
+    return XFA(XFA(v, ROT(v, 1)), ROT(v, 2));
+}
+static inline __attribute__((always_inline)) void x_xform(const int spec, spu_spec_acc* acc, const u128 mnL, const u128 mxL,
+                                                          const u128* R, u128* mn, u128* mx)
+{
+    const u128 c = XFM(XFA(mnL, mxL), SPLW(F_HALF));
+    const u128 e = XFS(mxL, c);
+    const u128 c1 = SEL3(c, SPLW(F_ONE));
+    const u128 t = XFMA(R[2], SPLAT(c1, 2), XFMA(R[1], SPLAT(c1, 1), XFM(R[0], SPLAT(c1, 0))));
+    const u128 wc = XFA(t, R[3]);
+    u128 A0 = R[0], A1 = R[1], A2 = R[2];
+    for (int i = 0; i < 4; i++) { A0._u32[i] &= 0x7FFFFFFFu; A1._u32[i] &= 0x7FFFFFFFu; A2._u32[i] &= 0x7FFFFFFFu; }
+    const u128 we = XFMA(SPLAT(e, 2), A2, XFMA(SPLAT(e, 0), A0, XFM(SPLAT(e, 1), A1)));
+    *mx = XFA(wc, we);
+    *mn = XFS(wc, we);
+}
+/* 0 culled by a pre-test, 3 = go on to the plane tree with *mn, *mx */
+static inline __attribute__((always_inline)) int x_vis_pre(const int spec, spu_spec_acc* acc, J* j, const u128 mnL, const u128 mxL,
+                                                            const u128* M, u128* mno, u128* mxo)
+{
+    u128 mn, mx;
+    x_xform(spec, acc, mnL, mxL, M, &mn, &mx);
+    const u128 K = j->K;
+    if (j->ls[j->buf1 + 0x81] != 0) {
+        const u128 thr = SPLAT(K, 3);
+        if (GT0(thr, SPLAT(mx, 2))) return 0;
+        const u128 z = GT0(thr, SPLAT(mn, 2)) ? thr : SPLAT(mn, 2);
+        mn = SEL2(mn, z);
+    }
+    const u128 d = XFS(mx, mn);
+    const u128 S2 = SPLAT(x_hsum(spec, acc, XFM(d, d)), 0);
+    if (GT0(ROT(K, 1), S2)) return 0;
+    const u128 c2 = XFA(mn, mx);
+    const u128 K2 = ROT(K, 2);
+    if (GT0(K2, SPLW(0))) {
+        u128 v = XFMS(c2, SPLW(F_HALF), j->cam);
+        v = SEL2(v, XFM(SPLAT(v, 2), SPLAT(K, 0)));
+        const u128 D = SPLAT(x_hsum(spec, acc, XFM(v, v)), 0);
+        if (GT0(XFM(D, K2), S2)) return 0;
+    }
+    *mno = mn; *mxo = mx;
+    return 3;
+}
+static inline __attribute__((always_inline)) int x_lod(const int spec, spu_spec_acc* acc, J* j, uint32_t R, const u128 p)
+{
+    const u128* M = j->M;
+    const u128 t = XFMA(M[2], SPLAT(p, 2), XFMA(M[1], SPLAT(p, 1), XFM(M[0], SPLAT(p, 0))));
+    u128 v = XFS(XFA(t, M[3]), j->cam);
+    v = SEL2(v, XFM(SPLAT(v, 2), SPLAT(j->K, 0)));
+    const u128 D = SPLAT(x_hsum(spec, acc, XFM(v, v)), 0);
+    return GT0(XFM(SPLW(R), SPLW(R)), D);
+}
+static unsigned long long s_pre_slow, s_lod_slow;
+
 /* 0x4030 aabb_visible lean path (L18-165): 1 = visible, 0 = culled, -1 = not modelled (the lifted test decides) */
 static int nat_visible(J* j, const u128 mnL, const u128 mxL, const u128* M)
 {
     u128 mn, mx;
+    {
+        spu_spec_acc av = SPU_SPEC_INIT();
+        const int r = x_vis_pre(1, &av, j, mnL, mxL, M, &mn, &mx);
+        if (__builtin_expect(SPU_SPEC_OK(av), 1)) {
+            if (r != 3) return r;
+            goto planes;
+        }
+        __atomic_add_fetch(&s_pre_slow, 1, __ATOMIC_RELAXED);
+    }
     nat_xform(mnL, mxL, M, &mn, &mx);
     const u128 K = j->K;
     if (j->ls[j->buf1 + 0x81] != 0) {
@@ -342,6 +416,7 @@ static int nat_visible(J* j, const u128 mnL, const u128 mxL, const u128* M)
         const u128 D = SPLAT(HSUM(spu_fm(v, v)), 0);
         if (GT0(spu_fm(D, K2), S2)) return 0;
     }
+planes:
     if (__builtin_expect(s_fastplanes < 0, 0)) { const char* e = getenv("J210_FASTPLANES"); s_fastplanes = !(e && e[0] == '0'); }
     int r = s_fastplanes ? nat_planes_fast(j, mn, mx) : 2;
     if (__builtin_expect(r == 2, 0)) {
@@ -356,6 +431,12 @@ static int nat_lod(J* j, uint32_t idx, const u128 p)
 {
     if (!((j->lod & 255u) > (idx & 255u))) return 1;
     const uint32_t R = R32(j->ls + ((j->buf1 + 0x54 + 4u * (idx & 255u)) & SPU_LS_MASK));
+    {
+        spu_spec_acc av = SPU_SPEC_INIT();
+        const int r = x_lod(1, &av, j, R, p);
+        if (__builtin_expect(SPU_SPEC_OK(av), 1)) return r;
+        __atomic_add_fetch(&s_lod_slow, 1, __ATOMIC_RELAXED);
+    }
     const u128* M = j->M;
     const u128 t = spu_fma(M[2], SPLAT(p, 2), spu_fma(M[1], SPLAT(p, 1), spu_fm(M[0], SPLAT(p, 0))));
     u128 v = spu_fs(spu_fa(t, M[3]), j->cam);
@@ -704,9 +785,9 @@ static int j210_walker(spu_context* ctx)
         }
         if (c % 5000 == 0)
             fprintf(stderr, "[j210] %llu calls, %llu declined (type %llu, ea %llu, size %llu, key %llu, tail %llu, zero %llu);"
-                    " check: aabb %llu/%llu lod %llu/%llu differ, deep %llu, planes slow %llu\n",
+                    " check: aabb %llu/%llu lod %llu/%llu differ, deep %llu, planes slow %llu, pre slow %llu, lod slow %llu\n",
                     c, s_declined, s_why[0], s_why[1], s_why[2], s_why[3], s_why[4], s_why[5],
-                    s_bad_vis, s_chk_vis, s_bad_lod, s_chk_lod, s_vis_deep, s_planes_slow);
+                    s_bad_vis, s_chk_vis, s_bad_lod, s_chk_lod, s_vis_deep, s_planes_slow, s_pre_slow, s_lod_slow);
     }
     if (!ok) {
         memcpy(ctx->gpr, saved, sizeof saved);
