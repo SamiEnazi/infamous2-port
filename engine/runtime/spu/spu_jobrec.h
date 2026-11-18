@@ -77,6 +77,23 @@ void spu_native_dead_ls(uint32_t lo, uint32_t hi);        /* LS [lo,hi) is dead 
 int  spu_native_replay_begin(struct spu_context* ctx);    /* replay: prime guest memory from the recording; 0 = not a replay */
 void spu_native_replay_end(struct spu_context* ctx, int ran);   /* ran: replace the recorded operations by checks of the native's results */
 int  spu_native_ea_ok(uint32_t ea, uint32_t size);            /* may a native read guest [ea, ea+size)? (a replay: only what the recording touched) */
+/* (deck) the same answer inline for the common case -- recorder off, a range within one or two 64 KB pages the
+ * committed-page bitmap already knows (what mfc_ea_range_committed tests first) -- instead of a call that reads
+ * the recorder's thread state on every guest read of a native (j210_walker, the job 204 builder). Anything else
+ * calls the function. */
+extern unsigned char g_vm_page_bitmap[65536 / 8];
+static inline int spu_native_ea_ok_fast(uint32_t ea, uint32_t size)
+{
+    if (__builtin_expect(g_spu_jobrec_mode == 0, 1) && ea >= 0x10000u && size && (uint64_t)ea + size <= 0xFFFFFFFFull) {
+        const uint32_t p0 = ea >> 16, p1 = (ea + size - 1u) >> 16;
+        if (p1 - p0 <= 1u &&
+            ((__atomic_load_n(&g_vm_page_bitmap[p0 >> 3], __ATOMIC_ACQUIRE) >> (p0 & 7u)) & 1u) &&
+            ((__atomic_load_n(&g_vm_page_bitmap[p1 >> 3], __ATOMIC_ACQUIRE) >> (p1 & 7u)) & 1u))
+            return 1;
+    }
+    return (spu_native_ea_ok)(ea, size);
+}
+#define spu_native_ea_ok(ea, size) spu_native_ea_ok_fast((ea), (size))
 uint32_t spu_native_atomic_add32(struct spu_context* ctx, uint32_t ea, uint32_t v);   /* guest word += v atomically as the job does; returns the old value (a replay: the recorded one) */
 uint32_t spu_native_replay_dec(struct spu_context* ctx, int k);           /* replay: the k-th (1-based) recorded RdDec read from the native's entry */
 void spu_native_replay_end_dec(struct spu_context* ctx, int ran, int ndec);   /* as spu_native_replay_end, but the native's span ends at its ndec-th RdDec (stream 0 only) */

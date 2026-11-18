@@ -975,6 +975,7 @@ static void jr_commit(uint32_t ea, uint32_t size)
 }
 
 
+#undef spu_native_ea_ok   /* the function itself (spu_jobrec.h maps calls to the inline front) */
 int spu_native_ea_ok(uint32_t ea, uint32_t size)
 {
     if (ea < 0x10000u || (uint64_t)ea + size > 0xFFFFFFFFull) return 0;
