@@ -76,7 +76,8 @@ static inline u128 SPLW(uint32_t x) { return V4(x, x, x, x); }
  * modelled now (section 11) and no longer raised; the bits keep their values. */
 enum { FB_SRGB = 1, FB_CONST = 2, FB_OP11B = 4, FB_OP4 = 8, FB_OP = 16, FB_KIND2 = 32, FB_KIND10 = 64,
        FB_KIND11 = 128, FB_SIDE = 256, FB_IN1_9 = 512, FB_FPUPLOAD = 1024, FB_OP5 = 2048,
-       FB_TYPE = 4096, FB_EA = 8192, FB_MEM = 16384, FB_STALE = 32768 };
+       FB_TYPE = 4096, FB_EA = 8192, FB_MEM = 16384, FB_STALE = 32768, FB_RAND = 65536 };
+enum { FB_NBITS = 17 };
 static unsigned s_types = 0xFu;   /* (deck) J204_TYPES=<mask>: job types the native takes (bit t = type t; default 0xF = 0..3, 0x5 = only 0 and 2 as before 2026-11-18) */
 
 typedef struct {
@@ -98,11 +99,10 @@ typedef struct {
     uint8_t* cb;
     /* job scratch (LS 0x27000) */
     u128 prevM[4], op5cache, tex[16], box[2];
-    /* D6D8's stack quad sp+0x30 (main's sp - 0x210): slot 12 rewrites only
-     * its x, so y..w are what 7C18's prologue last saved there (main's r112,
-     * the r10 it was called with) or, before that, what the LS held */
-    u128 stk, r10;
-    uint32_t stk_ls;
+    /* The type-0 handler's (0x11580) stack quad sp+0x30 = main's sp - 0x210: slot 12 rewrites only its x, so y..w
+     * are what 0x7C58's prologue saved there just before (main's r112, see r112_at_7C58) */
+    u128 stk;
+    u128 r112;         /* (deck) main's r112 in the current range (r112_at_7C58) */
     uint8_t texon[16], need_mat;
     uint32_t vfmt, streams[3], stencil, tex194;
     /* (deck) types 1 and 3 */
@@ -605,7 +605,7 @@ static void f_overlap(J* j, const u128 M[4], const uint8_t* rec)
 /* D6D8 0xDAB0..0xE0B0: per-object vectors from E, H and IN by slots 12, 4, 17, 13, 14 */
 static void f_side(J* j, const uint8_t* E, const uint8_t* H)
 {
-    if (SLOT(12) >= 0) {                               /* E[2]/64 in x; y..w left in the stack quad */
+    if (SLOT(12) >= 0) {                               /* E[2]/64 in x; y..w left in the stack quad (j->stk, set before f_7C18) */
         j->stk._u32[0] = spu_csflt(SPLW(E[2]), 149)._u32[0];
         emit_v(j, SLOT(12), j->stk);
     }
@@ -872,11 +872,37 @@ static void precheck(J* j, uint32_t type, int mat_on)
         static const int ks[] = { 43, 45, 7, 6, 5, 9, 8 };
         for (unsigned i = 0; i < sizeof ks / sizeof *ks; i++) if (SLOT(ks[i]) >= 0) j->fallback |= FB_SIDE;
         if (IN1[0xD4] ? 1 : IN1[0x17A]) j->fallback |= FB_FPUPLOAD;
+        /* (deck) slot 12's y..w are main's r112 as 0x7C58's prologue saved it for this object; without that call
+         * (no material ops) they are whatever an earlier callee left on the stack there: not modelled */
+        if (SLOT(12) >= 0 && !(mat_on && (int32_t)R32(IN1 + 0xC0) > 0)) j->fallback |= FB_SIDE;
     }
     if (type == 1) {      /* (deck) 0x10E48: slot 6 (0x11080) and 8, 9 (0xA4A8) unmodelled, 0x62F0 as in type 0 */
         if (SLOT(6) >= 0 || SLOT(8) >= 0 || SLOT(9) >= 0) j->fallback |= FB_SIDE;
         if (IN1[0xD4] ? 1 : IN1[0x17A]) j->fallback |= FB_FPUPLOAD;
     }
+}
+
+/* main's per-item filter (0x13240..0x13368): 1 = the item is skipped */
+static inline int item_reject(J* j, const uint8_t* E, const uint8_t* H)
+{
+    const uint32_t ew0 = R32(E), hw0 = R32(H);
+    return ((hw0 & 0x40000000) && IN[0x151]) || (hw0 & 0x80000000) || (ew0 & 0x08000000) ||
+           (IN1[0x0A] && ((ew0 >> 5) & 7) != R32(IN2 + 4));
+}
+/* (deck) An item's 16-byte E record as main holds it in r112 once it fetched the item's material (0x1346C, rotqbyi
+ * 12: E+12 (the material EA), E+0, E+4, E+8). */
+static inline u128 rot12(const uint8_t* E) { return V4(R32(E + 12), R32(E), R32(E + 4), R32(E + 8)); }
+/* (deck) j->stk = main's r112 when it calls 0x7C58 for item k, which that call's prologue saves at main's sp - 0x210,
+ * the type-0 handler's slot 12 quad. r112 is zero at the range's start (0x1311C) and becomes rot12(E) of each item whose
+ * material main fetches (a passing item whose material EA differs from r112's x, 0x133A8). main's loop is pipelined:
+ * it filters item k+1 and fetches its material (0x13130..0x13584) before it processes item k, so item k+1 counts. */
+static __attribute__((noinline)) void r112_at_7C58(J* j, const uint8_t* items, uint32_t k, uint32_t cnt)
+{
+    j->stk = j->r112;
+    if (k + 1 >= cnt) return;
+    const uint8_t* E1 = G(j, R32(items + 8 * (k + 1)), 16);
+    const uint8_t* H1 = G(j, R32(items + 8 * (k + 1) + 4), 48);
+    if (!item_reject(j, E1, H1) && R32(E1 + 12) != j->r112._u32[0]) j->stk = rot12(E1);
 }
 
 /* The job's main, 0x12C50. */
@@ -888,6 +914,9 @@ static void run(J* j)
                        S16(IN1 + 0xA8) >= 0 || S16(IN1 + 0xAC) >= 0 || S16(IN1 + 0xAA) >= 0 ||
                        S16(IN1 + 0xAE) >= 0 || S16(IN1 + 0xB0) >= 0;
 
+    /* (deck) IN2+0xC nonzero: main also drops each item with probability IN2[0xC] / 1025 (0x13CFC: the LCG at 0x19490,
+     * its state in the module's LS); not modelled */
+    if (R32(IN2 + 0xC)) { j->fallback |= FB_RAND; return; }
     /* 0x4328: range selection */
     uint32_t cur = R32(G(j, R32(IN + 4), 4));
     uint32_t n = (uint32_t)((int32_t)(cur - R32(IN + 0)) >> 9);
@@ -928,13 +957,12 @@ static void run(J* j)
         if (j->fallback) return;                /* the zero stand-in is smaller than a range can be */
         uint32_t cnt = (re[r] - rb[r]) >> 3; j->nitems += cnt; j->nrange++; j->lastcnt = cnt;
         uint32_t last_mat = 0; const uint8_t* old_mat = 0; const uint8_t* mat = 0;
+        j->r112 = SPLW(0);                      /* (deck) main's r112: rot12 of the last item whose material it fetched */
         int pend = -1, pend_t = 0; j->lt = 0; j->wo = 0;       /* the tag of the last wait of the lifted pipeline (see j204_main) */
         for (uint32_t k = 0; k < cnt; k++) {
             const uint8_t* E = G(j, R32(items + 8 * k), 16);
             const uint8_t* H = G(j, R32(items + 8 * k + 4), 48);
-            uint32_t ew0 = R32(E), hw0 = R32(H);
-            int reject = ((hw0 & 0x40000000) && IN[0x151]) || (hw0 & 0x80000000) || (ew0 & 0x08000000) ||
-                         (IN1[0x0A] && ((ew0 >> 5) & 7) != R32(IN2 + 4));
+            const int reject = item_reject(j, E, H);
             /* the lifted loop waits item k's instance tag, then the data tag of the previous passing item */
             j->lt = k % 3; j->wo = 0;
             if (pend >= 0) { j->lt = pend % 3; j->wo = pend_t; }
@@ -950,7 +978,7 @@ static void run(J* j)
                 if (j->fallback) return;
             }
             int changed = 0;
-            if (mat_on && R32(E + 12) != last_mat) { mat = G(j, R32(E + 12), matsz); last_mat = R32(E + 12); changed = 1; }
+            if (mat_on && R32(E + 12) != last_mat) { mat = G(j, R32(E + 12), matsz); last_mat = R32(E + 12); changed = 1; j->r112 = rot12(E); }
             const uint8_t* rec = G(j, R32(E + 4) & ~15u, 0xB0);
             const uint8_t* T = G(j, R32(H + 0x14) + 48 * R16(E + 8), 48);
             const uint8_t* S = G(j, R32(H + 0x1C) + 64 * R16(E + 10), 64);
@@ -960,7 +988,12 @@ static void run(J* j)
             if (j->fallback) return;
             if (mat_on) {
                 if (changed) { f_143F0(j, mat); f_15E78(j, mat, old_mat); old_mat = mat; }
-                if ((int32_t)R32(IN1 + 0xC0) > 0) { j->stk = j->r10; f_7C18(j, mat, E, extra, nx); }
+                if ((int32_t)R32(IN1 + 0xC0) > 0) {
+                    /* (deck) no material fetched in this range yet (its EA 0): 0x7C58 reads a stale LS buffer */
+                    if (!mat) { j->fallback |= FB_STALE; return; }
+                    if (type == 0 && SLOT(12) >= 0) r112_at_7C58(j, items, k, cnt);
+                    f_7C18(j, mat, E, extra, nx);
+                }
             }
             u128 M[4]; object_matrix(j, M, rec, T, S);
             if (type == 0) {
@@ -1013,8 +1046,6 @@ static void job_init(J* j, spu_context* ctx)
     uint32_t in = ctx->gpr[3]._u32[0] & SPU_LS_MASK & ~15u;
     if (in > SPU_LS_SIZE - 0x520) { j->fallback |= FB_EA; in = 0; }
     j->IN = ctx->ls + in; j->IN1 = j->IN + 0x380; j->IN2 = j->IN + 0x500;
-    j->stk_ls = (ctx->gpr[1]._u32[0] - 0x970u) & SPU_LS_MASK & ~15u;
-    j->stk = LQ(ctx->ls + j->stk_ls); j->r10 = ctx->gpr[10];
 }
 
 static _Thread_local J* t_j;
@@ -1068,27 +1099,28 @@ static int j204_main(spu_context* ctx)
     job_init(j, ctx);
     run(j);
     const unsigned long long t_b = s_stats_on ? __builtin_ia32_rdtsc() : 0;
-    if (s_dbg) fprintf(stderr, "[j204] D draws %u items %u ranges %u lastcnt %u type %u fb %X\n", j->rec[2], j->nitems, j->nrange, j->lastcnt, R32(j->IN1 + 4), j->fallback);
+    if (s_dbg) fprintf(stderr, "[j204] D draws %u items %u ranges %u lastcnt %u type %u fb %X s12 %d nops %d rnd %u\n", j->rec[2], j->nitems, j->nrange, j->lastcnt, R32(j->IN1 + 4), j->fallback,
+                       S16(j->IN1 + 0x110 + 2 * 12), (int32_t)R32(j->IN1 + 0xC0), R32(j->IN2 + 0xC));
     /* (deck) J204_STATS=<n>: every n calls, how many the native declined and why (the FB_* bits) */
     static int s_stats = -1;
-    static unsigned s_why[16], s_calls, s_decl;
+    static unsigned s_why[FB_NBITS], s_calls, s_decl;
     if (__builtin_expect(s_stats < 0, 0)) { const char* e = getenv("J204_STATS"); s_stats = e ? atoi(e) : 0; s_stats_on = s_stats > 0; }
     if (s_stats) {
         const unsigned n = __atomic_add_fetch(&s_calls, 1, __ATOMIC_RELAXED);
         static unsigned s_type[34];   /* FB_TYPE declines by job type (33: N <= 0 of a split range) */
-        static unsigned s_dty[5][16], s_cty[5];   /* (deck) calls and declines by reason, per job type (4: 4 and up) */
+        static unsigned s_dty[5][FB_NBITS], s_cty[5];   /* (deck) calls and declines by reason, per job type (4: 4 and up) */
         { const uint32_t ty = R32(j->IN1 + 4) < 4 ? R32(j->IN1 + 4) : 4;
           __atomic_add_fetch(&s_cty[ty], 1, __ATOMIC_RELAXED);
-          for (int i = 0; i < 16; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_dty[ty][i], 1, __ATOMIC_RELAXED); }
+          for (int i = 0; i < FB_NBITS; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_dty[ty][i], 1, __ATOMIC_RELAXED); }
         if (n % (unsigned)s_stats == 0)
             for (int t = 0; t < 5; t++) {
                 fprintf(stderr, "[j204] type %d%s: %u calls, declined by reason:", t, t == 4 ? "+" : "", s_cty[t]);
-                for (int i = 0; i < 16; i++) if (s_dty[t][i]) fprintf(stderr, " bit%d=%u", i, s_dty[t][i]);
+                for (int i = 0; i < FB_NBITS; i++) if (s_dty[t][i]) fprintf(stderr, " bit%d=%u", i, s_dty[t][i]);
                 fputc('\n', stderr);
             }
         if (j->fallback) {
             __atomic_add_fetch(&s_decl, 1, __ATOMIC_RELAXED);
-            for (int i = 0; i < 16; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_why[i], 1, __ATOMIC_RELAXED);
+            for (int i = 0; i < FB_NBITS; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_why[i], 1, __ATOMIC_RELAXED);
             if (j->fallback & FB_TYPE) {
                 const uint32_t ty = R32(j->IN1 + 4);
                 __atomic_add_fetch(&s_type[ty == 0 || ty == 2 ? 33 : ty < 32 ? ty : 32], 1, __ATOMIC_RELAXED);
@@ -1112,7 +1144,7 @@ static int j204_main(spu_context* ctx)
             fprintf(stderr, "[j204] native run: %.1f kcycles per accepted call; ", s_tsc_n ? s_tsc_run / 1000.0 / s_tsc_n : 0.0);
             (void)s_tsc_all;
             fprintf(stderr, "[j204] %u calls, declined %u:", n, s_decl);
-            for (int i = 0; i < 16; i++) if (s_why[i]) fprintf(stderr, " bit%d=%u", i, s_why[i]);
+            for (int i = 0; i < FB_NBITS; i++) if (s_why[i]) fprintf(stderr, " bit%d=%u", i, s_why[i]);
             fputc('\n', stderr);
         }
     }
@@ -1188,13 +1220,10 @@ static int j204_main(spu_context* ctx)
     }
     /* what the lifted main leaves in the local store and no later code reads: its callees' frames,
      * the scratch buffers, the atomic line. (deck) out+0x20..0x7F is left as the job leaves it (j->img) and
-     * compared; the block buffers too for types 1 and 3 (each block staged in its own LS buffer). Types 0/2
-     * keep them dead: SLOT(12)'s y..w (f_side) are the stack quad 0x7C58's prologue saves (main's r112 =
-     * the current range's quad of main's range array, rotated), which the model does not have; a data word
-     * that looks like a JUMP ends the replay's block compare before them. */
+     * compared, and so are the block buffers out+0x80..0x2080 for every type (each block is staged in the LS
+     * buffer the job builds it in). */
     if (replay) {
         const uint32_t sp = ctx->gpr[1]._u32[0] & SPU_LS_MASK;
-        if (R32(j->IN1 + 4) != 1 && R32(j->IN1 + 4) != 3) spu_native_dead_ls(out + 0x80, out + 0x2080);
         spu_native_dead_ls(sp - 0x1800, sp);
         spu_native_dead_ls(0x80, 0x100);
         spu_native_dead_ls(0x19AC0, 0x19AE0);   /* the staging quads of the two-vector constant burst (0x16A54) */

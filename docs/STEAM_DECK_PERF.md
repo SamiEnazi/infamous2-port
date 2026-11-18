@@ -110,7 +110,8 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
 
 | Commit | Change | Measured |
 |---|---|---|
-| (next) | job 204 native: types 1 and 3 (sub-draw lists 0x69B0, type 1 slots 5/7), `J204_TYPES` switch, `PS3_JOBREPLAY_FULLPUT` | SPU -1.1%, fps +0.55% |
+| (next) | job 204 type 0 fix: SLOT(12) lanes y..w were wrong in 231 of 517 slot-12 calls of rec-204b (also in the installed build); block buffers compared for every type; FB_RAND / FB_STALE guards | exact; replay time unchanged |
+| 0183e2a | job 204 native: types 1 and 3 (sub-draw lists 0x69B0, type 1 slots 5/7), `J204_TYPES` switch, `PS3_JOBREPLAY_FULLPUT` | SPU -1.1%, fps +0.55% |
 | b653037 | J204_STATS by job type | (tools) |
 | 6b300ea | job 204 output PUTs via the lean DMA path; J204_STATS cycles; DMASTAT_OVL | small |
 | 89e52ae | in-game "Far shadow detail" (`PS3RECOMP_SHADOW_LOD`, job 210 far cascade K.y x20) | RSX -12%, fps +2-3% |
@@ -130,6 +131,10 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
 * Packed key arrays for the index / vertex caches: RSX +1 ms (an unprefetched miss in front of the
   prefetched entry). Tag arrays for the descriptor-set memo / table: no gain.
 * `PS3RECOMP_NATIVE_J220=1` (exact BSP native): no gain live.
+* Job 204 SLOT(12) root cause (for the record): main (0x12C60) calls 0x7C58 per passing object, whose prologue
+  saves main's r112 at main sp-0x210 = the type 0 handler 0x11580's sp+0x30, which slot 12 loads (only x
+  inserted). r112 = rotqbyi(E,12) of the last fetched material; the item loop is pipelined, so item k sees item
+  k+1's quad. The native had read entry sp-0x970 / r10.
 * Job 204 type 4 natively: ~6,000 instructions of handler for 1.2% of job 204 calls -- not worth it (2026-11-18).
 * `SPU_LIFT_XFN_BI` (cross-function const `bid/bie` as tail calls): -35..40% fps measured upstream.
 * Huge pages: guest memory already mostly THP; TLB misses < 1% of cycles.
@@ -141,11 +146,17 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
 
 ## 6. Next candidates (expected gain, effort)
 
-1. FIRST (correctness, also in the installed build): job 204 type 0 writes a wrong f_side SLOT(12) constant
-   (lanes y..w) in ~4% of type 0 calls: the lifted value is main's r112 quad (the current range's entry of
-   main's range array, saved by 0x7C58 at main sp-0x210); the native reads entry sp-0x970 and uses r10. The
-   replay's block compare stopped at data words that look like a JUMP and hid it; `PS3_JOBREPLAY_FULLPUT=1`
-   shows it (rec-204b/sel0: 74 of 900 fail). Fix, then run every job 204 replay with FULLPUT=1.
+0. (player's request, 2026-11-18, next agent after the job 204 fix) Test upstream v0.6.x separately: upstream
+   (origin = SamiEnazi/infamous2-port) went v0.5.7 (our base, a9716880) -> v0.6.0/0.6.1/0.6.2 (f746fc6): 171 files,
+   +21.9k lines; claims +30% fps at 4 cores / 8 threads and +75% at 4c/4t on an i5-13600K (desktop, Windows), slowest
+   1% not better. It includes a native WWS job manager (engine/libs/spurs/wws_runner.c, wws_native.c, wws_njob.c),
+   native jobs 208/209/210 + cull_core.h, native_218.c, spu_avx2.h, inf2_dlogic.c, vm_guard.c, sharper shadows
+   (rsx_shadow_res.inc), MSAA (off by default). Plan: separate worktree + build dir; add only our measurement commit
+   (cb44e50's engine part: frame-stepped clock, thread names, DMASTAT) so the det bench applies; same plaza, same
+   player settings, GPU 1200; compare against the dev build (and the installed 4cabf54). If upstream is clearly
+   faster on the Deck, move the Deck work onto upstream (our natives 204/210/218/220/223 vs theirs: keep the faster
+   exact one per job).
+
 2. Job 204 remaining declines (5.5% of calls, t13d): type 4 (18.7k per run, handler ~3,650 instructions + ~2,600
    in callees: poor value), type 1 slots 6/8/9 (5.9k; 0x11080 sRGB->linear pow 2.4 and 0xA4A8), FB_STALE (material
    reads past the fetched material, 14.7k type 0 + 10.9k type 1 + 6k type 2), FB_FPUPLOAD 26.6k, FB_OP11B 20.7k.
