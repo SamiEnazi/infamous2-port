@@ -82,6 +82,19 @@ void ps3_module_run_ctors(void);   /* ps3_module_crt_win.c */
 #  define MODULE_INIT 0      /* Linux: the dynamic linker ran the constructors; single exe: the CRT did */
 #endif
 
+#if defined(PS3_MODULE_PGO_GEN) && !defined(_WIN32) && !defined(PS3_MODULE_STATIC)
+/* (deck-merge) Linux PGO training module: the profile runtime (libclang_rt.profile.a) registers its writer with
+ * atexit, which glibc keeps in libc_nonshared.a (each binary links its own copy, hidden: it passes that binary's
+ * __dso_handle), so the module, linked without the C library, failed to load ("undefined symbol: atexit"). The
+ * same three lines here; __dso_handle is the one lld defines for this module. */
+extern char __dso_handle[];
+int __cxa_atexit(void (*fn)(void*), void* arg, void* dso);
+__attribute__((visibility("hidden"))) int atexit(void (*fn)(void))
+{
+    return __cxa_atexit((void (*)(void*))fn, 0, __dso_handle);
+}
+#endif
+
 #if defined(PS3_MODULE_PGO_GEN)
 int __llvm_profile_write_file(void);
 void __llvm_profile_set_filename(const char*);
