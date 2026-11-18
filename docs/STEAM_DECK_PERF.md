@@ -10,31 +10,36 @@ and put the player's clock back afterwards.
 
 ## 1. Where the frame goes (umbrella plaza, spot-2 save, player's settings)
 
-Measured with the deterministic benchmark (section 3), dev build 6b300ea, ~42 fps:
+Measured with the deterministic benchmark (section 3) on the merged build mgPr (1f22354 + mg1r PGO), 48.9 fps
+(ab4), 2026-11-18 (agent rsx1; raw data in work/bench/NOTES.md):
 
 | Part | Busy | Time per frame | Notes |
 |---|---|---|---|
-| Graphics thread (`ps3-rsx`: GCM FIFO -> Vulkan) | 88-91% of a CPU | ~21.4 ms | co-limits the frame |
-| SPU job threads (`ps3-spu0..5`) | ~400% of a CPU | ~96 ms | co-limits the frame |
-| Main PPU thread (process thread) | ~78% of a CPU | ~19 ms | caps ~50 fps later |
-| GPU (1200 MHz) | ~60% | ~15.3 ms | not limiting |
-| APU power | 14.5-15.3 W | | at the 15 W cap: CPU clock ~2.9 GHz |
+| Graphics thread (`ps3-rsx`: GCM FIFO -> Vulkan) | ~95% of a CPU | 19.5 ms | the limit; 2.56 us per draw at ~7,600 draws |
+| Main PPU thread (process thread; runs jobs in its waits) | ~91% of a CPU | 18.7 ms | next limit (95% once the RSX thread is faster) |
+| Job pool (`ps3-spuj0..3`, 4 threads) + SPU threads | ~350% of a CPU | 71.1 ms | pool 75-84% busy: not limiting |
+| GPU (1200 MHz) | 66-79% | 15.1 ms | not limiting (17.4 ms with the player's 17:42 settings: aniso 16, soft shadows 2) |
+| APU power | 14.6 W | | at the 15 W cap |
 
-Both the graphics thread and the SPU side are at the frame limit; speeding up only one of them barely moves
-fps (example: "Far shadow detail: Reduced" cuts the graphics thread 12% but fps only +2-3%, the SPU side
-then limits). 60 fps needs every part about a third faster at the same 15 W.
+Job time per frame (runner stats, 70.5 ms): 223 Edge 15.6, 218 animation 14.2, 204 render lists 11.6 (504 jobs x
+23 us), 220 BSP 8.5, 213 5.0, 216 3.3, 210 2.9, 201 2.6, the rest < 1.4 each.
 
-SPU time by job (JOBSTAT, player settings): 218 animation 17.6%, 204 render-list builder 17.5%, 223 Edge
-geometry 16.0%, 220 BSP/collision 11.9%, 210 culling 11.0%, 213 7.4%, 211 3.6%, 216 3.4%, 201 3.0%.
-SPU time by kind (perf, default settings): runtime overhead ~22% (DMA ~12%, indirect branches ~6%,
-coherency/lock-line ~2%), WWS job manager ~6.6%, the rest job code (natives and lifted).
-~65,000 DMA commands per frame, average ~200-350 bytes, ~690 TSC cycles each (mostly cache misses on the
-source data). Job 204: ~500 calls/frame, ~36 us wall each: native body ~10 us, publish ~1.5 us, the 8.6%
-declined calls ~6.5 us average, the rest wrapper + job manager.
+Graphics thread (perf, 19,703 samples on `ps3-rsx`): engine 74.3%, RADV 17.3%, libc 8.1%. Per draw: FIFO walk +
+method dispatch ~0.49 us (rsx_dispatch.c 13.6%, cellGcmSys.c 5.7%), draw engine ~0.97 us (sink_end_body 24.3% with
+dc_fetch / index-cache probe / textures / delta engine inlined, vertex fetch 4.75%, delta 5.6%), our Vulkan backend
+~0.39 us (vk_eng_draw_ex_body + set memo 10.9%), RADV ~0.44 us (draw-time state flush 2.0% + vkCmdDrawIndexed 1.5% +
+vkUpdateDescriptorSets 1.8% (~780 new sets a frame) + vkCmdBindPipeline 0.9% + small helpers), libc ~0.21 us (memcpy
+5.2%: VS constant rows into the uniform arena 1.5%, staged vertices / indices 1.4%; memcmp 2.3%: delta and set keys).
+Hottest single line: the index-cache probe's key compare (2.0%, a miss: the successor prefetch is right for only 57%
+of probes, because several passes draw the same index lists). Vulkan calls per frame: one vkCmdBindDescriptorSets
+per draw (two dynamic offsets), ~700 vertex / 150 index buffer binds, ~415 pipeline binds, ~770 descriptor sets made.
 
-Graphics thread (perf, player settings): engine 75%, RADV (Mesa) 16.5%, libc 8%; `sink_end_body` 17.6%,
-`vk_eng_draw_ex_body` 10.4% (memo / descriptor-set / texture table cache misses), vertex fetch 8.3% (fixed,
-see below), dispatch 6.4%, FIFO walk 5.2%. ~2.8 us per draw, ~7,600 draws per frame.
+Found with this breakdown: under the player's 16:10 picture (PS3_ASPECT_HUD_AFTER set by the port) the short tail
+for repeated draws (rsx_draw_fast.inc, ~78% of draws at 16:9) was off for every draw; mgPr and every det bench so far
+ran the long tail. Fixed behind `PS3RECOMP_ENG_FASTDRAW_HUD` (section 4 / 6).
+
+(Old build 6b300ea, ~42 fps: graphics thread 21.4 ms, SPU threads ~96 ms, main ~19 ms, GPU 15.3 ms; both the
+graphics thread and the SPU side were at the limit then.)
 
 ## 2. Results so far (det bench, player settings, plaza)
 
@@ -50,6 +55,8 @@ see below), dispatch 6.4%, FIFO walk 5.2%. ~2.8 us per draw, ~7,600 draws per fr
 | ... same batch: dpNP (deck-perf, no PGO) / t13g | 38.33 / 42.13 | 23.3 / 21.0 ms | 103.9 / 95.8 ms |
 | **Merged + new PGO (mgPr, 1f22354)**, `ab4` 8 rounds | **48.90** | 19.5 ms | 71.1 ms |
 | ... same batch: mgP (training-only profile) / mg (no PGO) / t13g | 49.14 / 42.52 / 41.76 | 19.3 / 22.4 / 21.1 ms | 72.4 / 75.0 / 96.9 ms |
+| mgPr + short tail at 16:10 (`PS3RECOMP_ENG_FASTDRAW_HUD`, 04ddd13, rsx1fdf), `rb4`+`rb5` (player's settings of 17:42: aniso 16, soft shadows 2; GPU 17.4 ms) | **49.75** | 18.87 ms | 74 ms |
+| ... same batches: mgPr | 48.03 | 19.61 ms | 73 ms |
 
 Real clock, standing at spot 2 (player's settings with the 60 fps cap, GPU 1400): mgPr 57.84 fps over 30 min (5-min
 buckets 57.5-58.3, p99 19.4-19.8 ms, 17 frames > 33 ms, none > 50 ms, worst 38 ms); t13g 48.16 fps over 15 min (p99
@@ -142,6 +149,17 @@ wanted by the player: the busy street of their current save, walking to the cath
   > 50 ms frames of those runs come after the divergence): run more rounds and discard by draws.
 * Shell pitfall: never `pkill -f` / `pgrep -f` a pattern that also appears in the waiting command itself
   (it matches its own shell). Wait on a file's line count instead.
+* Merged builds in the dev tree (2026-11-18, rsx1): `work/bench/abx.sh <rounds> "<label>=<exe dir>[|ENV=V ...]" ...`
+  (sandbox env work/bench/mgenv.txt -> D/work/sandbox, 4 pool threads, per-label env; recordings `$PREFIX-<label>-<n>`;
+  waits while the orchestrator's game.lock exists), `detprof-mg.sh` (PMODE=all whole game, PMODE=rsxcg the RSX thread
+  with DWARF stacks; perf 7.1.4's libdw unwinder fails on most samples here: use inline chains via llvm-symbolizer),
+  `abtable.py` with `DROPCPU=""`. Always pass EXE / an exe dir: detbench / abrun default to the player's install.
+  `--only engine` builds into PORT_ENGINE_BUILD (default work/port/build, not PORT_BUILD): set it per build dir.
+  The det bench copies the player's current settings.ini: when the player changes settings, compare only within a batch.
+* PGO-safe edits: a change to a function's control flow (a branch, a loop, a select) drops its profile; small static
+  functions are inlined into their callers before instrumentation, so e.g. any edit of dl_scan / eng_ic_probe changes
+  sink_end_body's hash (the build prints "PGO: N function(s) changed"). New work in a `noinline` function called from
+  the hot code keeps the caller's hash (a direct call adds no edge).
 
 ### Acceptance rules (every change, agreed with the player 2026-11-18)
 
@@ -160,6 +178,7 @@ wanted by the player: the busy street of their current save, walking to the cath
 
 | Commit | Change | Measured |
 |---|---|---|
+| 04ddd13 | short tail for repeated draws also in a wide picture with the HUD pinned (`PS3RECOMP_ENG_FASTDRAW_HUD`, default 1): under the player's 16:10 it was off for every draw (rsx_draw_engine.c eng_fd_hud_note, rsx_draw_fast.inc fd_takes) | `rb3` 7 rounds (switch off / on, same binary): RSX 19.63 -> 18.59 ms/frame (2.57 -> 2.45 us per draw), **fps 48.44 -> 50.40**, p99 24.2 -> 23.3; final binary vs mgPr (`rb4`+`rb5`, 7 / 6 clean): RSX 19.61 -> 18.87, fps 48.03 -> 49.75, p99 24.6 -> 23.5, > 33 ms 2.7 -> 1.0 per run; exact (VERIFY=2: 13 M draws, 0 differences); main thread now co-limits; the short tail is still cold in the mg1r profile (retrain) |
 | 1f22354 | merge of deck-merge: upstream v0.6.2 (native WWS job runner, whole-job 208/209/210, their 218) + 0381235 Linux PGO-gen module atexit, 60870c0 4 pool threads, 865ef66 `J218_PICK=ttt`, 36b24fb static TLS, f9bbfd8 pool names, b529db1 Far shadow in their 210, 5dfb0b2 TLS scratch; new profiles mg1r | **48.90 vs 41.76 fps (+17.1%)**, RSX -1.6, SPU -26 ms/frame, p99 23.8 vs 27.4; exact |
 | 56427dc | job 204 type 0 fix: SLOT(12) lanes y..w were wrong in 231 of 517 slot-12 calls of rec-204b (also in the installed build); block buffers compared for every type; FB_RAND / FB_STALE guards | exact; replay time unchanged |
 | 0183e2a | job 204 native: types 1 and 3 (sub-draw lists 0x69B0, type 1 slots 5/7), `J204_TYPES` switch, `PS3_JOBREPLAY_FULLPUT` | SPU -1.1%, fps +0.55% |
@@ -194,14 +213,37 @@ wanted by the player: the busy street of their current save, walking to the cath
   Higher clocks take power from the CPU (at 1400 the RSX thread needs 23.2 ms and the SPUs 105 ms per frame,
   at 1000 20.7 and 95.6). Recommended: manual 1000-1100 MHz. Benchmarks stay at 1200 for comparability.
 * Lower scheduling priority for the SPU threads (renice +3): no effect.
+* `PS3RECOMP_ENG_PREFETCH_PATH` (2026-11-18, rsx1; patch work/bench/rsx1-engine-all.patch): prefetching the index /
+  vertex cache probe's slots in front of the predicted entry. Det A/B `rb3` with the short tail on: RSX 18.77 vs 18.59
+  ms/frame, fps 49.80 vs 50.40 (not better). Why: only ~10% of probes find their entry off its home slot, and the
+  successor link is right for only 57.5% of probes (DBG_ICSTATS: several passes draw the same index lists, so an entry's
+  successor flips). A better predictor (two successors per entry, or per-frame sequence) is the open idea, not this.
+* Per-draw descriptor-set bind / push constants bound (2026-11-18, rsx1): leaving the fast record's
+  vkCmdBindDescriptorSets out entirely (`PS3RECOMP_DBG_FD_NOBIND`, measurement only, wrong pictures) saved ~0.7 ms of
+  19 ms (one clean pair). Push constants (item 4) would keep a per-draw constant flush, so < ~0.5 ms: not worth the
+  shader-generator change on its own.
 
 ## 6. Next candidates (expected gain, effort)
 
-Order after the merge (2026-11-18): the merged build is RSX-thread bound (~95% of a CPU, pool threads 75-78%), so
-(a) a fresh "where the frame goes" breakdown on mgPr (section 1 is from the old build), then (b) RSX-thread work
-(item 4 push constants, item 6, new hot spots), then (c) SPU leftovers: job 223 Edge (~19 ms/frame, now the biggest
-job), 218, 204 declines (item 2), 220 / 213 / 216; (d) Edge on GPU only with a new idea (section 5); (e) main thread,
-GPU / power. Items 0, 1, 1b and 3 are done.
+Order after the RSX breakdown (2026-11-18, rsx1; target: a stable 60 fps, i.e. ~1.6-1.7 us of RSX thread per draw at
+9,000 draws, now 2.45 us at the plaza). With the short tail working at 16:10 (section 4) the RSX thread and the main
+thread are both at ~95%: RSX work alone no longer moves fps much; the main thread (PPU + jobs run in its waits) needs
+its own breakdown. RSX candidates ranked by per-draw saving (plaza, ~7,600 draws; 1% of the thread = ~0.025 us):
+
+| # | Candidate | Expected per draw | Effort | Notes |
+|---|---|---|---|---|
+| R1 | PGO retrain with the short tail on (mg2 profiles) | 0.05-0.15 us | medium (training runs, 2 builds) | fd_draw / vk_fd_record / the again path have ZERO counts in mg1r (trained at 16:10 with the short tail off): now ~80% of draws run cold code; also needed by R4 |
+| R2 | Constants by draw index + multi-draw (no per-draw set bind; consecutive draws with one pipeline and set as one vkCmdDrawMultiIndexedEXT) | 0.1-0.25 us | large (VS / FS read constants at a draw-indexed base; Vulkan-only HLSL path; shader cache key) | RADV is 0.44 us per draw: draw-time flush 2.0% + DrawIndexed 1.5% + set bind; the NOBIND bound alone is ~0.09 us |
+| R3 | Index-cache successor prediction with two successors per entry (or a per-frame sequence) | 0.02-0.04 us | small (noinline helper, PGO-safe; 56 B of padding free in eng_ic_entry) | probe misses 2.0% + 0.6%: only 57.5% of links are right |
+| R4 | dl_scan with AVX2 compares (work/bench/rsx1-dlscan-simd.patch, `PS3RECOMP_ENG_DELTA_SIMD`) | ~0.04 us | small, but changes sink_end_body's PGO hash: needs R1 | rsx_draw_delta.inc:293-298 ~2% of the thread |
+| R5 | Persistent descriptor sets across frames (or vkUpdateDescriptorSetWithTemplate) | 0.03-0.08 us | medium (lifetime of views / samplers / arena buffers) | ~770 sets made and written per frame: vkUpdateDescriptorSets 1.8% + alloc 0.2% + our set building ~1% |
+| R6 | Fetch vertices straight into the arena (no staging memcpy) | ~0.03 us | medium | memcpy of staged vertices / indices 1.4% |
+| R7 | Push constants for the per-draw offsets (item 4) | < 0.06 us | large | bounded by NOBIND (section 5) |
+
+Item 6 (graphics thread +1.4% with t13d / `J204_TYPES`): the rb0 A/B for it was cut short (mgPr install) and 5 of 8
+runs left the route; still open (cheap: mgPr vs mgPr `J204_TYPES=0x5`, >= 4 clean rounds). Then (c) SPU leftovers:
+job 223 Edge (15.6 ms/frame, the biggest job), 218, 204 declines (item 2), 220 / 213 / 216; (d) Edge on GPU only with
+a new idea (section 5); (e) main thread (now co-limiting), GPU / power. Items 0, 1, 1b and 3 are done.
 
 0. (player's request, 2026-11-18, next agent after the job 204 fix) Test upstream v0.6.x separately: upstream
    (origin = SamiEnazi/infamous2-port) went v0.5.7 (our base, a9716880) -> v0.6.0/0.6.1/0.6.2 (f746fc6): 171 files,
@@ -325,7 +367,7 @@ GPU / power. Items 0, 1, 1b and 3 are done.
    Details of the handlers and of 0x69B0 / 0x4740 / 0x5F38: work/bench/NOTES.md (2026-11-18 entries).
 3. (superseded by 1b on deck-merge) PGO profile is stale: 13 hot functions now compile without profile data (job 218 blend_group, job 204 run /
    publish / emit_vec, j210_walker, f_7C18). Retrain (work/bench/pgotrain3.sh, new profile file name) and A/B.
-4. Graphics thread: per-draw constant offsets as push constants (descriptor set only rebound when textures
+4. (bounded 2026-11-18 by NOBIND, section 5: < ~0.5 ms of 19; see R2 / R7 above) Graphics thread: per-draw constant offsets as push constants (descriptor set only rebound when textures
    change): estimate revised to ~3% RSX (RADV already passes dynamic UBO offsets through its push-constant
    area, so the saving is only the bind/flush difference). Needs the HLSL generators (rsx_vp_decompiler.c
    emits `vp_c[(N + aK.c) & 511u]` / `vp_c[N]`, rsx_fp_decompiler.c `fp_constants[N]`, plus vp_posscale,
@@ -333,5 +375,6 @@ GPU / power. Items 0, 1, 1b and 3 are done.
    (rsx_vulkan_backend.c ~3410, bindings VPCONST/PSCONST UNIFORM_BUFFER_DYNAMIC), 7 bind sites and a
    shader-cache key bump. Validate with det-bench screenshots. Low priority for the gain.
 5. Job 218 FK / clip sampler widened like the blend: ~0.5-1% SPU.
-6. Graphics thread +1.4% with t13d (not consistent between batches): check with a longer A/B.
+6. Graphics thread +1.4% with t13d (not consistent between batches): check with a longer A/B (2026-11-18: rb0 cut
+   short, inconclusive; see the table above).
 7. Large, risky: WWS job manager natively (~7% SPU); Edge geometry on the GPU (~16% SPU).
