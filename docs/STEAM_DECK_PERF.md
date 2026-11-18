@@ -109,14 +109,24 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
 * `SPU_LIFT_XFN_BI` (cross-function const `bid/bie` as tail calls): -35..40% fps measured upstream.
 * Huge pages: guest memory already mostly THP; TLB misses < 1% of cycles.
 * Vectorising frest/frsqest: the compiler already uses gathers.
-* GPU clock: 1000-1200 MHz best for this game; 1300+ starves the CPU of power.
+* GPU clock (2026-11-18, player settings, plaza): 1000 MHz 41.8 fps > 1100 41.2 > 1200 40.1 > 1400 38.2.
+  Higher clocks take power from the CPU (at 1400 the RSX thread needs 23.2 ms and the SPUs 105 ms per frame,
+  at 1000 20.7 and 95.6). Recommended: manual 1000-1100 MHz. Benchmarks stay at 1200 for comparability.
+* Lower scheduling priority for the SPU threads (renice +3): no effect.
 
 ## 6. Next candidates (expected gain, effort)
 
-1. Job 204: model the declined object types (FB_TYPE, 5.4% of calls; FB_FPUPLOAD, FB_STALE, FB_OP11B):
-   ~1.5-2% SPU; verifiable by job replay.
+1. Job 204: model the declined object types: FB_TYPE = job types 1, 3, 4 (about equal shares, ~6% of all
+   calls together; the native handles types 0 and 2), plus FB_FPUPLOAD 1.7%, FB_STALE 1.3%, FB_OP11B 1.3%
+   of calls. ~1.5-2% SPU; needs new job 204 recordings with those types for the replay check.
+   Dispatch: type at IN+0x384, jump table LS 0x139A4 (module blob loads at LS 0x4000): type 1 -> 0x13B68,
+   3 -> 0x13C78 (item loop 0xBB60), 4 -> 0x13CB0 (item loop 0xC368); type 2 = 0x13C4C (loop 0xBCD0).
 2. Graphics thread: per-draw constant offsets as push constants (descriptor set only rebound when textures
-   change): ~5-8% RSX; needs the HLSL generators (rsx_vp_decompiler.c `vp_c[]`, rsx_fp_decompiler.c
-   `fp_constants[]`) and pipeline layouts changed; validate with det-bench screenshots.
+   change): estimate revised to ~3% RSX (RADV already passes dynamic UBO offsets through its push-constant
+   area, so the saving is only the bind/flush difference). Needs the HLSL generators (rsx_vp_decompiler.c
+   emits `vp_c[(N + aK.c) & 511u]` / `vp_c[N]`, rsx_fp_decompiler.c `fp_constants[N]`, plus vp_posscale,
+   vp_posoffset, fp_alpha; the same HLSL feeds D3D12/Metal, so Vulkan-only), the guest set layout
+   (rsx_vulkan_backend.c ~3410, bindings VPCONST/PSCONST UNIFORM_BUFFER_DYNAMIC), 7 bind sites and a
+   shader-cache key bump. Validate with det-bench screenshots. Low priority for the gain.
 3. Job 218 FK / clip sampler widened like the blend: ~0.5-1% SPU.
 4. Large, risky: WWS job manager natively (~7% SPU); Edge geometry on the GPU (~16% SPU).
