@@ -201,6 +201,15 @@ export PS3RECOMP_GCM_SPIN_US PS3RECOMP_VK_TQ_SPIN_US PS3RECOMP_VK_PIPE_THREADS P
 # The RSX (draw) thread alone on a core, every other thread on the rest (engine host_place.c, Linux):
 # 30.5 -> 33.0 fps on the Deck, 34.7 with the job 210 native. PS3_CPU_PLACE=0 = the OS decides.
 : "${PS3_CPU_PLACE:=rsxcore}"; export PS3_CPU_PLACE
+# (deck-merge) v0.6's game module (libInfamous2Game.so) has initial-exec thread-locals: glibc needs room for them
+# in its static TLS, else the engine starts itself again through /proc/self/exe with this tunable
+# (runtime/module/ps3_module_host.c) and the process is then called "exe" (pgrep -x Infamous2Recomp, the bench's
+# budget.py and the game-running checks miss it). Set here, the first start already has it.
+case ":${GLIBC_TUNABLES:-}:" in
+    *glibc.rtld.optional_static_tls=*) ;;
+    *) export GLIBC_TUNABLES="${GLIBC_TUNABLES:+$GLIBC_TUNABLES:}glibc.rtld.optional_static_tls=1048576" ;;
+esac
+: "${PS3_STATIC_TLS_RETRY:=1}"; export PS3_STATIC_TLS_RETRY
 # An X screen without DRI3 (a headless machine's dummy screen, some remote desktops): Mesa's GPU drivers
 # can present there only through their software path, else the game falls back to llvmpipe (the CPU).
 if [ -z "${MESA_VK_WSI_DEBUG+x}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && command -v xdpyinfo >/dev/null &&
