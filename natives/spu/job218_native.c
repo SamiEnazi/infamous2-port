@@ -434,8 +434,11 @@ static int j218_blend(spu_context* ctx)
     }
     if (s_check) {
         /* the native into scratch (and the inputs it read as they were), then the lifted function */
-        static _Thread_local uint8_t o[1024 * 192];      /* n <= 4096: at most 1024 groups */
-        static _Thread_local uint8_t w[1024 * 4];
+        /* (deck-merge) on the heap, made at the first check: the module's static TLS has to fit glibc's surplus */
+        static _Thread_local uint8_t* o;                 /* 1024 * 192: n <= 4096, at most 1024 groups */
+        static _Thread_local uint8_t* w;                 /* 1024 * 4 */
+        if (!o && !(o = (uint8_t*)malloc(1024 * 192))) return 0;
+        if (!w && !(w = (uint8_t*)malloc(1024 * 4))) return 0;
         { uint32_t g = 0;
           if (s_wide && s_spec && SPU__RZ_ON)
               for (; g + 1 < groups; g += 2)
@@ -681,7 +684,8 @@ static int root_core(uint8_t* ls, uint32_t a, uint32_t end, const u128 R[4], u12
 
 /* check mode for the function natives: the native on a copy of the LS, the lifted function on the real one,
  * the whole LS compared (the lifted result is kept) */
-static _Thread_local uint8_t t_lscopy[SPU_LS_SIZE + 64];
+static _Thread_local uint8_t* t_lscopy;   /* (deck-merge) SPU_LS_SIZE + 64, made at the first check (module static TLS) */
+#define LSCOPY_OR_DECLINE() do { if (!t_lscopy && !(t_lscopy = (uint8_t*)malloc(SPU_LS_SIZE + 64))) return 0; } while (0)
 static void kcheck(spu_context* ctx, const char* what, int ok, void (*lifted)(spu_context*))
 {
     const u128 r0 = ctx->gpr[0];
@@ -713,6 +717,7 @@ static int j218_fk(spu_context* ctx)
     const uint32_t OUT = LSM(ctx->gpr[3]._u32[0]), IN = LSM(ctx->gpr[4]._u32[0]), ID = LSM(ctx->gpr[5]._u32[0]);
     const uint32_t PL = LSM(ctx->gpr[6]._u32[0]), n = ctx->gpr[7]._u32[0], sp = LSM(ctx->gpr[1]._u32[0]);
     if (s_check) {
+        LSCOPY_OR_DECLINE();
         memcpy(t_lscopy, ctx->ls, SPU_LS_SIZE);
         const int ok = fk_core(t_lscopy, ctx->gpr, OUT, IN, ID, PL, n, sp);
         kcheck(ctx, "0x179C0", ok, jobmod_ab654d30fd90_efe70_spu_func_000179C0);
@@ -730,6 +735,7 @@ static int j218_mat(spu_context* ctx)
     CNT(s_mat_calls);
     const uint32_t OUT = LSM(ctx->gpr[3]._u32[0]), POSE = LSM(ctx->gpr[4]._u32[0]), n = ctx->gpr[5]._u32[0];
     if (s_check) {
+        LSCOPY_OR_DECLINE();
         memcpy(t_lscopy, ctx->ls, SPU_LS_SIZE);
         const int ok = mat_core(t_lscopy, OUT, POSE, n);
         kcheck(ctx, "0x17780", ok, jobmod_ab654d30fd90_efe70_spu_func_00017780);
@@ -746,6 +752,7 @@ static int j218_skin(spu_context* ctx)
     CNT(s_skin_calls);
     const uint32_t OUT = LSM(ctx->gpr[3]._u32[0]), A = LSM(ctx->gpr[4]._u32[0]), B = LSM(ctx->gpr[5]._u32[0]), n = ctx->gpr[6]._u32[0];
     if (s_check) {
+        LSCOPY_OR_DECLINE();
         memcpy(t_lscopy, ctx->ls, SPU_LS_SIZE);
         const int ok = skin_core(t_lscopy, OUT, A, B, n);
         kcheck(ctx, "0x18B80", ok, jobmod_ab654d30fd90_efe70_spu_func_00018B80);
