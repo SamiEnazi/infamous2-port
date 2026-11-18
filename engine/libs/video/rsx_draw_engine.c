@@ -7177,6 +7177,26 @@ static u32 s_hud_frame = ~0u, s_hud_slice, s_hud_seen;
 static int s_ov_mode = 1;
 static u32 s_ov_cnt;
 static unsigned long long s_ov_t0;
+/* (deck) PS3RECOMP_ENG_FASTDRAW_HUD (default 1; 0 = as before): the short tail (rsx_draw_fast.inc) in a wide
+ * picture with PS3_ASPECT_HUD_AFTER as well, for the 3D draws before the frame's composite. fd_takes refused
+ * every draw while a composite program was set (s_hud_n), because the short tail sends no HUD flag; so with any
+ * aspect but 16:9 (the player's 16:10) no draw took it (0.0% of 7,450 draws a frame at the plaza, against ~77%
+ * at 16:9). Before the composite of a 3D frame the HUD block's flag depends only on the draw's target (display
+ * size or not) and on s_hud_after / s_ov_mode / s_hud_frame, none of which a draw with all of the previous
+ * draw's state (DL_STATE: the same programs, so not the composite either, the same targets) changes: its flag
+ * is the previous draw's, which the backend holds. Refused as before: a frame whose first draw has not been
+ * through the tail (s_hud_frame), after the composite (also refused by sink_end_body with s_wide_box), and
+ * frames judged overlay-only (s_ov_mode). s_fd_hud_block is what fd_takes reads (nonzero: refused), kept by
+ * eng_fd_hud_note wherever those inputs change (the HUD block, the frame's end); a call of its own, so the
+ * callers' control flow and PGO profile stay as they were. PS3RECOMP_ENG_FASTDRAW_VERIFY checks it as any
+ * short-tail draw (its fdv_set_hud catches a flag the short tail left out). */
+static int s_fd_hud_block = -1;
+static __attribute__((noinline)) void eng_fd_hud_note(void)
+{
+    static int on = -1;
+    if (__builtin_expect(on < 0, 0)) { const char* e = getenv("PS3RECOMP_ENG_FASTDRAW_HUD"); on = !(e && e[0] == '0'); }
+    s_fd_hud_block = s_hud_n != 0 && (!on || s_hud_n < 0 || s_hud_after || s_ov_mode || s_hud_frame != g.frames);
+}
 
 #include "rsx_draw_delta.inc"   /* (rnd1) PS3RECOMP_ENG_DELTA */
 #include "rsx_draw_fast.inc"    /* (fastdraw) PS3RECOMP_ENG_FASTDRAW */
@@ -8225,6 +8245,7 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
               } }
         }
         g.be->set_hud(g.be->user, hud ? 1 : (s_hud_n && display ? 2 : 0), g.surfaces[target].w);
+        eng_fd_hud_note();   /* (deck) PS3RECOMP_ENG_FASTDRAW_HUD: the short tail's HUD verdict */
     }
     /* PS3RECOMP_FX_RES: the same picture over the scaled target's pixels. */
     const float fxk = tkq > 4u ? (float)tkq * 0.25f : 1.0f;
@@ -8743,6 +8764,7 @@ presented:;
               done = 1; FILE* f = fopen(mark, "w"); if (f) fclose(f);
               fprintf(stderr, "[rsx engine] world mark: frame %u, %u draws -> %s\n", g.frames, g.guest_draws, mark); } } }
     g.frames++;
+    eng_fd_hud_note();   /* (deck) PS3RECOMP_ENG_FASTDRAW_HUD: a new frame (and the overlay verdict above) */
     rsx_tc_frame();   /* (track C) the digest's frame line, the counters */
     if (__atomic_load_n(&s_fx_dof_mode, __ATOMIC_RELAXED) == 2) eng_fx_dof_frame();   /* (dofov) =play */
     if (rsx_wt_mode()) rsx_wt_frame(g.frames);
