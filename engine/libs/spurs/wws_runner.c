@@ -56,6 +56,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #define CPU_PAUSE() _mm_pause()
@@ -540,6 +543,11 @@ static DWORD WINAPI pool_main(LPVOID arg)
 {
     const uint32_t idx = (uint32_t)(uintptr_t)arg;
     ps3_host_place_self(PS3_PLACE_SPU);
+#if defined(__linux__)
+    /* (deck-merge) host_place.c names SPU-role threads ps3-spu<n> in creation order (the SPURS workers too):
+     * the pool's own name, still in work/bench/budget.py's "ps3-spu" group, so perf / top tell them apart */
+    { char nm[16]; snprintf(nm, sizeof nm, "ps3-spuj%u", idx); pthread_setname_np(pthread_self(), nm); }
+#endif
     wws_worker* w = wws_worker_create(idx % 6);
     mgr_state* last = NULL;
     for (;;) {
