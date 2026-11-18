@@ -18,6 +18,7 @@ No emulator while you play, and no emulator to install it.
 [![Visitors](https://komarev.com/ghpvc/?username=SamiEnazi-infamous2-port&label=visitors&color=3fa9ff&style=flat)](https://github.com/SamiEnazi/infamous2-port)
 
 <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+<a href="https://paypal.me/samiEnazi"><img alt="Support the port on PayPal" src="https://img.shields.io/badge/Support%20the%20port-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white" height="48"></a>
 
 </div>
 
