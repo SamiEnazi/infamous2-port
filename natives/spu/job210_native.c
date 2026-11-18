@@ -767,12 +767,29 @@ static void j210_klog(J* j)
 /* (deck, experiment) J210_KY_SCALE=<f>: views with a minimum size (K.y > 0) get K.y * f; J210_KY_SET=<v>: views
  * with no size test at all (K.y == K.z == 0) get K.y = v. Written into the view block in LS, so the lifted
  * walker (a declined call) culls the same way. */
+static inline void kq_scale(uint8_t* p, float k)     /* one big-endian float of the view block, times k */
+{
+    uint32_t w = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+    float f; memcpy(&f, &w, 4);
+    if (!(f != 0.0f)) return;
+    f *= k; memcpy(&w, &f, 4);
+    p[0] = (uint8_t)(w >> 24); p[1] = (uint8_t)(w >> 16); p[2] = (uint8_t)(w >> 8); p[3] = (uint8_t)w;
+}
 static void j210_ktweak(J* j)
 {
-    static float sc = -1.0f, set = -1.0f;
+    static float sc = -1.0f, set = -1.0f, zs = 1.0f, xs = 1.0f;
     if (__builtin_expect(sc < 0.0f, 0)) {
         const char* a = getenv("J210_KY_SCALE"); const char* b = getenv("J210_KY_SET");
         sc = a ? (float)atof(a) : 0.0f; set = b ? (float)atof(b) : 0.0f;
+        /* (deck) experiments: J210_KZ_SCALE=<k> the size^2/distance^2 cut of the camera views (K.z) times k (more
+         * small far objects culled), J210_KX_SCALE=<k> the LOD test's z scale (K.x) times k (LODs switch sooner) */
+        const char* c = getenv("J210_KZ_SCALE"); const char* d = getenv("J210_KX_SCALE");
+        zs = c ? (float)atof(c) : 1.0f; xs = d ? (float)atof(d) : 1.0f;
+    }
+    if (zs != 1.0f || xs != 1.0f) {
+        uint8_t* q = j->ls + j->buf1 + 0x70;
+        if (zs != 1.0f) kq_scale(q + 8, zs);
+        if (xs != 1.0f) kq_scale(q, xs);
     }
     if (sc <= 0.0f && set <= 0.0f) return;
     uint8_t* q = j->ls + j->buf1 + 0x70;

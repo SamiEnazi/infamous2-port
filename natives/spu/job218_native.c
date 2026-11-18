@@ -13,7 +13,8 @@
  * PS3RECOMP_NATIVE_J218=0: off (the lifted blend). PS3_SPU_NATIVE=0: every rewrite off.
  * J218_CHECK=1: the native computes into scratch, the lifted function runs, and every written byte is
  * compared (the lifted result is kept); J218_STATS=1: a summary line every 20000 calls; J218_SPEC=0: the
- * per-op exact math only (no speculative run). */
+ * per-op exact math only (no speculative run). J218_WIDE=0: one group per pass (the 128-bit run) instead of two
+ * (deck, the speculative math on 256-bit registers). */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -176,6 +177,178 @@ static inline int blend_math_spec(const u128* Bv, const u128* Cv, u128 vmB, u128
     return SPU_SPEC_OK(a);
 }
 
+/* (deck) The speculative math on two groups at once: 8 lanes in 256-bit registers (lanes 0-3 the first group,
+ * 4-7 the second). Every operation is blend_math_spec's, lane for lane: the same IEEE single operations under
+ * the same MXCSR (round toward zero, FTZ, DAZ), the same range verdict folded into one accumulator, the same
+ * exponent-0 flush; the estimate tables (frest / frsqest) and fi are the helpers' own definitions. A failed
+ * verdict sends both groups to blend_math_exact, so the results are always the per-op forms' bits.
+ * J218_WIDE=0: one group at a time (blend_math_spec), as before. */
+typedef __m256i Y8;
+#define Y1(x) _mm256_set1_epi32((int)(x))
+static inline Y8 y8_flush(Y8 x) { return _mm256_andnot_si256(_mm256_cmpeq_epi32(_mm256_and_si256(x, Y1(0x7F800000u)), _mm256_setzero_si256()), x); }
+static inline Y8 y8_out(Y8 s, Y8* acc) { *acc = _mm256_max_epu32(*acc, _mm256_and_si256(s, Y1(0x7FFFFFFFu))); return y8_flush(s); }
+static inline Y8 y8_fm(Y8 a, Y8 b, Y8* acc)
+{
+    __m256 x = _mm256_castsi256_ps(a); __asm__("" : "+x"(x));
+    return y8_out(_mm256_castps_si256(_mm256_mul_ps(x, _mm256_castsi256_ps(b))), acc);
+}
+static inline Y8 y8_fa(Y8 a, Y8 b, uint32_t negb, Y8* acc)
+{
+    __m256 x = _mm256_castsi256_ps(a); __asm__("" : "+x"(x));
+    return y8_out(_mm256_castps_si256(_mm256_add_ps(x, _mm256_castsi256_ps(_mm256_xor_si256(b, Y1(negb))))), acc);
+}
+static inline Y8 y8_fmadd(Y8 a, Y8 b, Y8 c, uint32_t negp, uint32_t negc, Y8* acc)
+{
+    __m256 x = _mm256_castsi256_ps(_mm256_xor_si256(a, Y1(negp))); __asm__("" : "+x"(x));
+    return y8_out(_mm256_castps_si256(_mm256_fmadd_ps(x, _mm256_castsi256_ps(b), _mm256_castsi256_ps(_mm256_xor_si256(c, Y1(negc))))), acc);
+}
+#define Y8FM(a, b)      y8_fm((a), (b), acc)
+#define Y8FS(a, b)      y8_fa((a), (b), 0x80000000u, acc)
+#define Y8FMA(a, b, c)  y8_fmadd((a), (b), (c), 0, 0, acc)
+#define Y8FNMS(a, b, c) y8_fmadd((a), (b), (c), 0x80000000u, 0, acc)
+static inline Y8 y8_selb(Y8 a, Y8 b, Y8 m) { return _mm256_or_si256(_mm256_andnot_si256(m, a), _mm256_and_si256(b, m)); }
+static inline Y8 y8_key(Y8 x) { const Y8 f = y8_flush(x); return _mm256_xor_si256(f, _mm256_srli_epi32(_mm256_srai_epi32(f, 31), 1)); }
+static inline Y8 y8_fcgt(Y8 a, Y8 b) { return _mm256_cmpgt_epi32(y8_key(a), y8_key(b)); }
+/* spu__xcg_cuflt(v, 147) for v < 2^31 (weight bytes): the conversion, then 2^-8 in the exponent field */
+static inline Y8 y8_cuflt147(Y8 v)
+{
+    __asm__("" : "+x"(v));
+    const Y8 fb = _mm256_castps_si256(_mm256_cvtepi32_ps(v));
+    const Y8 s23 = Y1(8u << 23);
+    return _mm256_and_si256(_mm256_sub_epi32(fb, s23), _mm256_cmpgt_epi32(_mm256_and_si256(fb, Y1(0x7F800000u)), s23));
+}
+static inline Y8 y8_frest(Y8 x)          /* spu_frest */
+{
+    const Y8 e = _mm256_and_si256(_mm256_srli_epi32(x, 23), Y1(0xFF));
+    const Y8 f = _mm256_i32gather_epi32((const int*)spu_frest_fraction_lut, _mm256_and_si256(_mm256_srli_epi32(x, 18), Y1(31)), 4);
+    Y8 re = _mm256_sub_epi32(Y1(253), e);
+    re = _mm256_andnot_si256(_mm256_cmpgt_epi32(e, Y1(252)), re);                 /* exp >= 253: 0 */
+    re = _mm256_blendv_epi8(re, Y1(255), _mm256_cmpeq_epi32(e, _mm256_setzero_si256()));
+    return _mm256_or_si256(_mm256_and_si256(x, Y1(0x80000000u)), _mm256_or_si256(_mm256_slli_epi32(re, 23), _mm256_and_si256(f, Y1(0x7FFFFF))));
+}
+static inline Y8 y8_frsqest(Y8 x)        /* spu_frsqest */
+{
+    const Y8 e = _mm256_and_si256(_mm256_srli_epi32(x, 23), Y1(0xFF));
+    const Y8 f = _mm256_i32gather_epi32((const int*)spu_frsqest_fraction_lut, _mm256_and_si256(_mm256_srli_epi32(x, 18), Y1(63)), 4);
+    Y8 re = _mm256_sub_epi32(Y1(190), _mm256_srli_epi32(_mm256_add_epi32(e, Y1(1)), 1));
+    re = _mm256_blendv_epi8(re, Y1(255), _mm256_cmpeq_epi32(e, _mm256_setzero_si256()));
+    return _mm256_or_si256(_mm256_slli_epi32(re, 23), _mm256_and_si256(f, Y1(0x7FFFFF)));
+}
+static inline Y8 y8_fi(Y8 a, Y8 est)     /* spu_fi (the SSE form, lane for lane) */
+{
+    const Y8 y = _mm256_and_si256(a, Y1(0x7FFFF));
+    const Y8 hi = _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32(est, 10), Y1(0x1FFF)), 19);
+    const Y8 p = _mm256_mullo_epi32(_mm256_and_si256(est, Y1(0x3FF)), y);
+    const Y8 d = _mm256_sub_epi32(hi, p);
+    const Y8 bias = Y1(0x80000000u);
+    const Y8 brw = _mm256_cmpgt_epi32(_mm256_xor_si256(p, bias), _mm256_xor_si256(hi, bias));
+    const Y8 frac = _mm256_and_si256(_mm256_blendv_epi8(_mm256_srli_epi32(d, 9), _mm256_srli_epi32(d, 8), brw), Y1(0x7FFFFF));
+    const Y8 e = _mm256_and_si256(_mm256_srli_epi32(est, 23), Y1(0xFF));
+    const Y8 e2 = _mm256_add_epi32(e, brw);
+    const Y8 zero = _mm256_or_si256(_mm256_cmpeq_epi32(e, _mm256_setzero_si256()), _mm256_cmpeq_epi32(e2, _mm256_setzero_si256()));
+    const Y8 res = _mm256_or_si256(_mm256_and_si256(est, bias), _mm256_or_si256(_mm256_slli_epi32(e2, 23), frac));
+    return _mm256_andnot_si256(zero, res);
+}
+static inline Y8 y8_sin(Y8 x, Y8* acc)
+{
+    const Y8 x2 = Y8FM(x, x);
+    return Y8FM(Y8FMA(Y8FMA(Y8FMA(Y8FMA(Y1(S4), x2, Y1(S3)), x2, Y1(S2)), x2, Y1(S1)), x2, Y1(F_ONE)), x);
+}
+/* spu_cflts_spec(x, 165): scale 8 */
+static inline Y8 y8_cflts165(Y8 x, Y8* acc)
+{
+    const Y8 e = _mm256_and_si256(x, Y1(0x7F800000u));
+    *acc = _mm256_max_epu32(*acc, e);
+    const __m256 f = _mm256_mul_ps(_mm256_castsi256_ps(x), _mm256_castsi256_ps(Y1((127u + 8u) << 23)));
+    Y8 r = _mm256_cvttps_epi32(f);
+    r = _mm256_blendv_epi8(r, Y1(0x7FFFFFFF), _mm256_castps_si256(_mm256_cmp_ps(f, _mm256_set1_ps(2147483648.0f), _CMP_GE_OQ)));
+    return _mm256_andnot_si256(_mm256_cmpeq_epi32(e, _mm256_setzero_si256()), r);
+}
+static inline int blend_math_spec8(const Y8* Bv, const Y8* Cv, Y8 vmB, Y8 vmC, Y8 T, Y8 O[12], Y8* qbo)
+{
+    Y8 a = _mm256_setzero_si256(), *acc = &a;
+    const Y8 one = Y1(F_ONE), zero = _mm256_setzero_si256();
+    const Y8 wB = Y8FM(y8_cuflt147(vmB), Y1(K255));
+    const Y8 wC = Y8FM(y8_cuflt147(vmC), Y1(K255));
+    const Y8 d = Y8FMA(Bv[3], Cv[3], Y8FMA(Bv[2], Cv[2], Y8FMA(Bv[1], Cv[1], Y8FM(Bv[0], Cv[0]))));
+    const Y8 gt = y8_fcgt(wC, wB);
+    const Y8 mx = y8_selb(wB, wC, gt);
+    const Y8 mx1 = y8_selb(mx, one, _mm256_cmpeq_epi32(mx, zero));
+    const Y8 r = y8_fi(mx1, y8_frest(mx1));
+    const Y8 rc = Y8FMA(Y8FNMS(mx1, r, one), r, r);
+    const Y8 u = y8_selb(Y8FM(T, wC), Y8FS(Y8FMA(T, wB, wC), wB), gt);
+    const Y8 s = Y8FM(u, rc);
+    const Y8 oms = Y8FS(one, s);
+    const Y8 sg = y8_selb(one, Y1(F_NEG1), y8_fcgt(zero, d));
+    const Y8 ad = Y8FM(d, sg);
+    const Y8 lin = y8_fcgt(ad, Y1(LIN));
+    const Y8 adt = y8_selb(ad, Y1(F_HALF), lin);
+    const Y8 p = Y8FNMS(adt, Y8FNMS(adt, Y8FNMS(adt, Y8FM(adt, Y1(A3)), Y1(A2)), Y1(A1)), Y1(A0));
+    const Y8 e = Y8FS(one, adt);
+    const Y8 y = y8_fi(e, y8_frsqest(e));
+    const Y8 th = Y8FM(p, Y8FNMS(y, adt, y));
+    const Y8 sth = y8_sin(th, acc), sa = y8_sin(Y8FM(oms, th), acc), sb = y8_sin(Y8FM(s, th), acc);
+    const Y8 ri = y8_fi(sth, y8_frest(sth));
+    const Y8 kB = y8_selb(Y8FM(sa, ri), oms, lin);
+    const Y8 kC = y8_selb(Y8FM(sb, ri), s, lin);
+    for (int k = 0; k < 4; k++) O[k] = Y8FMA(Y8FM(Cv[k], sg), kC, Y8FM(Bv[k], kB));
+    for (int k = 4; k < 12; k++) O[k] = Y8FNMS(Bv[k], s, Y8FMA(Cv[k], s, Bv[k]));
+    const Y8 wo = Y8FNMS(wB, s, Y8FMA(wC, s, wB));
+    *qbo = y8_cflts165(Y8FMA(wo, Y1(Q0), Y1(Q1)), acc);
+    return _mm256_testz_si256(_mm256_cmpgt_epi32(a, Y1(0x7F7FFFFEu)), _mm256_set1_epi32(-1));
+}
+static int s_wide = -1;   /* J218_WIDE */
+
+static void blend_store(const u128* Bv, const u128* Cv, const uint32_t* mB, const uint32_t* mC, const u128* O, u128 qb,
+                        uint8_t* dst, uint8_t wout[4]);
+static void blend_spec_fail_note(const u128* Bv, const u128* Cv, const uint32_t* mB, const uint32_t* mC)
+{
+    __atomic_add_fetch(&s_spec_fail, 1, __ATOMIC_RELAXED);
+    /* why: 0 both weights 0 in a lane, 1 an input word with exponent 255, 2 padding lane, 3 other */
+    int why = 3;
+    for (int j = 0; j < 4; j++) if (mB[j] == 0 && mC[j] == 0) why = 0;
+    if (why == 3)
+        for (int k = 0; k < 12; k++)
+            for (int j = 0; j < 4; j++)
+                if (((Bv[k]._u32[j] | Cv[k]._u32[j]) & 0x7F800000u) == 0x7F800000u) why = 1;
+    __atomic_add_fetch(&s_why[why], 1, __ATOMIC_RELAXED);
+}
+/* groups g and g + 1 (bones i0 .. i0 + 7): both read before either is written (A may be B) */
+static void blend_group2(const uint8_t* ls, uint32_t B, uint32_t MB, uint32_t C, uint32_t MC, uint32_t i0,
+                         u128 T, uint8_t* dst0, uint8_t* dst1, uint8_t w0[4], uint8_t w1[4])
+{
+    u128 Bv[2][12], Cv[2][12];
+    uint32_t mB[2][4], mC[2][4];
+    for (int h = 0; h < 2; h++) {
+        load_soa(ls, B, i0 + 4u * (uint32_t)h, Bv[h]);
+        load_soa(ls, C, i0 + 4u * (uint32_t)h, Cv[h]);
+        for (int j = 0; j < 4; j++) {
+            mB[h][j] = MB ? ls[LSM(MB + i0 + 4u * (uint32_t)h + (uint32_t)j)] : 255u;
+            mC[h][j] = MC ? ls[LSM(MC + i0 + 4u * (uint32_t)h + (uint32_t)j)] : 255u;
+        }
+    }
+    u128 O[2][12], qb[2];
+    Y8 YB[12], YC[12], YO[12], yq;
+    for (int k = 0; k < 12; k++) {
+        YB[k] = _mm256_set_m128i(M(Bv[1][k]), M(Bv[0][k]));
+        YC[k] = _mm256_set_m128i(M(Cv[1][k]), M(Cv[0][k]));
+    }
+    const Y8 vmB = _mm256_setr_epi32((int)mB[0][0], (int)mB[0][1], (int)mB[0][2], (int)mB[0][3], (int)mB[1][0], (int)mB[1][1], (int)mB[1][2], (int)mB[1][3]);
+    const Y8 vmC = _mm256_setr_epi32((int)mC[0][0], (int)mC[0][1], (int)mC[0][2], (int)mC[0][3], (int)mC[1][0], (int)mC[1][1], (int)mC[1][2], (int)mC[1][3]);
+    if (__builtin_expect(blend_math_spec8(YB, YC, vmB, vmC, Y1(T._u32[0]), YO, &yq), 1)) {
+        for (int k = 0; k < 12; k++) { O[0][k] = U(_mm256_castsi256_si128(YO[k])); O[1][k] = U(_mm256_extracti128_si256(YO[k], 1)); }
+        qb[0] = U(_mm256_castsi256_si128(yq)); qb[1] = U(_mm256_extracti128_si256(yq, 1));
+    } else {
+        for (int h = 0; h < 2; h++) {
+            if (s_stats) blend_spec_fail_note(Bv[h], Cv[h], mB[h], mC[h]);
+            const u128 vb = V4(mB[h][0], mB[h][1], mB[h][2], mB[h][3]), vc = V4(mC[h][0], mC[h][1], mC[h][2], mC[h][3]);
+            blend_math_exact(Bv[h], Cv[h], vb, vc, T, O[h], &qb[h]);
+        }
+    }
+    blend_store(Bv[0], Cv[0], mB[0], mC[0], O[0], qb[0], dst0, w0);
+    blend_store(Bv[1], Cv[1], mB[1], mC[1], O[1], qb[1], dst1, w1);
+}
+
 /* one group of 4 bones (lanes); out: 12 quads (bone j: q, t, s at 12j..), wout: the 4 weight bytes */
 static void blend_group(const uint8_t* ls, uint32_t B, uint32_t MB, uint32_t C, uint32_t MC, uint32_t i0,
                         u128 T, uint8_t* dst, uint8_t wout[4])
@@ -191,19 +364,14 @@ static void blend_group(const uint8_t* ls, uint32_t B, uint32_t MB, uint32_t C, 
     const u128 vmB = V4(mB[0], mB[1], mB[2], mB[3]), vmC = V4(mC[0], mC[1], mC[2], mC[3]);
     u128 O[12], qb;
     if (__builtin_expect(!s_spec || !blend_math_spec(Bv, Cv, vmB, vmC, T, O, &qb), 0)) {
-        if (s_stats) {
-            __atomic_add_fetch(&s_spec_fail, 1, __ATOMIC_RELAXED);
-            /* why: 0 both weights 0 in a lane, 1 an input word with exponent 255, 2 padding lane, 3 other */
-            int why = 3;
-            for (int j = 0; j < 4; j++) if (mB[j] == 0 && mC[j] == 0) why = 0;
-            if (why == 3)
-                for (int k = 0; k < 12; k++)
-                    for (int j = 0; j < 4; j++)
-                        if (((Bv[k]._u32[j] | Cv[k]._u32[j]) & 0x7F800000u) == 0x7F800000u) why = 1;
-            __atomic_add_fetch(&s_why[why], 1, __ATOMIC_RELAXED);
-        }
+        if (s_stats) blend_spec_fail_note(Bv, Cv, mB, mC);
         blend_math_exact(Bv, Cv, vmB, vmC, T, O, &qb);
     }
+    blend_store(Bv, Cv, mB, mC, O, qb, dst, wout);
+}
+static void blend_store(const u128* Bv, const u128* Cv, const uint32_t* mB, const uint32_t* mC, const u128* O, u128 qb,
+                        uint8_t* dst, uint8_t wout[4])
+{
     /* a weight byte 0: that bone is the other pose's raw bits (C's 0 first, then B's 0 wins) */
     const __m128i mbv = _mm_setr_epi32((int)mB[0], (int)mB[1], (int)mB[2], (int)mB[3]);
     const __m128i mcv = _mm_setr_epi32((int)mC[0], (int)mC[1], (int)mC[2], (int)mC[3]);
@@ -237,6 +405,7 @@ static void j218_init(void)
     s_stats = getenv("J218_STATS") != 0;
     if (s_stats) { const long long v = atoll(getenv("J218_STATS")); if (v > 1) s_every = (unsigned long long)v; }
     { const char* v = getenv("J218_SPEC"); s_spec = !(v && v[0] == '0'); }
+    { const char* v = getenv("J218_WIDE"); s_wide = !(v && v[0] == '0'); }
     fprintf(stderr, "[j218] natives (blend 0x16320, hierarchy 0x179C0, matrices 0x17780 / 0x18B80, root loop 0x5814): %s%s\n",
             s_mode ? "on" : "off (PS3RECOMP_NATIVE_J218=0)", s_mode && s_check ? ", CHECK mode (the lifted result is kept)" : "");
 }
@@ -267,7 +436,11 @@ static int j218_blend(spu_context* ctx)
         /* the native into scratch (and the inputs it read as they were), then the lifted function */
         static _Thread_local uint8_t o[1024 * 192];      /* n <= 4096: at most 1024 groups */
         static _Thread_local uint8_t w[1024 * 4];
-        for (uint32_t g = 0; g < groups; g++) blend_group(ls, B, MB, C, MC, 4u * g, T, o + 192u * g, w + 4u * g);
+        { uint32_t g = 0;
+          if (s_wide && s_spec && SPU__RZ_ON)
+              for (; g + 1 < groups; g += 2)
+                  blend_group2(ls, B, MB, C, MC, 4u * g, T, o + 192u * g, o + 192u * (g + 1), w + 4u * g, w + 4u * (g + 1));
+          for (; g < groups; g++) blend_group(ls, B, MB, C, MC, 4u * g, T, o + 192u * g, w + 4u * g); }
         const u128 r0 = ctx->gpr[0];
         t_bypass = 1;
         { const int32_t si = (int32_t)ctx->image_id; ctx->host_depth++;
@@ -292,7 +465,15 @@ static int j218_blend(spu_context* ctx)
     for (int k = 0; k < 30; k++) SQ(ls + LSM(sp - 0x10u * (uint32_t)(k + 1)), ctx->gpr[80 + k]);
     uint8_t w[4];
     if (s_stats) __atomic_add_fetch(&s_groups, groups, __ATOMIC_RELAXED);
-    for (uint32_t g = 0; g < groups; g++) {
+    uint32_t g = 0;
+    if (s_wide && s_spec && SPU__RZ_ON)
+        for (; g + 1 < groups; g += 2) {    /* (deck) two groups per pass, both read before either is written */
+            uint8_t w1[4];
+            blend_group2(ls, B, MB, C, MC, 4u * g, T, ls + A + 192u * g, ls + A + 192u * (g + 1), w, w1);
+            memcpy(ls + MA + 4u * g, w, 4);
+            memcpy(ls + MA + 4u * (g + 1), w1, 4);
+        }
+    for (; g < groups; g++) {
         blend_group(ls, B, MB, C, MC, 4u * g, T, ls + A + 192u * g, w);   /* group g is read before it is written: A = B is fine */
         memcpy(ls + MA + 4u * g, w, 4);
     }
