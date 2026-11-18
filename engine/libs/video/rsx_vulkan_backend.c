@@ -11245,13 +11245,40 @@ static void vk_mouse_capture_sync(void)
     cellPad_host_set_mouse_captured(want != 0);
 }
 
+/* SDL's queue is taken out under cellPad's lock and the events are handled after it is
+ * released: sdl2-compat (SteamOS's SDL2) rebuilds its joystick list, which has no lock, for
+ * every joystick / gamepad ADDED or REMOVED event a poll converts, and cellPadInit's
+ * SDL_InitSubSystem on a game thread queues those while this pump runs (a double free in
+ * that list: "malloc(): unaligned tcache chunk detected", 2026-11-18; cellPad.c,
+ * cellPad_host_sdl_trylock). A pass that finds the lock held is skipped. Windows has the
+ * real SDL2 (and cellPad's SDL on its own thread there): no lock. */
+#if !defined(_WIN32)
+int  cellPad_host_sdl_trylock(void);
+void cellPad_host_sdl_unlock(void);
+static int  vk_sdl_trylock(void) { return cellPad_host_sdl_trylock(); }
+static void vk_sdl_unlock(void)  { cellPad_host_sdl_unlock(); }
+#else
+static int  vk_sdl_trylock(void) { return 1; }
+static void vk_sdl_unlock(void)  { }
+#endif
+
 int rsx_vulkan_backend_pump_messages(void)
 {
     if (!s_vk.windowed) return 0;
     int quit = 0;
-    SDL_Event e;
+    SDL_Event evq[64];
+    int nev = 0, next = 0;
     vk_overlay_poll();                       /* [overlay] the L3+R3 hold, a test's timed menu */
-    while (SDL_PollEvent(&e)) {
+    for (;;) {
+        if (next == nev) {                   /* the next batch, if the last one was full */
+            if (nev && nev < (int)(sizeof evq / sizeof evq[0])) break;
+            nev = next = 0;
+            if (!vk_sdl_trylock()) break;    /* cellPad is in SDL: the next pass */
+            while (nev < (int)(sizeof evq / sizeof evq[0]) && SDL_PollEvent(&evq[nev])) nev++;
+            vk_sdl_unlock();
+            if (!nev) break;
+        }
+        SDL_Event e = evq[next++];
         if (vk_overlay_event(&e)) continue;  /* [overlay] F1/F2/Alt+Enter; all input while the menu is open */
 #ifdef VK_LNX_INPUT
         if (vk_lnx_input(&e)) continue;      /* Linux: the keys and the mouse into cellPad's state */

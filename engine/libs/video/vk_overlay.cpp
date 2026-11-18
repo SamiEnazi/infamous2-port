@@ -81,6 +81,8 @@ void  cellPad_host_set_rumble_strength(int pct);
 int   cellPad_host_input_mode(void);
 void  cellPad_host_set_input_mode(int mode);
 void  cellPad_host_input_map(PadInputMap* out);
+int   cellPad_host_sdl_trylock(void);           /* cellPad.c: SDL's joystick list (sdl2-compat) */
+void  cellPad_host_sdl_unlock(void);
 void  ps3_button_icons_set_mode(int mode);      /* rsx_button_icons.h */
 int   ps3_button_icons_mode_setting(void);
 int   ps3_button_icons_effective(void);
@@ -1534,15 +1536,23 @@ static double s_pads_t;
 static void pads_refresh(double now)
 {
     if (now - s_pads_t < 1.0 && s_pads_t > 0) return;
+    if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER)) { s_pads_t = now; s_n_pads = 0; return; }
+#if !defined(_WIN32)
+    /* sdl2-compat's joystick list has no lock: under cellPad's (cellPad.c,
+     * cellPad_host_sdl_trylock); held = the old list until the next frame */
+    if (!cellPad_host_sdl_trylock()) return;
+#endif
     s_pads_t = now;
     s_n_pads = 0;
-    if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER)) return;
     const int n = SDL_NumJoysticks();
     for (int i = 0; i < n && s_n_pads < 4; i++) {
         if (!SDL_IsGameController(i)) continue;
         const char* name = SDL_GameControllerNameForIndex(i);
         snprintf(s_pads[s_n_pads++], sizeof s_pads[0], "%s", name ? name : "Game controller");
     }
+#if !defined(_WIN32)
+    cellPad_host_sdl_unlock();
+#endif
 }
 
 #include "vk_overlay_remap.inc"   /* [remap] the bindings' rules and dialogs, rebinding live (issue #6); the grid: vk_overlay_menu.inc */

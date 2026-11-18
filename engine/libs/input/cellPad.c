@@ -380,6 +380,24 @@ static int  pad_lock_try(void) { return !__atomic_test_and_set(&s_poll_lock, __A
 static void pad_lock(void)     { while (!pad_lock_try()) sched_yield(); }
 static void pad_unlock(void)   { __atomic_clear(&s_poll_lock, __ATOMIC_RELEASE); }
 
+/* The same lock for SDL calls outside this file that can touch SDL's
+ * joystick device list: the window's event pump (rsx_vulkan_backend.c, the
+ * RSX thread) and the menu's controller list (vk_overlay.cpp). sdl2-compat,
+ * the SDL2 of SteamOS 3.7+ (Arch, Fedora 42+, Homebrew too), keeps the
+ * device-index list in globals with no lock (sdl2_compat.c: "FIXME: put a
+ * mutex on the joystick and sensor lists"): SDL_NumJoysticks frees and
+ * rebuilds it, and so does its conversion of every joystick / gamepad ADDED
+ * or REMOVED event -- on the thread that pushes the event (its SDL3 event
+ * filter) and on the thread that takes it from the queue (SDL_PollEvent,
+ * SDL_PeepEvents). cellPadInit's SDL_InitSubSystem(GAMECONTROLLER) queues
+ * those events while the RSX thread drains the queue every 4 ms: both
+ * threads freed the same list (a double free glibc's per-thread tcache does
+ * not see) and the next small malloc aborted ("malloc(): unaligned tcache
+ * chunk detected" in pad_sdl_scan, 2026-11-18). Outside cellPad a try-lock:
+ * a pump that finds it held skips that pass (the next comes 4 ms later). */
+int  cellPad_host_sdl_trylock(void) { return pad_lock_try(); }
+void cellPad_host_sdl_unlock(void)  { pad_unlock(); }
+
 /* CELL_PAD_STATUS_ASSIGN_CHANGES: a port whose reported connection changed
  * since the title last asked (cellPadGetInfo/GetInfo2/PeriphGetInfo), as
  * libpad reports a controller plugged in or taken away. */
