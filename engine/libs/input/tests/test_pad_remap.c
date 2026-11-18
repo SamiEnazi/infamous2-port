@@ -184,7 +184,7 @@ static void test_sparse_file(void)
     if (!text) return;
     CHECK(strstr(text, "# my controls\n[keyboard]\ncross = \"Shift\"   # jump on Q\ndpad_up = \"T\"\n"
                        "unknown_thing = \"x\"\ncircle   = \"Q\"\nsquare   = \"F\"\n") == text);
-    CHECK(strstr(text, "\nrs_right = \"L\"\n\n# camera\n[mouse]\nsensitivity = 2.0\n[controller.xbox]\n"
+    CHECK(strstr(text, "\nrs_right = \"L\"\nlayout   = 2\n\n# camera\n[mouse]\nsensitivity = 2.0\n[controller.xbox]\n"
                        "select = \"back\"\n\n[mouse_buttons]\ncross    = \"\"\n"));
     CHECK(strstr(text, "\n[controller]\ncross    = \"a\"\n"));
     { const char* kb = strstr(text, "[keyboard]");
@@ -233,8 +233,11 @@ static void test_conflicts(void)
     /* the same key again: nothing to take */
     CHECK(prm_has(&m, PIM_CROSS, K(0x0E)) && prm_owners(&m, PIM_CROSS, K(0x0E)) == 0);
 
-    /* Enter and keypad Enter are one key */
+    /* Enter and keypad Enter are one key (START had both before layout 2: a map that still does) */
     m = d;
+    prm_clear_keys(&m, PIM_START);
+    prm_key_put(&m, PIM_START, PRM_ENTER, 1);
+    CHECK(key_on(&m, PIM_START, 0x24) && key_on(&m, PIM_START, 0x4C) && n_keys(&m, PIM_START) == 2);
     CHECK(prm_owners(&m, PIM_CROSS, K(PRM_KEYPAD_ENTER)) == 1u << PIM_START);
     CHECK(prm_owners(&m, PIM_CROSS, K(PRM_ENTER)) == 1u << PIM_START);
     CHECK(prm_assign(&m, PIM_CROSS, K(PRM_KEYPAD_ENTER), 0x31) == 1u << PIM_START);
@@ -303,7 +306,11 @@ static void test_slots(void)
     CHECK(prm_key_slots(&m, PIM_UP, none, s) == 0 && s[0] == 0x12 && s[1] == 0x7E);   /* 1, Up arrow */
     const int up_first[2] = { 0x7E, -1 };
     CHECK(prm_key_slots(&m, PIM_UP, up_first, s) == 0 && s[0] == 0x7E && s[1] == 0x12);   /* a key keeps its cell */
-    CHECK(prm_key_slots(&m, PIM_START, none, s) == 0 && s[0] == 0x24 && s[1] == -1);     /* both Enters: one cell */
+    CHECK(prm_key_slots(&m, PIM_START, none, s) == 0 && s[0] == 0x35 && s[1] == -1);     /* Esc: START's built-in key */
+    { PadInputMap e = m;
+      prm_clear_keys(&e, PIM_START);
+      prm_key_put(&e, PIM_START, PRM_ENTER, 1);
+      CHECK(prm_key_slots(&e, PIM_START, none, s) == 0 && s[0] == 0x24 && s[1] == -1); }   /* both Enters: one cell */
     CHECK(prm_key_slots(&m, PIM_L3, none, s) == 0 && s[0] == 0x09 && s[1] == -1);
     prm_key_put(&m, PIM_CROSS, 0x00, 1);
     prm_key_put(&m, PIM_CROSS, 0x0B, 1);
@@ -460,6 +467,87 @@ static void test_save(const char* example)
     free(old); free(saved); free(want); free(saved2); free(saved3);
 }
 
+/* The keyboard layout number ([keyboard] layout) and the one-time move of START from the old
+ * default (Return + keypad Enter) to Esc for a file saved before layout 2. */
+static void test_layout_migration(void)
+{
+    PadInputMap d, m, back;
+    pim_defaults(&d);
+    CHECK(n_keys(&d, PIM_START) == 1 && key_on(&d, PIM_START, 0x35));        /* Esc alone; reset gives it back */
+    for (int c = 0; c < PIM_N_CONTROLS; c++) CHECK(!key_on(&d, c, 0x24) && !key_on(&d, c, 0x4C));
+    m = d;
+    prm_clear_keys(&m, PIM_START);
+    prm_key_put(&m, PIM_START, PRM_ENTER, 1);
+    prm_reset(&m);
+    CHECK(prm_bindings_equal(&m, &d));
+    { char b[32]; CHECK(!strcmp(prm_key_name(0x35, b, sizeof b), "Esc")); }  /* the name START's row shows */
+
+    /* an old file (every install had one, made from the example): START follows, once */
+    const char* old =
+        "[keyboard]\n"
+        "cross    = \"Space\"\n"
+        "start    = \"Return, KeypadEnter\"   # pause\n"
+        "select   = \"M, Tab\"\n"
+        "\n"
+        "[mouse]\n"
+        "sensitivity = 1.5\n";
+    pim_defaults(&m);
+    CHECK(pim_parse(&m, old, NULL, "old") == 0 && m.key_layout == 0);
+    CHECK(n_keys(&m, PIM_START) == 2 && !key_on(&m, PIM_START, 0x35));
+    CHECK(pim_migrate_layout(&m) == 1);
+    CHECK(n_keys(&m, PIM_START) == 1 && key_on(&m, PIM_START, 0x35) && m.key_layout == PIM_KEY_LAYOUT);
+    CHECK(key_on(&m, PIM_CROSS, 0x31) && key_on(&m, PIM_SELECT, 0x2E) && key_on(&m, PIM_SELECT, 0x30));
+    CHECK(pim_migrate_layout(&m) == 0);
+    char* text = pim_render(&m, old);
+    CHECK(text && strstr(text, "start    = \"Escape\"   # pause\n"));
+    CHECK(text && strstr(text, "layout   = 2\n\n[mouse]\nsensitivity = 1.5\n"));   /* at the end of [keyboard] */
+    CHECK(text && strstr(text, "layout") && !strstr(strstr(text, "layout") + 1, "layout"));   /* one layout line */
+    pim_defaults(&back);
+    CHECK(text && pim_parse(&back, text, NULL, "new") == 0 && back.key_layout == 2 && back.n_warnings == 0);
+    CHECK(prm_bindings_equal(&back, &m) && pim_migrate_layout(&back) == 0);
+    /* START put back on Enter in the menu afterwards: it stays (the file says layout 2) */
+    prm_clear_keys(&back, PIM_START);
+    prm_key_put(&back, PIM_START, PRM_ENTER, 1);
+    char* t2 = text ? pim_render(&back, text) : NULL;
+    CHECK(t2 && strstr(t2, "start    = \"Return, KeypadEnter\"   # pause\n") && strstr(t2, "layout   = 2\n"));
+    pim_defaults(&m);
+    CHECK(t2 && pim_parse(&m, t2, NULL, "kept") == 0 && pim_migrate_layout(&m) == 0);
+    CHECK(n_keys(&m, PIM_START) == 2 && key_on(&m, PIM_START, 0x24));
+    char* t3 = t2 ? pim_render(&m, t2) : NULL;
+    CHECK(t3 && !strcmp(t3, t2));                                               /* saving again changes nothing */
+    free(text); free(t2); free(t3);
+
+    /* an old file whose START the player had changed, or that uses Esc already: left alone */
+    static const char* const keep[] = {
+        "[keyboard]\nstart = \"P\"\n",
+        "[keyboard]\nstart = \"Return, P\"\n",
+        "[keyboard]\nstart = \"\"\n",
+        "[keyboard]\nstart = \"Return, KeypadEnter\"\nselect = \"Escape\"\n",
+        "[keyboard]\nstart = \"Return, Escape\"\n",
+        "[keyboard]\nlayout = 2\nstart = \"Return\"\n",
+        "[keyboard]\ncross = \"Q\"\n",                  /* START not listed: the built-in Esc already */
+    };
+    for (unsigned i = 0; i < sizeof keep / sizeof keep[0]; i++) {
+        PadInputMap a, b;
+        pim_defaults(&a);
+        CHECK(pim_parse(&a, keep[i], NULL, "keep") == 0);
+        b = a;
+        CHECK(pim_migrate_layout(&b) == 0 && prm_bindings_equal(&a, &b));
+    }
+    /* keypad Enter alone, or Return alone, was the old default too (the two are one key) */
+    pim_defaults(&m);
+    CHECK(pim_parse(&m, "[keyboard]\nstart = \"Return\"\n", NULL, "one") == 0 && pim_migrate_layout(&m) == 1);
+    CHECK(n_keys(&m, PIM_START) == 1 && key_on(&m, PIM_START, 0x35));
+    /* a file of this version, by hand, CRLF: the layout line keeps its comment */
+    pim_defaults(&m);
+    const char* crlf = "[keyboard]\r\nlayout = 1 # mine\r\nstart = \"Escape\"\r\n";
+    CHECK(pim_parse(&m, crlf, NULL, "crlf") == 0 && m.key_layout == 1);
+    char* t4 = pim_render(&m, crlf);
+    CHECK(t4 && strstr(t4, "[keyboard]\r\nlayout = 2 # mine\r\nstart = \"Escape\"\r\n"));
+    CHECK(t4 && strstr(t4, "layout") && !strstr(strstr(t4, "layout") + 1, "layout"));
+    free(t4);
+}
+
 int main(int argc, char** argv)
 {
     const char* example = argc > 1 ? argv[1] : "docs/input.example.toml";
@@ -470,6 +558,7 @@ int main(int argc, char** argv)
     test_slots();
     test_capture(cellpad);
     test_save(example);
+    test_layout_migration();
     if (fails) { printf("test_pad_remap: %d failure(s)\n", fails); return 1; }
     printf("test_pad_remap: ok\n");
     return 0;

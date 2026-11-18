@@ -1429,7 +1429,8 @@ static void remap_page(ImDrawList* dl, ImVec2 a, float w, float h, double now, b
             txt(cl, f_semi(), 13, ImVec2(bx0 + S(13), cy - S(8)), C_TEXT, "Reset");
             if (hb && ImGui::IsMouseClicked(0) && s_rm.state == RM_IDLE) { s_rm.state = RM_RESET; s_rm.modal_cancel = false; s_rm.open_reset = true; }
             if (focus) { cd.title = "Reset to defaults"; cd.desc = "Every key, mouse button and controller button back to the defaults.";
-                         cd.status = "F1-F3, F7, F9, F11, Esc and the Windows key stay the window's. Alt binds; Alt+Enter, Alt+Tab and Alt+F4 still work."; }
+                         cd.status = "Esc is Pause (START) and Enter is free. Esc cancels a key change, so only this Reset brings it back. "
+                                     "F1-F3, F7, F9, F11 and the Windows key stay the window's. Alt binds; Alt+Enter, Alt+Tab and Alt+F4 still work."; }
             continue;
         }
         const PrmRow& r = prm_rows[i];

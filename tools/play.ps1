@@ -27,8 +27,8 @@
 #   DS4Windows is closed first (its virtual pad doubles the input).
 #   Keyboard + mouse: WASD move, mouse = camera (click in the window to capture the mouse),
 #   right button = aim (L1), left button = R1, Space = Cross, Shift = Circle, F = Square,
-#   Q = Triangle, Enter = START, Tab/M = map.
-#   Esc opens the PC menu (and frees the mouse); Alt+F4 or the window's close button quits.
+#   Q = Triangle, Esc = START (the game's pause menu), Tab/M = map.
+#   F2 opens the PC menu; F2 or Alt+Tab frees the mouse; Alt+F4 or the window's close button quits.
 #   Remapping, dead zones, sensitivity: input.toml in the project folder (made on first run
 #   from engine\docs\input.example.toml).
 #

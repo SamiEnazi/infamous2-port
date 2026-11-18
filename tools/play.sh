@@ -9,7 +9,7 @@
 # over it for this session.
 # Controls: any controller SDL knows (buttons by position, as on a PlayStation pad); keyboard + mouse
 # (WASD, mouse = camera after a click in the window, right button = aim, left = R1, Space = Cross,
-# Shift = Circle, F = Square, Q = Triangle, Enter = START, Esc = PC menu). Remapping: input.toml in
+# Shift = Circle, F = Square, Q = Triangle, Esc = START / pause; F2 or Alt+Tab frees the mouse). Remapping: input.toml in
 # the project folder (made on the first start from engine/docs/input.example.toml).
 # Every session gets play/<date-time>/ (stdout.log, stderr.log, playlog.tsv, summary.txt); your
 # saves (game/gamedata/dev_hdd0/home/00000001/savedata) are copied to saves-backup/<date-time>/

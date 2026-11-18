@@ -47,6 +47,9 @@ static int s_nfp;
 static int s_cached[8], s_ncached;   /* sdl2-compat's index list */
 static Uint32 s_events[64];
 static int s_nevents;
+/* test_pad_thread.c (which includes this file): the fake drivers take their
+ * time, as real ones do with a Bluetooth pad. 0 here. */
+static volatile int s_fake_open_ms, s_fake_update_once_ms, s_fake_rumble_ms;
 
 static FakePad* fake_new(int id, int guid)
 {
@@ -83,6 +86,7 @@ SDL_GameController* SDL_GameControllerOpen(int idx)
 {
     FakePad* p = fake_at(idx);
     if (!p || !p->present) return NULL;
+    if (s_fake_open_ms) usleep((unsigned)s_fake_open_ms * 1000u);
     p->opens++; p->closed = 0;
     return (SDL_GameController*)p;
 }
@@ -96,6 +100,7 @@ int SDL_GameControllerRumble(SDL_GameController* gc, Uint16 lo, Uint16 hi, Uint3
     (void)ms;
     FakePad* p = (FakePad*)gc;
     assert(!p->closed);
+    if (s_fake_rumble_ms) usleep((unsigned)s_fake_rumble_ms * 1000u);
     p->rumble_lo = lo; p->rumble_hi = hi; p->rumble_calls++;
     return 0;
 }
@@ -104,7 +109,11 @@ Uint8 SDL_GameControllerGetButton(SDL_GameController* gc, SDL_GameControllerButt
     return (Uint8)((((FakePad*)gc)->buttons >> b) & 1u);
 }
 Sint16 SDL_GameControllerGetAxis(SDL_GameController* gc, SDL_GameControllerAxis a) { (void)gc; (void)a; return 0; }
-void SDL_GameControllerUpdate(void) {}
+void SDL_GameControllerUpdate(void)
+{
+    const int ms = __atomic_exchange_n(&s_fake_update_once_ms, 0, __ATOMIC_RELAXED);
+    if (ms) usleep((unsigned)ms * 1000u);
+}
 int SDL_PeepEvents(SDL_Event* ev, int n, SDL_eventaction action, Uint32 lo, Uint32 hi)
 {
     assert(action == SDL_GETEVENT);
@@ -186,6 +195,9 @@ static unsigned data_digital1(u32 port)
 int main(void)
 {
     unsetenv("PS3_PAD_SDL");
+    /* every SDL call inside the pad call, so each step below can look at the
+     * backend's state right after it (the controller thread: test_pad_thread.c) */
+    setenv("PS3_PAD_THREAD", "0", 1);
     unsetenv("PS3_INPUT_MAP");
     unsetenv("PS3_INPUT_MODE");
     unsetenv("PS3_RUMBLE");

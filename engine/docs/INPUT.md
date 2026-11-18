@@ -41,13 +41,20 @@ powers, so aim sits on the right mouse button and the powers under the left hand
 | D-pad down | Ionic Vortex | d-pad | 2, Down arrow | |
 | D-pad left | Purchase Powers | d-pad | 3, Left arrow | |
 | D-pad right | Switch Powers | d-pad | 4, Right arrow | |
-| START | Pause Menu | Options / Menu / + | Enter (both) | |
+| START | Pause Menu | Options / Menu / + | Esc | |
 | SELECT | World Map | Share / View / -, **touchpad click** | M, Tab | |
 
-- **Esc** is not a game key: it opens/closes the in-game menu (when there is one) and
-  releases a captured mouse. Quit with **Alt+F4** or the window's close button.
-  (`PS3_ESC=quit` brings back Esc = quit; binding `Escape` to a control in `[keyboard]`
-  gives it to the game instead.)
+- **Esc** is START: the game's own pause menu, as in any PC game. The port's menu is
+  **F2** alone (or L3+R3 held on a controller); inside it Esc is still back / close, and
+  that press does not reach the game. **Enter** is bound to nothing by default (it was
+  START before `layout = 2`) and can be given to any control. Quit with **Alt+F4** or the
+  window's close button. (`PS3_ESC=quit` brings back Esc = quit. A `[keyboard]` that
+  binds `Escape` to no control makes Esc the window's: it then only releases a captured
+  mouse.)
+- An `input.toml` from before this change still says `start = "Return, KeypadEnter"`
+  (every install has one, made from the example). At the first start START moves to
+  Esc in it and `layout = 2` is added to `[keyboard]`, once; a START set to any other
+  key is left alone, and so is one put back on Enter afterwards.
 - **F9** marks the play log ("this felt bad", `PS3RECOMP_PLAYLOG`).
 - **F7** is the Cheats page's quick key: in inFAMOUS 2 it puts Cole at the saved spot picked
   under F2 > Cheats > Saved spots (menu open or closed).
@@ -99,7 +106,7 @@ of `libs/input/pad_input_map.h`.
 [keyboard]                  # PS3 control = keys ("" = unbound)
 cross    = "Space"
 square   = "F"
-start    = "Return, Escape" # several keys: a list (Escape here = the game's, not the menu's)
+start    = "Escape, Return" # several keys: a list
 
 [mouse_buttons]             # Left Right Middle Button4..Button8 WheelUp WheelDown
 r1 = "Left"
@@ -164,9 +171,10 @@ rules are `libs/input/pad_remap.h`:
   the input) or **Cancel**. A file written by hand may still bind one key to two
   controls (a chord); the menu never makes one.
 - Kept for the window and the menu: F1 (HUD), F2 (menu), F3 (lighting A/B), F7 (the
-  Cheats page's quick key), F9 (play-log mark), F11 and Alt+Enter (fullscreen), Esc
-  (cancels a change), the
-  Windows keys, Print Screen. Alt binds like any key (left and right apart); Alt+Enter,
+  Cheats page's quick key), F9 (play-log mark), F11 and Alt+Enter (fullscreen), the
+  Windows keys, Print Screen. Esc cancels a change, so the menu cannot bind it: it is
+  START's built-in key, shown in its row, and "Reset to defaults" (or `start = "Escape"`
+  in the file) brings it back. Alt binds like any key (left and right apart); Alt+Enter,
   Alt+Tab and Alt+F4 stay the window's, and while a bound Alt is held Enter, Tab and F4
   do not reach the game. The PS / Xbox / Home button is the system's.
 - Enter and keypad Enter are one key (both are VK_RETURN to Windows): they bind,
@@ -201,8 +209,10 @@ rules are `libs/input/pad_remap.h`:
 | `PS3_PAD_TILT`, `PS3_PAD_TILT_INVERT` | sensor, 0 | SIXAXIS tilt source (`sensor`, `left_stick`, `none`) |
 | `PS3_PAD_DB` | | extra SDL mapping files (`;`-separated); `gamecontrollerdb.txt` next to the exe is read too |
 | `PS3_PAD_POLL_US` | 1000 | minimum gap between two host polls (0 = every read) |
+| `PS3_PAD_THREAD` | 1 (macOS: 0) | SDL's controller work (state update, device detection, opening a controller, rumble) on cellPad's controller thread; pad calls read its snapshot and never wait on a device. 0 = inside the pad call, as before |
+| `PS3_PAD_THREAD_US` | 1000 | how often the controller thread refreshes the snapshot (at least 250) |
 | `PS3_MOUSE`, `PS3_MOUSE_SENS`, `PS3_MOUSE_INVERT_X/Y`, `PS3_MOUSE_DEADZONE`, `PS3_MOUSE_CAPTURE` | | the `[mouse]` settings |
-| `PS3_ESC` | menu | `quit` = Esc quits (old behaviour) |
+| `PS3_ESC` | game | `quit` = Esc quits (old behaviour) |
 | `PS3_RUMBLE`, `PS3_RUMBLE_STRENGTH` | on, 100 | vibration (0 off, up to 200 %) |
 | `PS3_OVERLAY_PAD` | 1 | `0` = L3+R3 does not open the in-game menu |
 | `SDL_*` hints | set in code | `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1`, `SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0`, `SDL_JOYSTICK_HIDAPI_PS4_RUMBLE=1`, `..._PS5_RUMBLE=1`, `SDL_JOYSTICK_THREAD=1`; an environment variable of the same name still wins |
@@ -215,6 +225,7 @@ Debugging:
 | `PS3_PAD_TRACE=2` | the same for every packet (one per game frame) |
 | `PS3_PAD_TRACE=all` | changes on every port |
 | `PS3_PAD_STATS=1` | `[padstats]` once a second: reads per port, packets, host polls, the cost of the controller read and of the key read |
+| `PS3_PAD_SLOW_LOG=1` | a `[cellPad] slow:` line on stderr for every pad call, host poll or controller-thread pass over 5 ms (a number above 1 = that many ms), with the part that was slow |
 | `PS3_MOUSE_LOG=1` | mouse motion and buttons as they become the right stick; in a title with a direct-mode camera hook (inFAMOUS 2) also a `[mouse] log` line per camera frame with motion: counts in, the turn given, the view before and after |
 | `PS3_RUMBLE_LOG=1` | every vibration request of the game |
 
@@ -243,8 +254,9 @@ what SDL sees outside the game (`--watch 10` for live input).
 - Nothing is captured until a click in the game window (a test run's window that takes
   the focus never grabs anyone's cursor). That click does not reach the game.
 - Captured = cursor hidden and kept in the window; raw mouse motion turns the camera.
-  Released when the window loses focus (Alt+Tab; it comes back with the focus), when a
-  menu opens, or with Esc (click again to recapture).
+  Released when the window loses focus (Alt+Tab; it comes back with the focus) and while
+  the F2 menu is open. Esc does not release it: it is START, and the game's pause menu
+  is driven with the keys. (Esc bound to no control releases it; click again to recapture.)
 - Stick mode (`PS3_MOUSE_MODE=stick`, `mode = "stick"`): motion becomes right-stick
   deflection proportional to the mouse's speed (a stick is a rate), smoothed lightly,
   starting past the game's own dead zone. The time base is the performance counter (it
@@ -264,8 +276,8 @@ what SDL sees outside the game (`--watch 10` for live input).
   switches the mode and both sensitivities live.
 - Tests: `PS3_MOUSE_SCRIPT="w<t>:<dx>:<dy>[:<dur>],..."` adds raw mouse counts at t
   seconds (spread over dur seconds), `w` = after the `PAD_SCRIPT_WAIT` file appears.
-- An in-game menu that wants Esc watches `g_pad_overlay_toggle` (also counted up by
-  L3+R3 on a controller) and sets `g_pad_overlay_present = 1`; while it is open it sets
+- An in-game menu can watch `g_pad_overlay_toggle` (counted up by L3+R3 on a
+  controller; Esc no longer counts it) and sets `g_pad_overlay_present = 1`; while it is open it sets
   `g_pad_overlay_open` (or adds its own flag to `cellPad_host_overlay_open()`), which
   holds every port neutral and releases the mouse.
 

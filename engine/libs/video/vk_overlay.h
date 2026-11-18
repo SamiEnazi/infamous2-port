@@ -7,7 +7,8 @@
  *
  * Keys (game window):
  *   F1           performance HUD on/off (default on, top left)
- *   F2           settings menu open/close (Esc also closes it)
+ *   F2           settings menu open/close (Esc closes it too; with the menu
+ *                closed Esc is the game's START, the pause menu)
  *   Alt+Enter, F11  fullscreen on/off
  * Controller: hold L3+R3 together for 1 s (any controller) to open/close the
  * menu; in it the D-pad / left stick move between rows and change values,
@@ -116,7 +117,7 @@ void vk_overlay_notice_for(const char* text, double secs);   /* shown for secs s
 /* rsx_vulkan_backend.c: the window is full screen (SDL fullscreen, or the capture-friendly borderless one) */
 int vk_backend_window_full(void);
 
-/* Open the menu (Esc with the menu closed). 1 = opened, 0 = no overlay. */
+/* Open the menu. 1 = opened, 0 = no overlay. (Esc does not: it is the game's START.) */
 int  vk_overlay_open_menu(void);
 
 /* PS3RECOMP_VK_PRESENT_ASYNC (rsx3): the present -- and the HUD with it -- may

@@ -293,16 +293,20 @@ int main(void)
         CHECK(box_differs(57, 178, 94, 215));               /* cross: E, not Space */
         CHECK(box_differs(359, 8, 408, 41));                /* R1: Space, not E (mouse camera off: keys) */
         CHECK(!box_differs(419, 57, 456, 94));              /* circle: untouched */
-        /* Start rebound to keypad Enter alone still shows ENTER (Enter twins) */
-        PadInputMap s = def;
+        /* Start rebound to keypad Enter alone still shows ENTER (Enter twins): the same atlas as
+         * Return and keypad Enter together (START's keys before Esc took it) */
+        PadInputMap s = def, both = def;
         const PrmInput kpe = { PRM_KEY, 0x4C };
         prm_clear_keys(&s, PIM_START);
         prm_assign(&s, PIM_START, kpe, -1);
+        prm_clear_keys(&both, PIM_START);
+        pim_key_set(both.key[PIM_START], 0x24);
+        pim_key_set(both.key[PIM_START], 0x4C);
         memset(img, 0, sizeof img);
         rsx_button_icons_draw(&img[0][0][0], 2048, PS3_ICONS_KEYBOARD, &s, 0);
         memcpy(a, img, sizeof img);
         memset(img, 0, sizeof img);
-        rsx_button_icons_draw(&img[0][0][0], 2048, PS3_ICONS_KEYBOARD, &def, 0);
+        rsx_button_icons_draw(&img[0][0][0], 2048, PS3_ICONS_KEYBOARD, &both, 0);
         CHECK(!memcmp(a, img, sizeof img));
         /* the live path: the map the menu set is what the next frame hashes */
         ps3_button_icons_set_mode(PS3_ICONS_KEYBOARD);

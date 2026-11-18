@@ -39,7 +39,7 @@ static void old_layout(const unsigned* vks, int n, u16* btns, int* lx, int* ly, 
         {0x06, CELL_PAD_CTRL_L1}, {0x0E, CELL_PAD_CTRL_R1},
         {0x08, CELL_PAD_CTRL_L2}, {0x0F, CELL_PAD_CTRL_R2},
         {0x09, CELL_PAD_CTRL_L3}, {0x07, CELL_PAD_CTRL_R3},
-        {0x24, CELL_PAD_CTRL_START}, {0x4C, CELL_PAD_CTRL_START},
+        {0x35, CELL_PAD_CTRL_START},                        /* Escape (Return and keypad Enter: nothing) */
         {0x2E, CELL_PAD_CTRL_SELECT}, {0x30, CELL_PAD_CTRL_SELECT},
     };
     int down[128] = {0};
@@ -154,6 +154,28 @@ static void test_mapped_layout(void)
     assert(cellPad_host_mouse_capture_wanted() == 0);
 }
 
+/* A key held while a menu is open (the Esc that closes the F2 menu) stays
+ * the menu's until it is released: no START from it. */
+static void test_menu_key_latch(void)
+{
+    unsetenv("PS3_INPUT_MAP");
+    unsetenv("PS3_MOUSE");
+    s_map_state = 0;
+    pad_map_load();
+    const unsigned esc = 0x35, both[2] = { 0x35, 0x31 };
+    press_only(&esc, 1); pad_poll_keys(0); assert(s_host_state[0].buttons == CELL_PAD_CTRL_START);   /* Esc = START */
+    assert(cellPad_host_window_event(PAD_WIN_ESCAPE) == 0);          /* the game's: the window does nothing with it */
+    g_pad_overlay_open = 1;
+    pad_poll_keys(0); assert(s_host_state[0].buttons == 0);
+    g_pad_overlay_open = 0;                                          /* closed with Esc still down */
+    pad_poll_keys(0); assert(s_host_state[0].buttons == 0);
+    pad_poll_keys(0); assert(s_host_state[0].buttons == 0);
+    press_only(both, 2); pad_poll_keys(0); assert(s_host_state[0].buttons == CELL_PAD_CTRL_CROSS);   /* a new key counts */
+    press_only(NULL, 0); pad_poll_keys(0); assert(s_host_state[0].buttons == 0);
+    press_only(&esc, 1); pad_poll_keys(0); assert(s_host_state[0].buttons == CELL_PAD_CTRL_START);   /* released, pressed again */
+    press_only(NULL, 0); pad_poll_keys(0);
+}
+
 static void test_sdl_triggers(void)
 {
     const uint32_t lt = 1u << PIM_PAD_TRIGGER_LEFT, rt = 1u << PIM_PAD_TRIGGER_RIGHT;
@@ -166,6 +188,7 @@ static void test_sdl_triggers(void)
 int main(void)
 {
     test_default_layout();
+    test_menu_key_latch();
     test_mapped_layout();
     test_sdl_triggers();
     printf("test_pad_keymap: ok\n");

@@ -64,6 +64,7 @@
     #include "gamecontrollerdb_win.h"       /* SDL_GameControllerDB, Windows lines (zlib) */
   #else
     #include <dlfcn.h>                      /* SDL 2.24's virtual pad, looked up at run time */
+    #include <pthread.h>                    /* the controller thread */
   #endif
 #endif
 
@@ -115,6 +116,7 @@ static int s_data_fresh[PAD_MAX_HOST_PORTS];
  * fills the copy not in use and flips to it, so a poll reading the map never
  * sees one half-written. */
 static PadInputMap s_maps[2];
+volatile int g_pad_layout_note;   /* 1: START just moved from Enter to Esc in the player's file (a menu says so once, then sets 2) */
 static volatile int s_map_cur;
 static void pad_icons_register(void);
 int cellPad_host_input_mode(void);
@@ -160,10 +162,16 @@ static void pad_map_load(void)
      * = no file at all.) */
     if (!path) { pad_exe_dir_file("input.toml", exe_map, sizeof exe_map); if (pad_file_exists(exe_map)) path = exe_map; }
     if (path && *path) {
-        if (pim_load_file(m, path, stderr))
+        if (pim_load_file(m, path, stderr)) {
             fprintf(stderr, "[cellPad] input map %s: %d change(s) from the defaults, %d name(s) ignored\n",
                     path, m->n_set, m->n_warnings);
-        else
+            /* a file from before Esc was START, its START never changed: the new default, written back once */
+            if (pim_migrate_layout(m)) {
+                g_pad_layout_note = 1;
+                fprintf(stderr, "[cellPad] input map %s: START is Esc now (it was Enter, the old default; F2 > Controls changes it)%s\n",
+                        path, pim_save_file(m, path) ? "" : "; the file could not be written");
+            }
+        } else
             fprintf(stderr, "[cellPad] input map %s: cannot open, using the default layout\n", path);
     } else {
         pim_defaults(m);
@@ -362,6 +370,52 @@ static int                 s_sdl_had[PAD_MAX_HOST_PORTS];
 static int                 s_sdl_type[PAD_MAX_HOST_PORTS];   /* 1 + SDL_GameControllerType */
 static unsigned long long  s_sdl_scan_ms;   /* last device-list scan (pad_now_ms) */
 static int s_sdl_inited = 0;
+static char                s_sdl_name[PAD_MAX_HOST_PORTS][64];
+
+/* ---- the controller thread's snapshot ---------------------------------------
+ * Everything that talks to SDL's controllers -- SDL_GameControllerUpdate (which
+ * also runs SDL's device detection), the hot-plug scan, opening and closing a
+ * controller, rumble -- runs on a thread of its own (pad_sdl_thread) and can
+ * take as long as the drivers like: detection walks the HID device list, and
+ * opening a Bluetooth pad is a handshake of several reports with waits between
+ * them, 0.5-0.8 s measured for a Switch Pro Controller coming back. All of
+ * that used to run inside the title's cellPadGetInfo2/GetData, on the game's
+ * main thread, which stood still for as long.
+ *
+ * The thread publishes each port's RAW inputs here about every millisecond
+ * (PS3_PAD_THREAD_US); a pad call copies the newest snapshot under a lock held
+ * for the copy alone and does the input map, dead zones and triggers itself,
+ * as before. Rumble goes the other way: cellPadSetActDirect leaves the wanted
+ * levels in s_rumble and the thread sends them.
+ *   PS3_PAD_THREAD=0   the old way: all of it inside the pad call (the
+ *                      default on macOS, where SDL's device detection belongs
+ *                      to the run loop of the thread that started it) */
+typedef struct {
+    int      connected;
+    int      type;                          /* 1 + SDL_GameControllerType */
+    int      ax[SDL_CONTROLLER_AXIS_MAX];
+    uint32_t buttons;                       /* bit n = SDL button n */
+    int      has_accel;
+    float    accel[3];
+    char     name[64];
+} PadSdlRaw;
+static PadSdlRaw     s_sdl_raw[PAD_MAX_HOST_PORTS];
+static volatile char s_sdl_raw_lock;
+static void pad_raw_lock(void)   { while (__atomic_test_and_set(&s_sdl_raw_lock, __ATOMIC_ACQUIRE)) sched_yield(); }
+static void pad_raw_unlock(void) { __atomic_clear(&s_sdl_raw_lock, __ATOMIC_RELEASE); }
+static int  pad_sdl_threaded(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("PS3_PAD_THREAD");
+#if defined(__APPLE__)
+        on = e && *e && *e != '0';
+#else
+        on = !(e && e[0] == '0');
+#endif
+    }
+    return on;
+}
 static void pad_virtual_parse(void);
 static void pad_virtual_attach(void);
 static void pad_virtual_drive(void);
@@ -379,6 +433,39 @@ static volatile char s_poll_lock;
 static int  pad_lock_try(void) { return !__atomic_test_and_set(&s_poll_lock, __ATOMIC_ACQUIRE); }
 static void pad_lock(void)     { while (!pad_lock_try()) sched_yield(); }
 static void pad_unlock(void)   { __atomic_clear(&s_poll_lock, __ATOMIC_RELEASE); }
+
+/* PS3_PAD_SLOW_LOG=1 (or a number of ms above 1): a line on stderr for every
+ * pad call of the title, host poll or controller-thread pass that took longer
+ * than 5 ms (or that many), with the part that was slow. 0 when off, else the
+ * limit in microseconds. */
+static unsigned long long pad_slow_us(void)
+{
+    static long long us = -1;
+    if (us < 0) {
+        const char* e = getenv("PS3_PAD_SLOW_LOG");
+        const double ms = e && *e ? atof(e) : 0.0;
+        us = ms <= 0.0 ? 0 : ms <= 1.0 ? 5000 : (long long)(ms * 1000.0);
+    }
+    return (unsigned long long)us;
+}
+static unsigned long pad_thread_id(void)
+{
+#ifdef _WIN32
+    return (unsigned long)GetCurrentThreadId();
+#else
+    return (unsigned long)(uintptr_t)pthread_self();
+#endif
+}
+/* A title's pad call that began at t0 (pad_now_us; 0 = the log is off). */
+static void pad_slow_call(const char* fn, unsigned long long t0)
+{
+    const unsigned long long limit = pad_slow_us();
+    if (!limit || !t0) return;
+    const unsigned long long d = pad_now_us() - t0;
+    if (d < limit) return;
+    fprintf(stderr, "[cellPad] slow: %s took %.1f ms on thread %lu (the slow part is in the line(s) before this one, if any)\n",
+            fn, (double)d / 1000.0, pad_thread_id());
+}
 
 /* CELL_PAD_STATUS_ASSIGN_CHANGES: a port whose reported connection changed
  * since the title last asked (cellPadGetInfo/GetInfo2/PeriphGetInfo), as
@@ -424,6 +511,7 @@ static u32 pad_status_take(u32 port)
 typedef struct {
     u16 lo, hi;        /* what the host motors were last asked for */
     u64 sent_ms;       /* when (GetTickCount64), 0 = nothing pending */
+    volatile int dirty;   /* cellPadSetActDirect changed lo/hi: the controller thread sends them */
 } PadRumble;
 static PadRumble s_rumble[PAD_MAX_HOST_PORTS];
 
@@ -507,7 +595,7 @@ static u8 pad_xinput_stick_to_u8(short raw, short deadzone)
  * disable it entirely.
  *
  * Arrows = d-pad, Z/X/A/S = cross/circle/square/triangle, Q/W = L1/R1,
- * 1/2 = L2/R2, Enter = START, Tab = SELECT. The left stick mirrors the d-pad
+ * 1/2 = L2/R2, Esc = START, Tab = SELECT. The left stick mirrors the d-pad
  * so a title that reads the stick instead is playable too. */
 #ifdef _WIN32
 static int pad_host_window_focused(void)
@@ -543,7 +631,7 @@ static void pad_poll_keyboard(void)
         { 'A',       CELL_PAD_CTRL_SQUARE },  { 'S',      CELL_PAD_CTRL_TRIANGLE },
         { 'Q',       CELL_PAD_CTRL_L1 },      { 'W',      CELL_PAD_CTRL_R1 },
         { '1',       CELL_PAD_CTRL_L2 },      { '2',      CELL_PAD_CTRL_R2 },
-        { VK_RETURN, CELL_PAD_CTRL_START },   { VK_TAB,   CELL_PAD_CTRL_SELECT },
+        { VK_ESCAPE, CELL_PAD_CTRL_START },   { VK_TAB,   CELL_PAD_CTRL_SELECT },
     };
 
     u16 btns = 0;
@@ -735,8 +823,8 @@ static void pad_sdl_close(int p, int gone)
     SDL_GameControllerClose(gc);
     s_sdl_controllers[p] = NULL;
     s_sdl_ids[p] = -1;
+    s_sdl_name[p][0] = 0;
     memset(&s_rumble[p], 0, sizeof s_rumble[p]);
-    s_host_state[p].connected = 0;
     /* The prompt glyphs: the device last used is gone, so they fall back to
      * another controller that is still there, else the keyboard. */
     int con = 0;
@@ -804,6 +892,8 @@ static void pad_sdl_scan(void)
         memset(&s_rumble[port], 0, sizeof s_rumble[port]);   /* nothing left over from before */
         SDL_GameControllerRumble(gc, 0, 0, 0);
         s_sdl_type[port] = 1 + (int)SDL_GameControllerGetType(gc);
+        { const char* nm = SDL_GameControllerName(gc);
+          snprintf(s_sdl_name[port], sizeof s_sdl_name[port], "%s", nm ? nm : "Game controller"); }
         if (!g_ps3_pad_icons.connected) g_ps3_pad_icons.connected = s_sdl_type[port];
         /* SIXAXIS tilt from the pad's own accelerometer (DualShock 4,
          * DualSense, Switch Pro and most 8BitDo pads in Switch mode). */
@@ -840,30 +930,187 @@ static void pad_sdl_hotplug(int force)
     pad_sdl_scan();
 }
 
+/* One pass over SDL's controllers: the pads' newest reports, device changes
+ * (a controller opened or closed), rumble, and the raw inputs of every port
+ * into the snapshot. Runs on the controller thread (pad_sdl_thread), or
+ * inside the pad call with PS3_PAD_THREAD=0. Any of the SDL calls here may
+ * block for as long as a driver takes. */
+static void pad_sdl_service(void)
+{
+    const unsigned long long slow = pad_slow_us();
+    const unsigned long long t0 = slow ? pad_now_us() : 0;
+    pad_virtual_drive();          /* PS3_PAD_VIRTUAL: this pass's scripted inputs */
+    SDL_GameControllerUpdate();   /* the pads' newest reports, read now (and SDL's device detection) */
+    const unsigned long long t1 = slow ? pad_now_us() : 0;
+    pad_sdl_hotplug(0);
+    const unsigned long long t2 = slow ? pad_now_us() : 0;
+
+    PadSdlRaw raw[PAD_MAX_HOST_PORTS];
+    memset(raw, 0, sizeof raw);
+    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+        SDL_GameController* gc = s_sdl_controllers[i];
+        PadRumble* r = &s_rumble[i];
+        if (!gc) {
+            memset(r, 0, sizeof *r);
+            continue;
+        }
+        /* A rumble the title just set, else keep the last one going (see
+         * PAD_RUMBLE_HOLD_MS). */
+        if (__atomic_exchange_n(&r->dirty, 0, __ATOMIC_ACQ_REL))
+            pad_sdl_rumble_send(i);
+        else if (r->sent_ms && GetTickCount64() - r->sent_ms >= PAD_RUMBLE_RENEW_MS)
+            pad_sdl_rumble_send(i);
+
+        PadSdlRaw* w = &raw[i];
+        w->connected = 1;
+        w->type = s_sdl_type[i];
+        memcpy(w->name, s_sdl_name[i], sizeof w->name);
+        for (int a = 0; a < SDL_CONTROLLER_AXIS_MAX; a++)
+            w->ax[a] = SDL_GameControllerGetAxis(gc, (SDL_GameControllerAxis)a);
+        for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX && b < PIM_PAD_TRIGGER_LEFT; b++)
+            if (SDL_GameControllerGetButton(gc, (SDL_GameControllerButton)b)) w->buttons |= 1u << b;
+        /* the accelerometer, when pad_sdl_scan switched it on ([controller_settings] tilt) */
+        if (SDL_GameControllerIsSensorEnabled(gc, SDL_SENSOR_ACCEL) &&
+            SDL_GameControllerGetSensorData(gc, SDL_SENSOR_ACCEL, w->accel, 3) == 0)
+            w->has_accel = 1;
+    }
+    pad_raw_lock();
+    memcpy(s_sdl_raw, raw, sizeof s_sdl_raw);
+    pad_raw_unlock();
+
+    if (slow) {
+        const unsigned long long t3 = pad_now_us();
+        if (t3 - t0 >= slow)
+            fprintf(stderr, "[cellPad] slow: controller pass took %.1f ms on %s %lu: SDL update + device detection %.1f ms, "
+                            "hot-plug scan / controller open or close %.1f ms, rumble + state read %.1f ms\n",
+                    (double)(t3 - t0) / 1000.0,
+                    pad_sdl_threaded() ? "the controller thread (no pad call waited)" : "the CALLER's thread",
+                    pad_thread_id(), (double)(t1 - t0) / 1000.0, (double)(t2 - t1) / 1000.0, (double)(t3 - t2) / 1000.0);
+    }
+}
+
+/* ---- the controller thread ---------------------------------------------------
+ * pad_sdl_service every PS3_PAD_THREAD_US microseconds (1000; at least 250),
+ * on a high-resolution timer where Windows has one. It owns the controller
+ * handles: it opens them, and closes them when it is told to stop. */
+static volatile int s_sdl_thr_stop;
+static int          s_sdl_thr_on, s_sdl_thr_failed;
+static void pad_sdl_list_devices(void)
+{
+    const int num = SDL_NumJoysticks();
+    for (int i = 0; i < num; i++)
+        fprintf(stderr, "[cellPad] SDL joystick %d: %s (game controller: %s)\n", i,
+                SDL_JoystickNameForIndex(i) ? SDL_JoystickNameForIndex(i) : "?",
+                SDL_IsGameController(i) ? "yes" : "no");
+}
+static void pad_sdl_thread_body(void)
+{
+    long us = 1000;
+    { const char* e = getenv("PS3_PAD_THREAD_US"); if (e && *e) us = atol(e); if (us < 250) us = 250; }
+#ifdef _WIN32
+    /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Windows 10 1803+): a wait of 1 ms
+     * is 1 ms whatever the system tick is; without it, Sleep(1). */
+    HANDLE tm = CreateWaitableTimerExW(NULL, NULL, 0x00000002, TIMER_ALL_ACCESS);
+#endif
+    pad_sdl_list_devices();
+    while (!__atomic_load_n(&s_sdl_thr_stop, __ATOMIC_ACQUIRE)) {
+        pad_sdl_service();   /* the first pass opens what is connected */
+#ifdef _WIN32
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)us * 10;
+        if (tm && SetWaitableTimer(tm, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(tm, 100);
+        else Sleep(1);
+#else
+        struct timespec ts = { 0, us * 1000L };
+        nanosleep(&ts, NULL);
+#endif
+    }
+    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) pad_sdl_close(i, 0);
+    pad_raw_lock();
+    memset(s_sdl_raw, 0, sizeof s_sdl_raw);
+    pad_raw_unlock();
+#ifdef _WIN32
+    if (tm) CloseHandle(tm);
+#endif
+}
+#ifdef _WIN32
+static HANDLE s_sdl_thr;
+static DWORD WINAPI pad_sdl_thread_main(LPVOID arg) { (void)arg; pad_sdl_thread_body(); return 0; }
+#else
+static pthread_t s_sdl_thr;
+static void* pad_sdl_thread_main(void* arg) { (void)arg; pad_sdl_thread_body(); return NULL; }
+#endif
+static int pad_sdl_thread_start(void)
+{
+    if (s_sdl_thr_on) return 1;
+    __atomic_store_n(&s_sdl_thr_stop, 0, __ATOMIC_RELEASE);
+#ifdef _WIN32
+    DWORD tid = 0;
+    s_sdl_thr = CreateThread(NULL, 0, pad_sdl_thread_main, NULL, 0, &tid);
+    if (!s_sdl_thr) { s_sdl_thr_failed = 1; return 0; }
+    SetThreadPriority(s_sdl_thr, THREAD_PRIORITY_ABOVE_NORMAL);
+    fprintf(stderr, "[cellPad] controller thread %lu: device detection, controller opens and rumble run there, pad calls read its snapshot\n",
+            (unsigned long)tid);
+#else
+    if (pthread_create(&s_sdl_thr, NULL, pad_sdl_thread_main, NULL) != 0) { s_sdl_thr_failed = 1; return 0; }
+    fprintf(stderr, "[cellPad] controller thread: device detection, controller opens and rumble run there, pad calls read its snapshot\n");
+#endif
+    s_sdl_thr_on = 1;
+    return 1;
+}
+static void pad_sdl_thread_stop(void)
+{
+    if (!s_sdl_thr_on) return;
+    __atomic_store_n(&s_sdl_thr_stop, 1, __ATOMIC_RELEASE);
+#ifdef _WIN32
+    WaitForSingleObject(s_sdl_thr, 5000);
+    CloseHandle(s_sdl_thr);
+    s_sdl_thr = NULL;
+#else
+    pthread_join(s_sdl_thr, NULL);
+#endif
+    s_sdl_thr_on = 0;
+}
+
+/* The names of the controllers on the ports (the in-game menu's list): from
+ * the snapshot, so the caller never waits on SDL's joystick lock. Returns
+ * how many (at most max). */
+int cellPad_host_controller_names(char (*out)[128], int max)
+{
+    int n = 0;
+    pad_raw_lock();
+    for (int i = 0; i < PAD_MAX_HOST_PORTS && n < max; i++)
+        if (s_sdl_raw[i].connected) snprintf(out[n++], 128, "%s", s_sdl_raw[i].name);
+    pad_raw_unlock();
+    return n;
+}
+
 static void pad_poll_sdl2(void)
 {
     if (pad_sdl_off()) {
         for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) s_host_state[i].connected = 0;
         return;
     }
-    pad_virtual_drive();          /* PS3_PAD_VIRTUAL: this poll's scripted inputs */
-    SDL_GameControllerUpdate();   /* the pads' newest reports, read now */
-    pad_sdl_hotplug(0);
+    /* The controllers' raw inputs: the controller thread's newest snapshot
+     * (PS3_PAD_THREAD=0: read here and now). No SDL call from here on. */
+    if (!s_sdl_thr_on && s_sdl_inited) {
+        /* (SDL came up after cellPadInit gave up waiting for it: the thread starts now) */
+        if (!(pad_sdl_threaded() && !s_sdl_thr_failed && pad_sdl_thread_start())) pad_sdl_service();
+    }
+    PadSdlRaw raw[PAD_MAX_HOST_PORTS];
+    pad_raw_lock();
+    memcpy(raw, s_sdl_raw, sizeof raw);
+    pad_raw_unlock();
 
     uint32_t raw_all = 0;
     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
-        SDL_GameController* gc = s_sdl_controllers[i];
-        if (!gc) {
+        const PadSdlRaw* rw = &raw[i];
+        if (!rw->connected) {
             s_host_state[i].connected = 0;
-            memset(&s_rumble[i], 0, sizeof s_rumble[i]);
             continue;
         }
 
         s_host_state[i].connected = 1;
-
-        /* Keep a rumble the title set going (see PAD_RUMBLE_HOLD_MS). */
-        if (s_rumble[i].sent_ms && GetTickCount64() - s_rumble[i].sent_ms >= PAD_RUMBLE_RENEW_MS)
-            pad_sdl_rumble_send(i);
 
         /* Every SDL input, then the PS3 controls bound to them ([controller]
          * in PS3_INPUT_MAP, with [controller.<family>] on top for this pad's
@@ -871,14 +1118,10 @@ static void pad_poll_sdl2(void)
          * the triggers are L2/R2, pressed past the trigger threshold). */
         const PadInputMap* map = pad_map();
         uint32_t bind[PIM_N_CONTROLS];
-        pim_pad_resolve(map, pim_family_of_sdl_type(s_sdl_type[i] - 1), bind);
-        int ax[SDL_CONTROLLER_AXIS_MAX];
-        for (int a = 0; a < SDL_CONTROLLER_AXIS_MAX; a++)
-            ax[a] = SDL_GameControllerGetAxis(gc, (SDL_GameControllerAxis)a);
+        pim_pad_resolve(map, pim_family_of_sdl_type(rw->type - 1), bind);
+        const int* ax = rw->ax;
         const int lt = ax[SDL_CONTROLLER_AXIS_TRIGGERLEFT], rt = ax[SDL_CONTROLLER_AXIS_TRIGGERRIGHT];
-        uint32_t in = 0;
-        for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX && b < PIM_PAD_TRIGGER_LEFT; b++)
-            if (SDL_GameControllerGetButton(gc, (SDL_GameControllerButton)b)) in |= 1u << b;
+        uint32_t in = rw->buttons;
         const int trig_on = (int)(s_ctl.trig_threshold * 32767.0f);
         if (lt > trig_on) in |= 1u << PIM_PAD_TRIGGER_LEFT;
         if (rt > trig_on) in |= 1u << PIM_PAD_TRIGGER_RIGHT;
@@ -891,8 +1134,8 @@ static void pad_poll_sdl2(void)
         /* The prompt glyphs follow the device last used: a button, a trigger
          * or a stick pushed well past its dead zone (the half-axis bits). */
         if (in)
-            if (g_ps3_pad_icons.source != s_sdl_type[i] && cellPad_host_input_mode() != 2 /* keyboard only */)
-                g_ps3_pad_icons.source = s_sdl_type[i];
+            if (g_ps3_pad_icons.source != rw->type && cellPad_host_input_mode() != 2 /* keyboard only */)
+                g_ps3_pad_icons.source = rw->type;
         uint32_t ctl = 0;
         for (int c = 0; c < PIM_N_CONTROLS; c++)
             if (bind[c] & in) ctl |= 1u << c;
@@ -921,9 +1164,9 @@ static void pad_poll_sdl2(void)
          * toward the player; at rest +1 g on y). DS3: 512 level, Y 399 at
          * rest, X rising as the pad rolls right. */
         s_host_state[i].has_sensor = 0;
-        if (s_ctl.tilt == 1 && SDL_GameControllerIsSensorEnabled(gc, SDL_SENSOR_ACCEL)) {
-            float a[3];
-            if (SDL_GameControllerGetSensorData(gc, SDL_SENSOR_ACCEL, a, 3) == 0) {
+        if (s_ctl.tilt == 1 && rw->has_accel) {
+            const float* a = rw->accel;
+            {
                 const float gx = a[0] / SDL_STANDARD_GRAVITY, gy = a[1] / SDL_STANDARD_GRAVITY, gz = a[2] / SDL_STANDARD_GRAVITY;
                 s_host_state[i].sensor_x = pad_sixaxis(s_ctl.tilt_invert ? gx : -gx);
                 s_host_state[i].sensor_y = pad_sixaxis(-gy);
@@ -966,6 +1209,12 @@ static void pad_sdl_hints(void)
 {
     const PadInputMap* m = pad_map();
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+#ifdef SDL_HINT_AUTO_UPDATE_JOYSTICKS
+    /* The window's event pump must not update the joysticks itself: an update
+     * holds SDL's joystick lock through device detection, and the pump (the
+     * thread that presents) would wait behind the controller thread's. */
+    SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
+#endif
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, m->nintendo_labels == 1 ? "1" : "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
@@ -1028,10 +1277,11 @@ static int pad_sdl_init_subsystem(void)
     }
     pad_sdl_load_db();
     pad_virtual_attach();
-    /* No joystick/controller EVENTS: the state is read directly at read
-     * time (SDL_GameControllerUpdate in cellPadGetData), so the window's
-     * event pump on the RSX thread neither updates the pads nor fills its
-     * queue with their events; device changes are found by the rescan. */
+    /* No joystick/controller EVENTS: the state is read directly
+     * (SDL_GameControllerUpdate in pad_sdl_service, on the controller
+     * thread), so the window's event pump on the RSX thread neither updates
+     * the pads nor fills its queue with their events; device changes are
+     * found by the rescan. */
     SDL_GameControllerEventState(SDL_IGNORE);
     SDL_JoystickEventState(SDL_IGNORE);
     s_sdl_inited = 1;
@@ -1161,19 +1411,23 @@ static void pad_init_backend(void)
     if (!s_sdl_inited) return;
     memset(s_sdl_controllers, 0, sizeof(s_sdl_controllers));
     for (int p = 0; p < PAD_MAX_HOST_PORTS; p++) s_sdl_ids[p] = -1;
+    s_sdl_scan_ms = 0;            /* the first pass scans */
 
-    const int num = SDL_NumJoysticks();
-    for (int i = 0; i < num; i++)
-        fprintf(stderr, "[cellPad] SDL joystick %d: %s (game controller: %s)\n", i,
-                SDL_JoystickNameForIndex(i) ? SDL_JoystickNameForIndex(i) : "?",
-                SDL_IsGameController(i) ? "yes" : "no");
+    /* The controllers already connected are opened by the controller
+     * thread's first pass (a Bluetooth pad's open took 0.56 s of the game's
+     * start on this thread). */
+    if (pad_sdl_threaded() && pad_sdl_thread_start()) return;
+    if (pad_sdl_threaded())
+        fprintf(stderr, "[cellPad] controller thread: could not start; controllers are read inside the pad calls\n");
+    pad_sdl_list_devices();
     /* Open any controllers already connected */
     pad_sdl_hotplug(1);
 }
 
 static void pad_shutdown_backend(void)
 {
-    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) pad_sdl_close(i, 0);
+    if (s_sdl_thr_on) pad_sdl_thread_stop();   /* it closes its controllers */
+    else for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) pad_sdl_close(i, 0);
     memset(s_rumble, 0, sizeof s_rumble);
 }
 
@@ -1327,7 +1581,8 @@ volatile uint32_t g_pad_host_keys[4];
  *                            counts whenever the window is key (by default a click in the game
  *                            captures the mouse and Esc/Cmd releases it,
  *                            see rsx_metal_backend.h; on Windows the
- *                            mouse counts only while captured)
+ *                            mouse counts only while captured, and the F2
+ *                            menu or Alt+Tab releases it: Esc is START)
  *   PS3_MOUSE_MODE=stick     mode = "stick": the mouse is always a right
  *                            stick, as above (the only mode before 2026-11-11).
  *                            direct (default): when the title's camera takes
@@ -1936,6 +2191,15 @@ static void pad_poll_keys(int merge)
 #if defined(_WIN32) && PAD_BACKEND_SDL2
     pad_win_keys(keys, map);
 #endif
+    /* A key still down from a menu (the Esc or Enter that closed it) is the
+     * menu's until it comes up: closing the F2 menu with Esc must not also
+     * press START. */
+    { static uint32_t s_menu_keys[4];
+      const int menu = cellPad_host_overlay_open();
+      for (int i = 0; i < 4; i++) {
+          s_menu_keys[i] = menu ? 0xFFFFFFFFu : s_menu_keys[i] & keys[i];
+          keys[i] &= ~s_menu_keys[i];
+      } }
     uint32_t ctl = 0;
     if (keys[0] | keys[1] | keys[2] | keys[3])
         for (int c = 0; c < PIM_N_CONTROLS; c++)
@@ -2058,14 +2322,15 @@ int cellPad_host_overlay_open(void)
  *   - captured = cursor hidden and kept inside the window, raw motion turns
  *     the camera; only while the window has the focus, the mouse camera is
  *     on (PS3_MOUSE, the input mode) and no menu is open
- *   - Esc is the window's, not the game's (unless [keyboard] binds Escape):
- *     it counts up g_pad_overlay_toggle (the in-game menu opens/closes on
- *     each change, as for L3+R3) and, when no menu exists
- *     (g_pad_overlay_present = 0), releases the mouse. Alt+F4 or closing
- *     the window quits.
+ *   - Esc is the game's: START by default (the pause menu). The capture
+ *     ends when the in-game menu opens (F2, L3+R3 on a controller) or the
+ *     window loses the focus (Alt+Tab). Only when [keyboard] binds Escape
+ *     to no control is it the window's: it then releases the mouse (it no
+ *     longer opens the menu: that is F2 alone). Alt+F4 or closing the
+ *     window quits.
  *   - PS3_MOUSE_CAPTURE=0 / [mouse] capture = false: no capture; motion
  *     counts whenever the window has the focus, with the cursor visible */
-volatile int g_pad_overlay_present;   /* set by an in-game menu that opens on g_pad_overlay_toggle */
+volatile int g_pad_overlay_present;   /* set by an in-game menu that opens on g_pad_overlay_toggle (L3+R3) */
 static volatile int s_cap_engaged, s_cap_focused;
 enum { PAD_WIN_CLICK = 1, PAD_WIN_ESCAPE = 2 };
 void cellPad_host_window_focus(int focused) { s_cap_focused = focused != 0; }
@@ -2075,18 +2340,16 @@ int cellPad_host_window_event(int ev)
         if (!s_cap_engaged && pad_kbm_on() && cellPad_host_mouse_active() && !cellPad_host_overlay_open() &&
             cellPad_host_mouse_capture_setting()) {
             s_cap_engaged = 1;
-            fprintf(stderr, "[cellPad] mouse captured (Esc releases it)\n");
+            fprintf(stderr, "[cellPad] mouse captured (F2 or Alt+Tab releases it)\n");
             return 1;
         }
         return 0;
     }
     if (ev == PAD_WIN_ESCAPE) {
-        if (pad_key_bound(0x35)) return 0;            /* [keyboard] gives Escape to the game */
-        __atomic_add_fetch(&g_pad_overlay_toggle, 1, __ATOMIC_RELEASE);
-        if (!g_pad_overlay_present && s_cap_engaged) {
-            s_cap_engaged = 0;
-            fprintf(stderr, "[cellPad] mouse released (click in the game to capture it again)\n");
-        }
+        if (pad_key_bound(0x35)) return 0;            /* the game's (START by default) */
+        if (!s_cap_engaged) return 0;
+        s_cap_engaged = 0;                            /* bound to nothing: the cursor back */
+        fprintf(stderr, "[cellPad] mouse released (click in the game to capture it again)\n");
         return 1;
     }
     return 0;
@@ -2172,14 +2435,15 @@ static void pad_poll_backend(void)
     for (int _i = 0; _i < PAD_MAX_HOST_PORTS; _i++) s_data_fresh[_i] = 1;
 
     const int stats = pad_stats_on();
+    const unsigned long long slow = pad_slow_us();
 #if PAD_BACKEND_XINPUT
     pad_poll_xinput();
 #elif PAD_BACKEND_SDL2
     pad_poll_sdl2();
 #endif
     unsigned long long t_ctl = 0;
+    if (stats || slow) t_ctl = pad_now_us();
     if (stats) {
-        t_ctl = pad_now_us();
         const unsigned long long d = t_ctl - now;
         s_ps.polls++; s_ps.sdl_us += d; if (d > s_ps.sdl_max) s_ps.sdl_max = d;
     }
@@ -2206,6 +2470,13 @@ static void pad_poll_backend(void)
     }
     pad_finalize_ports();
     pad_unlock();
+    if (slow) {
+        const unsigned long long t_end = pad_now_us();
+        if (t_end - now >= slow)
+            fprintf(stderr, "[cellPad] slow: host poll took %.1f ms on thread %lu: controllers %.1f ms, keys + mouse + menu %.1f ms\n",
+                    (double)(t_end - now) / 1000.0, pad_thread_id(), (double)(t_ctl - now) / 1000.0,
+                    (double)(t_end - t_ctl) / 1000.0);
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -2498,7 +2769,7 @@ static void pad_route_apply(u32 port_no, CellPadData* data)
     memcpy(&data->button[2], &s_w[s_i][2], (PAD_ROUTE_WORDS - 2) * sizeof(u16));   /* words 0-1 stay live */
 }
 
-s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+static s32 pad_get_data(u32 port_no, CellPadData* data_guest)
 {
     { static int _once = 0;
       if (!_once++) printf("[cellPad] GetData polling begins (port %u)\n", port_no); }
@@ -2943,7 +3214,7 @@ emit:
  *   (CELL_MAX_PADS / PSL1GHT MAX_PADS = 127 -- NOT 7; see below)
  * Leaving this unimplemented let the guest read stack garbage as pad state and
  * run off into the weeds before ever reaching gcm init. */
-s32 cellPadGetInfo(CellPadInfo2* info)
+static s32 pad_get_info(CellPadInfo2* info)
 {
     uint32_t gaddr = (uint32_t)(uintptr_t)info;
     if (!s_pad_initialized)
@@ -2984,7 +3255,7 @@ s32 cellPadGetInfo(CellPadInfo2* info)
     return CELL_OK;
 }
 
-s32 cellPadGetInfo2(CellPadInfo2* info_guest)
+static s32 pad_get_info2(CellPadInfo2* info_guest)
 {
     if (!s_pad_initialized)
         return CELL_PAD_ERROR_NOT_OPENED;
@@ -3042,7 +3313,7 @@ s32 cellPadGetInfo2(CellPadInfo2* info_guest)
  *   device_type[7], pclass_type[7], pclass_profile[7]
  * We report a standard DUALSHOCK-class pad (pclass_type STANDARD = 0, no
  * profile bits) mirroring the ports cellPadGetInfo2 already reports. */
-s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)
+static s32 pad_periph_get_info(CellPadPeriphInfo* info_guest)
 {
     if (!s_pad_initialized)
         return CELL_PAD_ERROR_NOT_OPENED;
@@ -3159,7 +3430,7 @@ s32 cellPadGetCapabilityInfo(u32 port_no, CellPadCapabilityInfo* info)
     return CELL_OK;
 }
 
-s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+static s32 pad_set_act_direct(u32 port_no, CellPadActParam* param)
 {
     if (!s_pad_initialized)
         return CELL_PAD_ERROR_NOT_OPENED;
@@ -3195,11 +3466,34 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
 #endif
 
 #if PAD_BACKEND_SDL2
-    if (changed) { pad_lock(); pad_sdl_rumble_send((int)port_no); pad_unlock(); }
+    /* The controller thread sends it on its next pass (within a millisecond):
+     * the send is a write to the device and can block. */
+    if (changed) {
+        if (s_sdl_thr_on) __atomic_store_n(&r->dirty, 1, __ATOMIC_RELEASE);
+        else { pad_lock(); pad_sdl_rumble_send((int)port_no); pad_unlock(); }
+    }
 #endif
     (void)changed;
     return CELL_OK;
 }
+
+/* The title's entry points to the calls above: none of them waits on a
+ * device (the controller thread does), and PS3_PAD_SLOW_LOG says so when one
+ * takes long all the same. */
+#define PAD_TIMED(name, call) \
+    const unsigned long long t0_ = pad_slow_us() ? pad_now_us() : 0; \
+    const s32 rc_ = (call); \
+    pad_slow_call(name, t0_); \
+    return rc_
+s32 cellPadGetData(u32 port_no, CellPadData* data_guest) { PAD_TIMED("cellPadGetData", pad_get_data(port_no, data_guest)); }
+s32 cellPadGetInfo(CellPadInfo2* info)                   { PAD_TIMED("cellPadGetInfo", pad_get_info(info)); }
+s32 cellPadGetInfo2(CellPadInfo2* info_guest)            { PAD_TIMED("cellPadGetInfo2", pad_get_info2(info_guest)); }
+s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)  { PAD_TIMED("cellPadPeriphGetInfo", pad_periph_get_info(info_guest)); }
+s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param) { PAD_TIMED("cellPadSetActDirect", pad_set_act_direct(port_no, param)); }
+
+#if !PAD_BACKEND_SDL2
+int cellPad_host_controller_names(char (*out)[128], int max) { (void)out; (void)max; return 0; }
+#endif
 
 s32 cellPadClearBuf(u32 port_no)
 {

@@ -11,9 +11,11 @@
  *     Only keys cellPad's Windows reader (pad_win_keys) can see map to a code.
  *   - The keys the window and the menu keep: F1 (HUD), F2 (menu), F3 (lighting
  *     A/B), F7 (the Cheats page's quick key: go to the saved spot), F9 (play-log
- *     mark), F11 and Alt+Enter (fullscreen), Esc (cancels
- *     here, opens the menu in play), Alt (Alt+Tab, Alt+F4), the Windows keys and
- *     Print Screen. The PS/Xbox/Home button is the system's.
+ *     mark), F11 and Alt+Enter (fullscreen), Alt (Alt+Tab, Alt+F4), the
+ *     Windows keys and Print Screen. Esc cancels here, so a press cannot bind
+ *     it; it is START's built-in key all the same (pim_defaults): its name
+ *     shows in START's row and prm_reset brings it back. The PS/Xbox/Home
+ *     button is the system's.
  *   - One input, one PS3 control: an input another control has is a conflict
  *     the menu asks about (Swap / Cancel). A control shows two keys, one mouse
  *     input and one controller input (the file may hold more; they are kept).
@@ -164,7 +166,7 @@ static const unsigned short prm_sdl_scan_mac[][2] = {
 enum { PRM_CAP_NONE, PRM_CAP_INPUT, PRM_CAP_CANCEL, PRM_CAP_RESERVED, PRM_CAP_UNKNOWN };
 
 /* A key pressed while the menu waits for one: PRM_CAP_INPUT (*out set),
- * _CANCEL (Esc), _RESERVED (*why says whose it is) or _UNKNOWN (the game
+ * _CANCEL (Esc: the wait's own key, though START has it by default), _RESERVED (*why says whose it is) or _UNKNOWN (the game
  * cannot read it). alt_held: Alt was down (Alt+<key> is the window's). Alt
  * itself binds (GitHub #68; its own key-down has alt_held set): Alt+Enter,
  * Alt+Tab and Alt+F4 stay the window's, and cellPad keeps Enter, Tab and F4

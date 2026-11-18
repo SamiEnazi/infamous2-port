@@ -77,6 +77,7 @@ extern "C" {
 int   cellAudio_host_volume(void);
 void  cellAudio_host_set_volume(int pct);
 int   cellPad_host_rumble_strength(void);
+int   cellPad_host_controller_names(char (*out)[128], int max);
 void  cellPad_host_set_rumble_strength(int pct);
 int   cellPad_host_input_mode(void);
 void  cellPad_host_set_input_mode(int mode);
@@ -111,7 +112,8 @@ void  vk_overlay_saves_attach(void);
 void  vk_overlay_saves_shutdown(void);
 extern volatile uint32_t g_pad_overlay_inject;   /* cellPad: scripted buttons while a system dialog holds the pad */
 extern volatile int      g_pad_overlay_open;   /* libs/input/cellPad.c */
-extern volatile int      g_pad_overlay_present; /* cellPad: a menu exists, Esc keeps the mouse capture for after it */
+extern volatile int      g_pad_overlay_present; /* cellPad: a menu exists */
+extern volatile int      g_pad_layout_note;     /* cellPad: 1 = the player's old input.toml just got Esc as START */
 extern volatile uint32_t g_pad_overlay_nav, g_pad_overlay_nav2, g_pad_overlay_raw;
 }
 
@@ -628,8 +630,8 @@ static bool remap_capturing(void);
 static bool remap_escape(void);
 static void remap_cancel(void);
 static void remap_script(const char* spec);
-/* Esc with the menu closed (the backend's pump, after cellPad took it as the
- * window's key): open the menu. 1 = opened (an overlay exists). */
+/* Open the menu from outside (Esc did, before it became the game's START; F2 and
+ * L3+R3 are handled here). 1 = opened (an overlay exists). */
 extern "C" int vk_overlay_open_menu(void) { if (!s_enabled) return 0; set_open(1); return 1; }
 
 /* ---- the menu opening and closing ------------------------------------------ */
@@ -833,6 +835,10 @@ extern "C" void vk_overlay_poll(void)
 {
     if (!s_enabled) return;
     const double now = now_s();
+    if (g_pad_layout_note == 1) {   /* once, for a player who knew Esc as this menu's key */
+        g_pad_layout_note = 2;
+        notice_for("Esc is Pause now (it was Enter). F2 opens this port's menu.", 12.0);
+    }
     if (s_n_script) script_poll(now);
     switch (vk_overlay_saves_poll()) {   /* [saves] the save-data list opens / closes the window */
     case 1: set_open(1); if (s_open) g_pad_overlay_open = 2; break;   /* 2: scripted input goes to it (cellPad) */
@@ -1531,14 +1537,10 @@ static void pads_refresh(double now)
 {
     if (now - s_pads_t < 1.0 && s_pads_t > 0) return;
     s_pads_t = now;
-    s_n_pads = 0;
-    if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER)) return;
-    const int n = SDL_NumJoysticks();
-    for (int i = 0; i < n && s_n_pads < 4; i++) {
-        if (!SDL_IsGameController(i)) continue;
-        const char* name = SDL_GameControllerNameForIndex(i);
-        snprintf(s_pads[s_n_pads++], sizeof s_pads[0], "%s", name ? name : "Game controller");
-    }
+    /* cellPad's list of the controllers on its ports: asking SDL here takes
+     * its joystick lock, which a controller being opened holds for as long
+     * as the open takes (this is the thread that presents). */
+    s_n_pads = cellPad_host_controller_names(s_pads, 4);
 }
 
 #include "vk_overlay_remap.inc"   /* [remap] the bindings' rules and dialogs, rebinding live (issue #6); the grid: vk_overlay_menu.inc */

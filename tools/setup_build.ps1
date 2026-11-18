@@ -113,6 +113,23 @@ if ($Rpcs3) {
 }
 $src = Get-GameSource $Source $Rpcs3
 if ($src.Kind -eq "folder" -and $src.Folder) { $Source = $src.Folder }
+# (GitHub #89) Is an old link the game this run works with? Not when its folder is gone (it was inside an RPCS3
+# folder that was removed since, or on a drive that is not there) and the player chose another copy now.
+$linkIsSource = $false
+if ($isLink -and $linkTarget -and $Source -and (Test-Path -LiteralPath $linkTarget -PathType Container)) {
+    $st = ([string]$Source).TrimEnd('\')
+    $linkIsSource = ($st -ieq $linkTarget) -or $st.StartsWith($linkTarget + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+# A link whose folder is not there any more (an install of v0.5.x linked RPCS3's folders): the link itself is
+# removed, never a folder; what it stood for is then got the normal way. Says so in one line.
+function Remove-DeadLink([string]$Link, [string]$What) {
+    $i = Get-Item -LiteralPath $Link -Force -ErrorAction SilentlyContinue
+    if (-not $i -or -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return }
+    $t = [string]@($i.Target)[0]
+    if ($t -and (Test-Path -LiteralPath $t)) { return }
+    Remove-Junction $Link
+    "  note: $What was a link to $(if ($t) { $t } else { 'a folder' }), which is not there any more (RPCS3 removed?): skipped, the link is removed"
+}
 if (-not $Rap -and $src.Title -like "NP*") {
     $cid0 = if ($src.ContentId) { $src.ContentId } elseif ($src.Sfo) { [string]$src.Sfo["CONTENT_ID"] } else { "" }
     $near = Find-RapNear $Source $cid0
@@ -189,6 +206,9 @@ $crypto = Test-Path -LiteralPath (Join-Path (Get-SlimDir python) "Lib\site-packa
 "  Python: $py$(if ($crypto) { ' (with pycryptodome)' } else { ' (no pycryptodome: unpacking Sony''s files takes a few minutes longer)' })"
 
 Step 3 "your game into the port's folder; the game's update and the PS3 firmware files (from RPCS3 when it has them, else from Sony's servers)"
+# links an older Setup made into an RPCS3 that is gone now (GitHub #89): removed before anything is put there
+foreach ($dl in @(@("dev_hdd0", "game\dev_hdd0"), @("dev_flash", "game\dev_flash"))) { Remove-DeadLink (Join-Path $game $dl[0]) $dl[1] }
+foreach ($dl in @(Get-ChildItem -LiteralPath (Join-Path $game "dev_hdd0\game") -Directory -Force -ErrorAction SilentlyContinue)) { Remove-DeadLink $dl.FullName "game\dev_hdd0\game\$($dl.Name)" }
 New-Item -ItemType Directory -Force (Join-Path $game "dev_hdd0\game"), (Join-Path $game "gamedata") | Out-Null
 $keepMark = Join-Path $root "work\setup-keep-link"
 $ps3tool = Join-Path $PSScriptRoot "ps3tool.py"
@@ -221,6 +241,16 @@ if (($src.Kind -eq "iso" -and $src.Encrypted) -or ($isPsn -and -not (Test-Path -
         elseif ($licRp) { "  your PSN copy: unlocked through RPCS3, which holds your license ($(Split-Path -Leaf $licRp)); the ps3tool in this folder is an older one that can't use a license file" }
         else { throw (Get-PsnCant $title) }
     }
+}
+if ($isLink -and -not $linkIsSource) {
+    # (GitHub #89) the link is not the game chosen now: it is removed (never the folder it pointed to) and the chosen
+    # game is copied in below, as on a first install. Keeping it left game\disc without a game.
+    "  note: game\disc was a link to $(if ($linkTarget) { $linkTarget } else { 'a folder' }), $(if ($linkTarget -and (Test-Path -LiteralPath $linkTarget)) { 'not the game chosen now' } else { 'which is not there any more (RPCS3 removed?)' }): the link is removed and your game is copied into the port's folder"
+    Remove-Junction $discDir
+    $psnFrame = Join-Path $game "psn"
+    if (Test-Path -LiteralPath $psnFrame) { Remove-Junction (Join-Path $psnFrame "PS3_GAME"); Remove-Item -LiteralPath $psnFrame -Force -Recurse -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $keepMark -Force -ErrorAction SilentlyContinue
+    $isLink = $false
 }
 if ($isLink) {
     # an install of v0.5.x: game\disc is a link to the player's game folder
@@ -392,8 +422,9 @@ Step 6 "SDL2, Vulkan headers and glslang"
 "  not needed: the engine comes prebuilt (tools-cache\slim\engine)"
 
 Step 7 "the shortcut's icon (from your copy's ICON0.PNG)"
-$icon0 = Join-Path (Get-GameRoot $discDir) "ICON0.PNG"
-try { & (Join-Path $PSScriptRoot "make_icon.ps1") -Icon0 $icon0 } catch { "  no icon: $_ (the game still builds)" }
+$iconRoot = Get-GameRoot $discDir   # ($null: game\disc holds no game; never a reason to stop here)
+if ($iconRoot) { try { & (Join-Path $PSScriptRoot "make_icon.ps1") -Icon0 (Join-Path $iconRoot "ICON0.PNG") } catch { "  no icon: $_ (the game still builds)" } }
+else { "  no icon: no game found in game\disc (the game still builds)" }
 
 # The player's build: the lift and the game module with the slim tools only (no MSVC, CMake or Ninja); the engine is
 # the release's (copied beside the module). With the build files of an earlier build (an update): a translation step

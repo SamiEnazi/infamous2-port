@@ -69,6 +69,7 @@ function Get-DevFlash {
     if (Test-Path -LiteralPath (Join-Path $own "sys")) { return $own }
     $rp = Get-PortPath rpcs3 -Optional
     if (-not $rp) { return $own }   # (v0.6.0: Setup always puts them there; no RPCS3 path is kept)
+    if (-not (Test-Path -LiteralPath $rp -PathType Container)) { return $own }   # (GitHub #89) an RPCS3 written down once and removed since
     Find-Rpcs3Dir $rp "dev_flash" "sys\external\liblv2.sprx"
 }
 

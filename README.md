@@ -48,6 +48,23 @@ and builds it once. On the test PC the whole install took 12 to 15 minutes.
 
 Linux and the Steam Deck: [see below](#linux-and-steam-deck). More detail on copies and keys: [FAQ](#faq).
 
+## What's new in v0.6.3
+
+A hotfix.
+
+- **The freeze in "Powering Up Flood Town" is fixed** ([#87](../../issues/87), [#88](../../issues/88)): the picture
+  stopped while the sound went on. Other freezes of the same kind are fixed with it, and if the game ever waits on
+  work that nobody is doing, it now notices after a second and carries on.
+- **"Optimise for this PC" works again** ([#90](../../issues/90)). In v0.6.2 its training run ended after 40
+  seconds and Setup built the game without it.
+- **Setup no longer stops with *"Cannot bind argument to parameter 'Path'"*** ([#89](../../issues/89)) when the
+  RPCS3 folder an older install took the game from has been removed. Pick your game again and it is copied in.
+- **No more freezes of up to a second when the game checks the controllers.** They came with Bluetooth
+  controllers, most of all when one reconnected.
+- **Esc pauses the game** (the game's own menu, START), and **F2** alone opens the port's menu. Enter no longer
+  pauses and is free to bind in F2 → Controls. Your `input.toml` follows by itself, unless you had changed the
+  pause key. F2 or Alt+Tab frees the mouse.
+
 ## What's new in v0.6.2
 
 A stability update.
@@ -308,14 +325,16 @@ Start with `Play inFAMOUS 2.cmd` or the desktop shortcut. For Steam, Playnite an
 | Key | Action |
 |---|---|
 | **F1** | fps counter |
-| **F2** (or hold L3+R3) | the settings menu |
+| **F2** (or hold L3+R3) | the port's settings menu |
+| **Esc** | pause: the game's own menu (START) |
 | **F3** | your picture vs the original PS3 look |
 | **F7** | go to your saved spot |
 | **F9** | mark a moment in the session log (a stutter, a glitch) |
 | **Alt+Enter** | fullscreen |
 
 Keyboard and mouse: WASD to move, mouse for the camera, right button to aim, left button to shoot,
-Space = ✕, Shift = ○, F = □, Q = △. Remap anything in F2 → Controls → *Buttons and keys*.
+Space = ✕, Shift = ○, F = □, Q = △, Esc = pause. A click in the game holds the mouse; F2 or Alt+Tab
+frees it. Remap anything in F2 → Controls → *Buttons and keys* (Enter is free to bind: it was pause before v0.6.3).
 
 ## Mods
 
