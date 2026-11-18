@@ -71,6 +71,16 @@ int rsx_vp_analyze_constants(const u8* ucode, u32 max_bytes,
  * to the ucode pointer handed in. Defaults to 0. */
 void rsx_vp_set_branch_base(u32 start_slot);
 
+/* [aa] PS3RECOMP_VP_PRECISE: every vertex program computes its values with no
+ * contraction (HLSL `precise` -> SPIR-V NoContraction on its temporaries,
+ * outputs, the vp_mul/vp_dot helpers and the viewport transform), so two
+ * programs running the same instructions on the same inputs give the same bits
+ * whatever the driver's compiler does around them -- what a draw that repeats
+ * another's geometry with LEQUAL/EQUAL depth needs (the RSX gave equal results).
+ * Set once, before the first decompile; 0 (the default) = every program as before. */
+void rsx_vp_set_precise(int on);
+int  rsx_vp_precise(void);
+
 /* Bit N in vtex_mask declares NV40 2D vertex-texture unit N at t(16+N),
  * sampler sN, and turns TXL for that unit into SampleLevel(..., LOD 0).
  * Unmasked units retain the defined-zero fallback. */

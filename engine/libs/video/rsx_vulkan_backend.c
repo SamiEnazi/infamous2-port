@@ -149,15 +149,20 @@ VK_WSI_DEVICE_FNS(VK_DECLARE)
  * call-like macros count; the loader's assignments (no parentheses) are untouched,
  * and a macro does not expand inside itself, so the real pointer is called. */
 static u32 s_gp_ops[8];
-#define pvkCmdCopyImage(...)              (s_gp_ops[0]++, pvkCmdCopyImage(__VA_ARGS__))
-#define pvkCmdCopyBufferToImage(...)      (s_gp_ops[1]++, pvkCmdCopyBufferToImage(__VA_ARGS__))
-#define pvkCmdCopyImageToBuffer(...)      (s_gp_ops[2]++, pvkCmdCopyImageToBuffer(__VA_ARGS__))
-#define pvkCmdClearColorImage(...)        (s_gp_ops[3]++, pvkCmdClearColorImage(__VA_ARGS__))
-#define pvkCmdClearDepthStencilImage(...) (s_gp_ops[4]++, pvkCmdClearDepthStencilImage(__VA_ARGS__))
-#define pvkCmdBlitImage(...)              (s_gp_ops[5]++, pvkCmdBlitImage(__VA_ARGS__))
-#define pvkCmdPipelineBarrier(...)        (s_gp_ops[6]++, pvkCmdPipelineBarrier(__VA_ARGS__))
-#define pvkCmdDrawIndexed(...)            (s_gp_ops[7]++, pvkCmdDrawIndexed(__VA_ARGS__))
-#define pvkCmdDraw(...)                   (s_gp_ops[7]++, pvkCmdDraw(__VA_ARGS__))
+/* (track C) PS3_RSX_BARBATCH: every command this file records that executes GPU work (or a barrier) bumps the
+ * recording thread's command count, so the barrier helpers can tell "nothing recorded since the last full
+ * barrier" exactly (vk_bb_*). State-only commands (binds, viewport, scissor, timestamps) do not count. */
+static _Thread_local u32 t_vk_cmd_seq;
+#define pvkCmdCopyImage(...)              (t_vk_cmd_seq++, s_gp_ops[0]++, pvkCmdCopyImage(__VA_ARGS__))
+#define pvkCmdCopyBufferToImage(...)      (t_vk_cmd_seq++, s_gp_ops[1]++, pvkCmdCopyBufferToImage(__VA_ARGS__))
+#define pvkCmdCopyImageToBuffer(...)      (t_vk_cmd_seq++, s_gp_ops[2]++, pvkCmdCopyImageToBuffer(__VA_ARGS__))
+#define pvkCmdClearColorImage(...)        (t_vk_cmd_seq++, s_gp_ops[3]++, pvkCmdClearColorImage(__VA_ARGS__))
+#define pvkCmdClearDepthStencilImage(...) (t_vk_cmd_seq++, s_gp_ops[4]++, pvkCmdClearDepthStencilImage(__VA_ARGS__))
+#define pvkCmdBlitImage(...)              (t_vk_cmd_seq++, s_gp_ops[5]++, pvkCmdBlitImage(__VA_ARGS__))
+#define pvkCmdPipelineBarrier(...)        (t_vk_cmd_seq++, s_gp_ops[6]++, pvkCmdPipelineBarrier(__VA_ARGS__))
+#define pvkCmdDrawIndexed(...)            (t_vk_cmd_seq++, s_gp_ops[7]++, pvkCmdDrawIndexed(__VA_ARGS__))
+#define pvkCmdDraw(...)                   (t_vk_cmd_seq++, s_gp_ops[7]++, pvkCmdDraw(__VA_ARGS__))
+#define pvkCmdBeginRenderPass(...)        (t_vk_cmd_seq++, pvkCmdBeginRenderPass(__VA_ARGS__))
 
 /* (deck) PS3RECOMP_VK_CALLSTATS=<frames>: Vulkan calls per frame by kind, printed every <frames> frames
  * (vk_callstats_frame, at each present) -- which per-draw calls the driver is paying for. */
@@ -579,7 +584,9 @@ static int vk_wide_fit(u32 w, u32 h, u32 sw, u32 sh, VkOffset3D* o0, VkOffset3D*
 {
     o0->x = 0; o0->y = 0; o0->z = 0;
     o1->x = (int32_t)sw; o1->y = (int32_t)sh; o1->z = 1;
-    if (!s_wide.on || !w || !h || !sw || !sh) return 0;
+    /* (GitHub #35) also at 16:9: a window or screen of another shape (3440x1440 fullscreen) gets bars, not a
+     * stretched picture; no [wide] state is needed, only the frame's and the window's own shapes */
+    if (!w || !h || !sw || !sh) return 0;
     u32 fw = sw, fh = sh;
     const u64 a = (u64)w * sh, b = (u64)sw * h;     /* a > b: the frame is the wider */
     if (a > b) fh = (u32)(((u64)sw * h + w / 2u) / w);
@@ -1311,10 +1318,12 @@ static void vk_batch_end_pass(void)
         vk_gprof_stamp(GP_PASS, s_batch.rp_w, s_batch.rp_h);
     }
 }
+static void vk_bb_forget(void);
 static int vk_begin(void)
 {
     /* Any operation other than a continuing draw starts outside a pass. */
     if (vk_batch_on() && s_batch.recording) { vk_batch_end_pass(); return 0; }
+    vk_bb_forget();   /* (track C) a new command buffer: no barrier in it yet */
     VK_CHECK(pvkResetCommandBuffer(s_vk.cmd, 0), "vkResetCommandBuffer");
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
@@ -1349,6 +1358,7 @@ static int vk_submit_and_wait_at(int line)
     }
     vk_batch_end_pass();
     vk_gprof_stamp(GP_END, 0, 0);
+    vk_bb_forget();                         /* (track C) */
     s_batch.recording = 0;                  /* even on failure: never append to a dead buffer */
     const uint64_t hs0 = ps3_ft_now();
     VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
@@ -1575,19 +1585,85 @@ static void vk_batch_retire_fb(VkFramebuffer fb)
 
 /* Order everything recorded before against everything after: within one
  * batch a draw may sample what an earlier draw rendered. */
+/* (track C) PS3_RSX_BARBATCH (default on, off on AMD: an image barrier there may be what decompresses
+ * DCC / HTILE, so AMD keeps every one). Every barrier here is ALL_COMMANDS -> ALL_COMMANDS with
+ * MEMORY_WRITE -> MEMORY_READ|WRITE, and every one drains the GPU: the dock frame had ~430 of them between
+ * its 63 passes (3.4 ms of 7.7 ms GPU time in the gaps). Left out, exactly:
+ *  - a full barrier when this thread recorded nothing on this command buffer since the last full barrier
+ *    (two in a row are one);
+ *  - a GENERAL -> GENERAL image barrier right behind a full barrier (the full barrier's memory dependency
+ *    already covers every image; a layout transition is always recorded);
+ *  - the full + image barriers in front of a target copy (color snapshot) or a clear when everything
+ *    recorded since the last full barrier is copies / clears of OTHER images (vk_bb_chain_ok): they cannot
+ *    conflict, and the barrier before the first of them orders all of them after the work before it.
+ * The next render pass, readback or anything else still gets its full barrier (there is work since). */
+static _Thread_local struct { VkCommandBuffer cb; u32 seq, ncmd, nimg; VkImage img[32]; } t_bb;
+static int s_bb_on = -2;
+static int vk_bb_on(void)
+{
+    if (__builtin_expect(s_bb_on == -2, 0)) {
+        int v = rsx_tc(TC_BARBATCH);
+        if (v < 0) {   /* unset: on, but not on AMD */
+            VkPhysicalDeviceProperties p;
+            memset(&p, 0, sizeof p);
+            if (s_vk.phys) pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
+            v = p.vendorID != 0x1002u;
+        }
+        s_bb_on = v;
+        fprintf(stderr, "[RSX vulkan] barriers the GPU does not need left out: %s (PS3_RSX_BARBATCH)\n", v ? "on" : "off");
+    }
+    return s_bb_on;
+}
+/* nothing recorded by this thread on the current command buffer since its last full barrier */
+static inline int vk_bb_not_worker(void)
+{
+#ifdef _WIN32
+    return !t_tq_worker;   /* the recording worker's own direct recording (the present) keeps every barrier */
+#else
+    return 1;
+#endif
+}
+static inline int vk_bb_clean(void) { return t_bb.cb && t_bb.cb == s_vk.cmd && t_vk_cmd_seq == t_bb.seq && vk_bb_not_worker(); }
+static void vk_bb_forget(void) { t_bb.cb = VK_NULL_HANDLE; t_bb.ncmd = t_bb.nimg = 0; }
+/* Since this thread's last full barrier on this command buffer it recorded only copies / clears (one
+ * command each), none of them of a or b. */
+static int vk_bb_chain_ok(VkImage a, VkImage b)
+{
+    if (!vk_bb_on() || !vk_bb_not_worker() || !t_bb.cb || t_bb.cb != s_vk.cmd || t_vk_cmd_seq != t_bb.seq + t_bb.ncmd ||
+        t_bb.nimg + 2u > 32u) return 0;
+    for (u32 i = 0; i < t_bb.nimg; i++) if (t_bb.img[i] == a || (b && t_bb.img[i] == b)) return 0;
+    return 1;
+}
+/* After the one command of a copy / clear of a (and b): it joins the chain, or the chain is over. */
+static void vk_bb_chain_add2(VkImage a, VkImage b)
+{
+    if (!vk_bb_on() || !t_bb.cb || t_bb.cb != s_vk.cmd || t_vk_cmd_seq != t_bb.seq + t_bb.ncmd + 1u || t_bb.nimg + 2u > 32u) {
+        if (t_bb.cb && t_vk_cmd_seq != t_bb.seq) t_bb.ncmd = 0xFFFF0000u;   /* broken: no chain until the next full barrier */
+        return;
+    }
+    if (t_bb.ncmd) rsx_tc_count(TCC_BAR_CHAIN, 1);   /* it shared the barrier of the first */
+    t_bb.img[t_bb.nimg++] = a;
+    if (b) t_bb.img[t_bb.nimg++] = b;
+    t_bb.ncmd++;
+}
 static void vk_barrier_all(void)
 {
+    if (vk_bb_on() && vk_bb_clean()) { rsx_tc_count(TCC_BAR_FULL_SKIP, 1); return; }
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
                            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    rsx_tc_count(TCC_BAR_FULL, 1);
+    if (vk_bb_on()) { t_bb.cb = s_vk.cmd; t_bb.seq = t_vk_cmd_seq; t_bb.ncmd = t_bb.nimg = 0; }
 }
 
 /* Order this command buffer's use of an image after everything submitted
  * before it; from UNDEFINED it is also the one-time move to GENERAL. */
 static void vk_barrier_image(VkImage img, VkImageAspectFlags aspect, VkImageLayout old_layout)
 {
+    if (old_layout == VK_IMAGE_LAYOUT_GENERAL && vk_bb_on() && vk_bb_clean()) { rsx_tc_count(TCC_BAR_IMG_SKIP, 1); return; }
+    rsx_tc_count(TCC_BAR_IMG, 1);
     VkImageMemoryBarrier b = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
@@ -3732,6 +3808,38 @@ static void vk_window_drop(const char* why)
     s_vk.windowed = 0;
 }
 
+/* PS3RECOMP_VK_CAPTURE_FRIENDLY=1 (F2 > Display; GitHub #51, Lossless Scaling / OBS): "fullscreen" is a
+ * borderless window over the screen, one pixel short of its height, instead of SDL's fullscreen window.
+ * A window that covers its whole monitor can be promoted by Windows to an independent-flip / fullscreen-
+ * optimised swapchain that bypasses the desktop compositor, and capture tools (Windows Graphics Capture, DXGI
+ * duplication) then may get no frames from it; one pixel short, DWM keeps composing it. */
+static int s_borderless_full;
+static int s_cap_win_x = SDL_WINDOWPOS_CENTERED, s_cap_win_y = SDL_WINDOWPOS_CENTERED, s_cap_win_w, s_cap_win_h;
+static void vk_window_borderless(int on)
+{
+    if (!s_vk.window) return;
+    if (on) {
+        if (!s_borderless_full && !(SDL_GetWindowFlags(s_vk.window) & SDL_WINDOW_FULLSCREEN)) {
+            SDL_GetWindowPosition(s_vk.window, &s_cap_win_x, &s_cap_win_y);
+            SDL_GetWindowSize(s_vk.window, &s_cap_win_w, &s_cap_win_h);
+        }
+        SDL_Rect r;
+        int di = SDL_GetWindowDisplayIndex(s_vk.window);
+        if (di < 0) di = 0;
+        if (SDL_GetDisplayBounds(di, &r) != 0) return;
+        SDL_SetWindowFullscreen(s_vk.window, 0);
+        SDL_SetWindowBordered(s_vk.window, SDL_FALSE);
+        SDL_SetWindowPosition(s_vk.window, r.x, r.y);
+        SDL_SetWindowSize(s_vk.window, r.w, r.h > 1 ? r.h - 1 : r.h);
+        s_borderless_full = 1;
+    } else if (s_borderless_full) {
+        SDL_SetWindowBordered(s_vk.window, SDL_TRUE);
+        if (s_cap_win_w > 0 && s_cap_win_h > 0) SDL_SetWindowSize(s_vk.window, s_cap_win_w, s_cap_win_h);
+        SDL_SetWindowPosition(s_vk.window, s_cap_win_x, s_cap_win_y);
+        s_borderless_full = 0;
+    }
+}
+
 static void vk_window_open(const char* title)
 {
     if (!vk_env_on("PS3RECOMP_VK_WINDOW")) return;
@@ -3739,8 +3847,11 @@ static void vk_window_open(const char* title)
         VK_LOG("window disabled, continuing headless: SDL video init failed: %s\n", SDL_GetError());
         return;
     }
-    Uint32 flags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN;
-    if (vk_env_on("PS3RECOMP_VK_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+    /* RESIZABLE: a window that can be dragged to any size (GitHub #51: stuck at the guest's size); the
+     * swapchain follows (vk_swapchain_lost on out-of-date), the picture is fitted by its own shape. */
+    Uint32 flags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+    const int cap_full = vk_env_on("PS3RECOMP_VK_FULLSCREEN") && vk_env_on("PS3RECOMP_VK_CAPTURE_FRIENDLY");
+    if (vk_env_on("PS3RECOMP_VK_FULLSCREEN") && !cap_full) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     /* [wide] PS3RECOMP_VK_WINDOW_SIZE=<w>x<h>: the window's size (unset: the
      * guest's, as before); with a wide picture and no size, the picture's
      * shape at the guest's height, shrunk to fit the screen */
@@ -3771,6 +3882,8 @@ static void vk_window_open(const char* title)
         vk_window_drop(why);
         return;
     }
+    s_cap_win_w = win_w; s_cap_win_h = win_h;
+    if (cap_full) vk_window_borderless(1);   /* PS3RECOMP_VK_CAPTURE_FRIENDLY: see vk_window_borderless */
 #ifdef _WIN32
     /* Keep the display and the PC awake while the game runs, as the D3D12 and
      * null backends do. SDL's screen-saver suspend alone did not: on 2026-11-09
@@ -4094,25 +4207,50 @@ static int vk_create_swapchain(void)
         VK_LOG("swapchain images cannot be blit destinations\n"); return -1;
     }
 
+    /* The whole list, however long. It used to be read into 64 slots and a longer list counted as a
+     * failure (VK_INCOMPLETE = VkResult 5), which dropped the window: sound, no picture. That is
+     * what the log of GitHub #54 shows for a Wayland surface (Hyprland, Mesa RADV; #44 the same): Mesa
+     * lists a Wayland surface's formats once per colour space. An X11 surface lists a handful, which is
+     * why SDL_VIDEODRIVER=x11 worked. */
     u32 nf = 0;
-    VK_CHECK(pvkGetPhysicalDeviceSurfaceFormatsKHR(s_vk.phys, s_vk.surface, &nf, NULL),
-             "vkGetPhysicalDeviceSurfaceFormatsKHR");
-    if (nf == 0) { VK_LOG("surface reports no formats\n"); return -1; }
-    if (nf > 64) nf = 64;
-    VkSurfaceFormatKHR fmts[64];
-    VK_CHECK(pvkGetPhysicalDeviceSurfaceFormatsKHR(s_vk.phys, s_vk.surface, &nf, fmts),
-             "vkGetPhysicalDeviceSurfaceFormatsKHR");
-    /* UNORM, not SRGB: the offscreen target holds the guest's values as-is. */
+    VkSurfaceFormatKHR* fmts = NULL;
+    for (int tries = 0; ; tries++) {
+        VK_CHECK(pvkGetPhysicalDeviceSurfaceFormatsKHR(s_vk.phys, s_vk.surface, &nf, NULL),
+                 "vkGetPhysicalDeviceSurfaceFormatsKHR");
+        if (nf == 0) { VK_LOG("surface reports no formats\n"); return -1; }
+        fmts = (VkSurfaceFormatKHR*)malloc((size_t)nf * sizeof *fmts);
+        if (!fmts) { VK_LOG("surface formats: out of memory (%u)\n", nf); return -1; }
+        const VkResult fr = pvkGetPhysicalDeviceSurfaceFormatsKHR(s_vk.phys, s_vk.surface, &nf, fmts);
+        /* INCOMPLETE: the list grew between the two calls. Ask again; after a few tries what was read
+         * is a valid part of the list and is used as it is. */
+        if (fr == VK_SUCCESS || (fr == VK_INCOMPLETE && tries >= 3 && nf)) break;
+        free(fmts); fmts = NULL;
+        if (fr != VK_INCOMPLETE || nf == 0) {
+            VK_LOG("vkGetPhysicalDeviceSurfaceFormatsKHR failed (VkResult %d)\n", (int)fr); return -1;
+        }
+    }
+    /* UNORM, not SRGB: the offscreen target holds the guest's values as-is. Of the entries with that
+     * format, the plain sRGB colour space (a long list also has the same format with HDR / wide-gamut
+     * colour spaces, which need an extension this instance does not enable). */
     VkSurfaceFormatKHR fmt = fmts[0];
     if (nf == 1 && fmts[0].format == VK_FORMAT_UNDEFINED) {
         fmt.format = VK_FORMAT_B8G8R8A8_UNORM;
+        fmt.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     } else {
         static const VkFormat pref[] = { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM };
         int found = 0;
-        for (size_t k = 0; k < 2 && !found; k++)
+        for (int srgb_only = 1; srgb_only >= 0 && !found; srgb_only--)
+            for (size_t k = 0; k < 2 && !found; k++)
+                for (u32 i = 0; i < nf; i++)
+                    if (fmts[i].format == pref[k] &&
+                        (!srgb_only || fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)) {
+                        fmt = fmts[i]; found = 1; break;
+                    }
+        if (!found)                           /* neither format: any entry in the sRGB colour space */
             for (u32 i = 0; i < nf; i++)
-                if (fmts[i].format == pref[k]) { fmt = fmts[i]; found = 1; break; }
+                if (fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { fmt = fmts[i]; break; }
     }
+    free(fmts);
     VkFormatProperties fp;
     pvkGetPhysicalDeviceFormatProperties(s_vk.phys, fmt.format, &fp);
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
@@ -4256,9 +4394,33 @@ static int vk_set_fullscreen(const char* v)
 {
     if (!s_vk.window) return 0;
     const int on = v && v[0] && v[0] != '0';
-    if (SDL_SetWindowFullscreen(s_vk.window, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) return 0;
+    if (vk_env_on("PS3RECOMP_VK_CAPTURE_FRIENDLY")) {      /* a composed borderless window (GitHub #51) */
+        if (SDL_GetWindowFlags(s_vk.window) & SDL_WINDOW_FULLSCREEN) SDL_SetWindowFullscreen(s_vk.window, 0);
+        vk_window_borderless(on);
+    } else {
+        if (s_borderless_full) vk_window_borderless(0);    /* the mode was switched off while borderless */
+        if (SDL_SetWindowFullscreen(s_vk.window, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) return 0;
+    }
     s_present_dirty = 1;
     return 1;
+}
+/* the menu: PS3RECOMP_VK_CAPTURE_FRIENDLY changed while the window is full screen: switch the kind of it now */
+static int vk_set_capture_friendly(const char* v)
+{
+    if (!s_vk.window) return 0;
+    const int cap = v && v[0] && v[0] != '0';
+    const int full = s_borderless_full || (SDL_GetWindowFlags(s_vk.window) & SDL_WINDOW_FULLSCREEN);
+    if (full) {
+        if (cap) { SDL_SetWindowFullscreen(s_vk.window, 0); vk_window_borderless(1); }
+        else { vk_window_borderless(0); SDL_SetWindowFullscreen(s_vk.window, SDL_WINDOW_FULLSCREEN_DESKTOP); }
+        s_present_dirty = 1;
+    }
+    return 1;
+}
+/* is the window "fullscreen" (SDL's, or the composed borderless one): the menu and Alt+Enter ask */
+int vk_backend_window_full(void)
+{
+    return s_vk.window && (s_borderless_full || (SDL_GetWindowFlags(s_vk.window) & SDL_WINDOW_FULLSCREEN));
 }
 
 /* PS3RECOMP_FPS_CAP=<fps> (0/unset = uncapped): present at most that many frames a
@@ -4455,6 +4617,7 @@ static void vk_present_finish(VkCommandBuffer cmd, VkFence fence, VkSemaphore ac
         const int fit = vk_wide_fit(cw, ch, s_vk.sc_extent.width, s_vk.sc_extent.height, &fit0, &fit1);
         VkImage pf_img = cimg;
         uint32_t pf_w = cw, pf_h = ch;
+        vk_postfx_compare_frame(fit0.x, fit1.x, (int)s_vk.sc_extent.width);   /* [menu-e] the menu's compare line */
         if (!vk_postfx_apply(cmd, cimg, cview, cw, ch, (uint32_t)(fit1.x - fit0.x), (uint32_t)(fit1.y - fit0.y),
                              &pf_img, &pf_w, &pf_h)) {
             pf_img = cimg; pf_w = cw; pf_h = ch;
@@ -4646,6 +4809,7 @@ static void vk_present_window_body(void)
     const int fit = vk_wide_fit(di_w, di_h, s_vk.sc_extent.width, s_vk.sc_extent.height, &fit0, &fit1);
     VkImage pf_img = di->img;
     uint32_t pf_w = di_w, pf_h = di_h;
+    vk_postfx_compare_frame(fit0.x, fit1.x, (int)s_vk.sc_extent.width);   /* [menu-e] the menu's compare line */
     if (!vk_postfx_apply(s_vk.cmd, di->img, di->view, di_w, di_h,
                          (uint32_t)(fit1.x - fit0.x), (uint32_t)(fit1.y - fit0.y), &pf_img, &pf_w, &pf_h)) {
         pf_img = di->img; pf_w = di_w; pf_h = di_h;
@@ -4841,6 +5005,18 @@ typedef struct vk_eng_obj {
      * reused by a newer target. */
     vk_image zv, sv;
     u32      serial;
+    /* [aa] PS3RECOMP_MSAA (vk_msaa.inc): a colour or depth target of the
+     * guest's display size (ms_elig) gets, at its first MSAA pass, a
+     * multisampled twin (ms) the passes draw into and resolve into `im` at
+     * their end -- `im` stays what every reader reads. ms_ok: ms holds the
+     * target's picture (a full clear, or a colour copy of `im`); a draw into
+     * `im` without it (a 1x pass) clears it. ms_fb / ms_set: the colour
+     * copy's framebuffer and descriptor set (vk_ms_unresolve). */
+    vk_image ms;
+    u8       ms_elig, ms_ok;
+    u16      ms_dw, ms_dh;           /* [aa] while !ms_ok: the corner (0,0)-(dw,dh) of `im` newer than ms */
+    VkFramebuffer   ms_fb;
+    VkDescriptorSet ms_set;
 } vk_eng_obj;
 /* [res] v (guest pixels) in this object's image pixels */
 static u32 vk_res_obj_px(const vk_eng_obj* o, u32 v) { return (o && o->scaled) ? vk_res_px(v) : v; }
@@ -4856,6 +5032,46 @@ static u32 s_eobj_sg[VK_ENG_MAX_OBJ];
 static void vk_eng_drop_framebuffers(void);
 static void vk_eng2_shutdown(void* user);
 static void vk_eng5_shutdown(void);
+
+/* ---- [aa] MSAA state (the code: vk_msaa.inc) ----------------------------- */
+#define VK_MS_FB_CACHE 32u
+#define VK_MS_SETS     128u
+static struct {
+    int      read;                    /* PS3RECOMP_MSAA read                            */
+    u32      want;                    /* asked: 1 off, 2, 4, 8                          */
+    u32      n;                       /* in effect (1 = off: none of this runs)         */
+    VkSampleCountFlagBits bits;
+    int      exts;                    /* the render-pass-2 + depth-resolve extensions on */
+    PFN_vkCreateRenderPass2KHR crp2;
+    VkRenderPass rp[RSX_BE_MAX_COLOR_TARGETS + 1];   /* n colours + depth, resolves   */
+    struct { u32 key[RSX_BE_MAX_COLOR_TARGETS + 1]; VkFramebuffer fb; } fb[VK_MS_FB_CACHE];
+    u32      fb_count;
+    vk_image scratch;                 /* depth for a pass that names none              */
+    u32      scratch_w, scratch_h;
+    int      scratch_ok;
+    /* the colour copy im -> ms (vk_ms_unresolve) */
+    VkRenderPass          urp;
+    VkPipeline            upipe;
+    VkPipelineLayout      upl;
+    VkDescriptorSetLayout ulay;
+    VkDescriptorPool      upool;
+    VkShaderModule        uvs, ufs;
+    VkSampler             usamp;
+    u32      usets, ufailed;
+    /* counters (the [aa] stats line every 10 s) */
+    unsigned long long pass_ms, pass_1x, draw_ms, draw_1x, made, unres, unres_fail,
+                       stale_c, stale_z, why[8];
+    double   made_mb;
+    u64      t_print;
+} s_ms = { .want = 1u, .n = 1u, .bits = VK_SAMPLE_COUNT_1_BIT };
+static void vk_ms_obj_release(vk_eng_obj* o);
+static void vk_ms_clear_color(vk_eng_obj* o, const VkClearColorValue* v);
+static void vk_ms_clear_depth(vk_eng_obj* o, VkImageAspectFlags a, const VkClearDepthStencilValue* d);
+static void vk_ms_drop_framebuffers(void);
+static VkRenderPass vk_ms_render_pass(u32 n);
+static void vk_ms_shutdown(void);
+/* [aa] PS3RECOMP_ZEQ_BIAS (read at the engine's init; 0 = off) */
+static struct { float units; unsigned long long draws; } s_zeq;
 
 static struct {
     u32 rt[RSX_BE_MAX_COLOR_TARGETS], nrt, depth;
@@ -5213,6 +5429,27 @@ static int vk_eng_init(void* user, u32 width, u32 height)
 {
     (void)user; (void)width; (void)height;
     vk_res_init();                                  /* [res] */
+    /* [aa] Edge Geometry (SPU) drops every triangle that covers no pixel
+     * centre of the raster it is told about (edgevp): the thin segments of
+     * the masts' shrouds, which is why MSAA at 1080p left them dotted while a
+     * 4K internal resolution (Edge told 4K) drew them whole. With MSAA, Edge
+     * is told the sample grid: n x the raster on each axis holds every
+     * standard 2x/4x/8x sample position (capped at the 8x Edge takes).
+     * Measured (2026-11-16): no visible change on the shrouds (nor with mesh
+     * trimming off: the culling is not their cause) and +0.4 ms GPU at 4x,
+     * so opt-in: PS3RECOMP_MSAA_EDGE=1; unset = the pixel raster, as before. */
+    if (s_ms.n > 1u) {
+        const char* e = getenv("PS3RECOMP_MSAA_EDGE");
+        if (e && e[0] == '1') {
+            const float bx = s_res.on ? s_res.sx : 1.0f, by = s_res.on ? s_res.s : 1.0f;
+            float kx = bx * (float)s_ms.n, ky = by * (float)s_ms.n;
+            if (kx > 8.0f) kx = 8.0f;
+            if (ky > 8.0f) ky = 8.0f;
+            { void spu_edge_vp_set(float, float); spu_edge_vp_set(kx, ky); }
+            VK_LOG("[aa] Edge culls at the MSAA sample grid: x%.2f x %.2f of 720p (PS3RECOMP_MSAA_EDGE)\n",
+                   (double)kx, (double)ky);
+        }
+    }
     vk_ropt_init();                                 /* [res] the GPU savings' switches */
     ps3_setting_register("PS3RECOMP_SSAO", vk_lfx_apply_ssao);
     ps3_setting_register("PS3RECOMP_SSAO_STRENGTH", vk_lfx_apply_strength);
@@ -5224,6 +5461,43 @@ static int vk_eng_init(void* user, u32 width, u32 height)
     memset(s_eobj, 0, sizeof s_eobj);
     memset(&s_eng_bound, 0, sizeof s_eng_bound);
     vk_fd_init();                                   /* (fastdraw) PS3RECOMP_ENG_FASTDRAW / PS3RECOMP_VK_FASTDRAW */
+    /* [aa] PS3RECOMP_ALPHA_AA=off|mip|cov|on (read at start; on = mip + cov):
+     * the alpha test of thin cut-outs (rsx_fp_apply_alpha_aa). cov only does
+     * anything in MSAA passes, so without MSAA it is not asked for and the
+     * programs stay as mip alone (or nothing) makes them. */
+    { const char* e = getenv("PS3RECOMP_ALPHA_AA");
+      int mip = 0, cov = 0;
+      if (e && *e) {
+          mip = !strcmp(e, "mip") || !strcmp(e, "on") || !strcmp(e, "1");
+          cov = !strcmp(e, "cov") || !strcmp(e, "on") || !strcmp(e, "1");
+      }
+      rsx_fp_alpha_aa_set(mip, cov && s_ms.n > 1u);
+      static const char* const kPost[3] = { "off", "FXAA", "SMAA" };
+      const int pa = vk_postfx_aa();
+      char msa[48];
+      if (s_ms.n > 1u) snprintf(msa, sizeof msa, "%ux", s_ms.n);
+      else if (s_ms.want > 1u) snprintf(msa, sizeof msa, "off (%ux asked: not available)", s_ms.want);
+      else snprintf(msa, sizeof msa, "off");
+      VK_LOG("[aa] anti-aliasing: post AA %s (PS3RECOMP_AA), MSAA %s (PS3RECOMP_MSAA), thin cut-outs: %s%s "
+             "(PS3RECOMP_ALPHA_AA=%s), internal resolution x%.2f\n",
+             pa >= 0 && pa < 3 ? kPost[pa] : "?", msa,
+             mip ? "mip-scaled alpha test" : "the game's alpha test",
+             cov && s_ms.n > 1u ? " + alpha to coverage in MSAA passes" : cov ? " (coverage needs MSAA: not used)" : "",
+             e && *e ? e : "off", (double)s_res.s); }
+    /* [aa] the dotted shrouds: re-drawn geometry whose depth differs from its
+     * G-buffer twin's by a few ULPs. PS3RECOMP_VP_PRECISE=1: every vertex
+     * program NoContraction (rsx_vp_set_precise); PS3RECOMP_ZEQ_BIAS=<units>:
+     * single-target LEQUAL re-draws that many depth units closer. Both read
+     * at start, both off by default (programs and pipelines as before). */
+    { const char* e = getenv("PS3RECOMP_VP_PRECISE");
+      rsx_vp_set_precise(e && e[0] == '1');
+      const char* z = getenv("PS3RECOMP_ZEQ_BIAS");
+      s_zeq.units = z && *z ? (float)atof(z) : 0.0f;
+      if (s_zeq.units < 0.0f || s_zeq.units > 4096.0f) s_zeq.units = 0.0f;
+      if (rsx_vp_precise() || s_zeq.units != 0.0f)
+          VK_LOG("[aa] re-drawn geometry: vertex programs %s (PS3RECOMP_VP_PRECISE), LEQUAL re-draw bias %.1f units "
+                 "(PS3RECOMP_ZEQ_BIAS)\n", rsx_vp_precise() ? "precise (NoContraction)" : "as before",
+                 (double)s_zeq.units); }
     return s_vk.device ? 0 : -1;
 }
 
@@ -5266,6 +5540,7 @@ static void vk_eng_release(void* user, u32 handle)
      * images, so vk_destroy_image defers them like the image itself */
     if (s_eobj[handle].zv.view) vk_destroy_image(&s_eobj[handle].zv);
     if (s_eobj[handle].sv.view) vk_destroy_image(&s_eobj[handle].sv);
+    vk_ms_obj_release(&s_eobj[handle]);        /* [aa] its multisampled twin */
     vk_destroy_image(&s_eobj[handle].im);      /* idle: submissions are waited on */
     memset(&s_eobj[handle], 0, sizeof s_eobj[handle]);
 }
@@ -5278,6 +5553,7 @@ static void vk_eng_shutdown(void* user)
     vk_eng2_shutdown(user);
     for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++) vk_eng_release(user, i);
     vk_ropt_shutdown();                             /* [res] */
+    vk_ms_shutdown();                               /* [aa] */
 }
 
 static void vk_eng_submit_and_wait(void* user, u32 reason)
@@ -5350,7 +5626,10 @@ static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 
                                       const void* seed, u32 seed_row_bytes)
 {
     /* [res] the screen-space chain is scaled: whatever fits the display */
-    return vk_eng_color_target_make(user, fmt, w, h, vk_res_fits(w, h), seed, seed_row_bytes);
+    const u32 hd = vk_eng_color_target_make(user, fmt, w, h, vk_res_fits(w, h), seed, seed_row_bytes);
+    /* [aa] the display-size targets (the scene, the G-buffer) may be drawn multisampled */
+    if (hd && s_ms.n > 1u && w == s_vk.width && h == s_vk.height) s_eobj[hd].ms_elig = 1;
+    return hd;
 }
 
 /* (fx12) rsx_draw_backend.color_target_create_guest (the engine's
@@ -5402,6 +5681,7 @@ static u32 vk_eng_depth_target_create(void* user, u32 gw, u32 gh)
     VkImageSubresourceRange r = { VK_DS_ASPECT, 0, 1, 0, 1 };
     pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &r);
     if (!s_batch.recording && vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
+    if (s_ms.n > 1u && gw == s_vk.width && gh == s_vk.height) o->ms_elig = 1;   /* [aa] as the colour targets */
     return hd;
 }
 
@@ -5434,9 +5714,14 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
     VkClearColorValue v;
     memcpy(v.float32, rgba, sizeof v.float32);
     VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    if (s_batch.recording) vk_barrier_all();
-    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+    const int chained = s_batch.recording && !o->ms.img && vk_bb_chain_ok(o->im.img, VK_NULL_HANDLE);   /* (track C); [aa] a target with an MSAA twin keeps its barriers */
+    if (!chained) {
+        if (s_batch.recording) vk_barrier_all();
+        vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+    }
     pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &r);
+    if (s_batch.recording) vk_bb_chain_add2(o->im.img, VK_NULL_HANDLE);
+    if (o->ms.img) vk_ms_clear_color(o, &v);        /* [aa] and its multisampled twin */   /* its barrier + clear end the chain */
     if (!s_batch.recording) vk_submit_and_wait();   /* batched: stays in the batch */
 }
 
@@ -5451,9 +5736,14 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
     if (!o || !a || vk_begin()) return;
     VkClearDepthStencilValue d = { depth_value, stencil };
     VkImageSubresourceRange r = { a, 0, 1, 0, 1 };
-    if (s_batch.recording) vk_barrier_all();
-    vk_barrier_image(o->im.img, VK_DS_ASPECT, VK_IMAGE_LAYOUT_GENERAL);
+    const int chained = s_batch.recording && !o->ms.img && vk_bb_chain_ok(o->im.img, VK_NULL_HANDLE);   /* (track C); [aa] a target with an MSAA twin keeps its barriers */
+    if (!chained) {
+        if (s_batch.recording) vk_barrier_all();
+        vk_barrier_image(o->im.img, VK_DS_ASPECT, VK_IMAGE_LAYOUT_GENERAL);
+    }
     pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &d, 1, &r);
+    if (s_batch.recording) vk_bb_chain_add2(o->im.img, VK_NULL_HANDLE);
+    if (o->ms.img) vk_ms_clear_depth(o, a, &d);     /* [aa] and its multisampled twin */   /* its barrier + clear end the chain */
     if (!s_batch.recording) vk_submit_and_wait();   /* batched: stays in the batch */
 }
 
@@ -5665,10 +5955,13 @@ static void vk_wide_bars(const vk_image* di, u32 w, u32 h)
     pvkCmdBlitImage(s_vk.cmd, s_wide.black.img, VK_IMAGE_LAYOUT_GENERAL, di->img, VK_IMAGE_LAYOUT_GENERAL,
                     2u, b, VK_FILTER_NEAREST);
 }
+static void vk_ms_stats(void);
 static void vk_eng_present(void* user, u32 surface)
 {
     (void)user;
+    vk_bb_forget();   /* (track C) the present records elsewhere; start over behind it */
     vk_rtd_frame(surface);
+    vk_ms_stats();                                      /* [aa] every 10 s */
     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
     if (o && !vk_begin()) {
         /* [res] the display image is the scaled one when on (vk_disp_img) */
@@ -6239,8 +6532,9 @@ typedef struct vk_eng_pipe {
     rsx_be_render_state rs;
     u32                 nslots, stride, rt_count;
     /* By topology, then depth clamp (bit 0) and depth bias (bit 1): both
-     * are pipeline state in Vulkan, encoder state in the engine. */
-    VkPipeline          variant[VK_ENG_TOPOLOGIES][4];
+     * are pipeline state in Vulkan, encoder state in the engine; bit 2 [aa]:
+     * the MSAA pass's (s_ms.n samples, its render pass). */
+    VkPipeline          variant[VK_ENG_TOPOLOGIES][8];
     /* Units the fragment program declares TextureCube / Texture3D: a sampled
      * image's view type has to match the declaration, bound or not. */
     u32                 cube_mask, vol_mask;
@@ -6249,7 +6543,7 @@ typedef struct vk_eng_pipe {
      * pipelines (REVERSE_SUBTRACT, drawn after the positive half). */
     u32                 sblend;
     VkShaderModule      fs_neg;
-    VkPipeline          variant_neg[VK_ENG_TOPOLOGIES][4];
+    VkPipeline          variant_neg[VK_ENG_TOPOLOGIES][8];
     /* [res] units that read their own target at their own pixel (the engine's
      * framebuffer fetch, vk_res_fbf_rewrite): unit u reads a copy of colour
      * attachment fbf_att[u], taken at the draw. res_wpos: the program reads
@@ -6273,6 +6567,7 @@ typedef struct vk_eng_pipe {
     volatile u32        pa_xl, pa_fail, pa_job;
     char*               pa_text[3];
     volatile u64        pa_want, pa_done;
+    volatile u64        pa_want2, pa_done2;   /* [aa] the same for the MSAA variants (vk_idx 4..7) */
     u32                 pa_prev, pa_next;
 } vk_eng_pipe;
 
@@ -6340,6 +6635,7 @@ static void vk_eng_drop_framebuffers(void)
     for (u32 i = 0; i < s_e2.fb_count; i++)
         if (s_e2.fb[i].fb) vk_batch_retire_fb(s_e2.fb[i].fb);
     s_e2.fb_count = 0;
+    vk_ms_drop_framebuffers();   /* [aa] the MSAA passes' too */
 }
 
 /* The render pass for `n` RGBA8 colour attachments plus depth, LOAD/STORE in
@@ -6348,6 +6644,7 @@ static VkRenderPass vk_eng_render_pass(u32 n)
 {
     if (n < 1 || n > RSX_BE_MAX_COLOR_TARGETS) return VK_NULL_HANDLE;
     if (s_e2.rp[n]) return s_e2.rp[n];
+    if (s_ms.n > 1u) (void)vk_ms_render_pass(n);   /* [aa] its MSAA twin beside it: the pipeline workers read both */
     VkAttachmentDescription att[RSX_BE_MAX_COLOR_TARGETS + 1];
     VkAttachmentReference   cref[RSX_BE_MAX_COLOR_TARGETS];
     for (u32 i = 0; i <= n; i++) {
@@ -6805,10 +7102,10 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
     vk_batch_flush();                       /* a recorded draw may still bind it */
     vk_fif_wait_other();                    /* ... or the other slot's frame */
     for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
-        for (u32 k = 0; k < 4; k++)
+        for (u32 k = 0; k < 8; k++)
             if (P->variant[t][k]) pvkDestroyPipeline(s_vk.device, P->variant[t][k], NULL);
     for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
-        for (u32 k = 0; k < 4; k++)
+        for (u32 k = 0; k < 8; k++)
             if (P->variant_neg[t][k]) pvkDestroyPipeline(s_vk.device, P->variant_neg[t][k], NULL);
     if (P->vs) pvkDestroyShaderModule(s_vk.device, P->vs, NULL);
     if (P->fs) pvkDestroyShaderModule(s_vk.device, P->fs, NULL);
@@ -6851,9 +7148,14 @@ static VkResult vk_eng_variant_build(const vk_ev_in* in, VkPipeline* out, int bg
     *out = VK_NULL_HANDLE;
     const u32 neg = in->neg, topo_idx = in->topo_idx, vk_idx = in->vk_idx;
     VkRenderPass rp = VK_NULL_HANDLE;
-    if (!bg) rp = vk_eng_render_pass(in->rt_count);
-    else if (in->rt_count >= 1 && in->rt_count <= RSX_BE_MAX_COLOR_TARGETS) rp = s_e2.rp[in->rt_count];
-    if (!rp || in->nslots > VK_GUEST_ATTRS || !in->vs || !in->fs || topo_idx >= VK_ENG_TOPOLOGIES || vk_idx > 3u)
+    /* [aa] vk_idx bit 2: the MSAA pass's variant (its render pass, s_ms.n samples) */
+    const int msv = (vk_idx & 4u) != 0;
+    if (msv && s_ms.n < 2u) return VK_ERROR_INITIALIZATION_FAILED;   /* a recipe of another MSAA setting */
+    if (!bg) rp = msv ? (vk_eng_render_pass(in->rt_count) ? vk_ms_render_pass(in->rt_count) : VK_NULL_HANDLE)
+                      : vk_eng_render_pass(in->rt_count);
+    else if (in->rt_count >= 1 && in->rt_count <= RSX_BE_MAX_COLOR_TARGETS)
+        rp = msv ? s_ms.rp[in->rt_count] : s_e2.rp[in->rt_count];
+    if (!rp || in->nslots > VK_GUEST_ATTRS || !in->vs || !in->fs || topo_idx >= VK_ENG_TOPOLOGIES || vk_idx > 7u)
         return VK_ERROR_INITIALIZATION_FAILED;
     const rsx_be_render_state* rs = in->rs;
 
@@ -6862,6 +7164,12 @@ static VkResult vk_eng_variant_build(const vk_ev_in* in, VkPipeline* out, int bg
           .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = in->vs, .pName = "main" },
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
           .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = in->fs, .pName = "main" } };
+    /* [aa] the sample count as the fragment program's specialisation constant
+     * 200 (PS3RECOMP_ALPHA_AA's coverage test, rsx_fp_apply_alpha_aa); a
+     * program without it ignores the entry. The 1x variants set nothing. */
+    const VkSpecializationMapEntry ms_ent = { 200u, 0u, sizeof(u32) };
+    const VkSpecializationInfo ms_spec = { 1u, &ms_ent, sizeof(u32), &s_ms.n };
+    if (msv) st[1].pSpecializationInfo = &ms_spec;
     VkVertexInputBindingDescription vb = { 0, in->stride, VK_VERTEX_INPUT_RATE_VERTEX };
     VkVertexInputAttributeDescription va[VK_GUEST_ATTRS];
     for (u32 s = 0; s < in->nslots; s++)
@@ -6893,7 +7201,7 @@ static VkResult vk_eng_variant_build(const vk_ev_in* in, VkPipeline* out, int bg
         .lineWidth = 1.0f };
     VkPipelineMultisampleStateCreateInfo ms = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+        .rasterizationSamples = msv ? s_ms.bits : VK_SAMPLE_COUNT_1_BIT };   /* [aa] */
     VkStencilOpState front = vk_gcm_stencil_face(rs->s_func, rs->s_fail, rs->s_zfail, rs->s_zpass,
                                                  rs->s_func_mask, rs->s_write_mask);
     VkStencilOpState back = rs->stencil_two_sided
@@ -7285,11 +7593,28 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
     memcpy(&lo, &d->min_lod, 4); memcpy(&hi, &d->max_lod, 4);
     /* [postfx] PS3RECOMP_ANISO: only a linear minification through mipmaps */
     const u32 aniso = (u32)vk_postfx_sampler_aniso(d->min_linear, d->mip_present) & 0x1Fu;
+    /* [aa] PS3RECOMP_ENG_LOD_BIAS=1 (read once): the guest's own LOD bias
+     * (SET_TEXTURE_FILTER [12:0]) on mipmapped samplers, in 1/32 steps,
+     * within the device's limit; unset/0 = none, as before (key bits 53+ 0) */
+    static int lodb = -1; static float lodb_max;
+    if (__builtin_expect(lodb < 0, 0)) {
+        const char* e = getenv("PS3RECOMP_ENG_LOD_BIAS");
+        VkPhysicalDeviceProperties pp; pvkGetPhysicalDeviceProperties(s_vk.phys, &pp);
+        lodb_max = pp.limits.maxSamplerLodBias;
+        lodb = e && e[0] == '1';
+        if (lodb) VK_LOG("[aa] the guest's texture LOD bias applied (PS3RECOMP_ENG_LOD_BIAS; device limit %.1f)\n",
+                         (double)lodb_max);
+    }
+    float bias = (lodb && d->mip_present) ? d->lod_bias : 0.0f;
+    if (bias > lodb_max) bias = lodb_max;
+    if (bias < -lodb_max) bias = -lodb_max;
+    const int bias32 = (int)(bias * 32.0f);
     const u64 key = (u64)d->min_linear | ((u64)d->mag_linear << 1) | ((u64)d->mip_linear << 2)
                   | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
                   | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
                   | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32)
-                  | ((u64)aniso << 48);    /* [postfx] a new level keys new samplers */
+                  | ((u64)aniso << 48)     /* [postfx] a new level keys new samplers */
+                  | ((u64)((u32)bias32 & 0x7FFu) << 53);   /* [aa] */
     if (__builtin_expect(g_eng_bst_on != 0, 0) && g_eng_bst_t) {   /* (fastdraw) DELTA_STATS=2: the search's length */
         u32 i = 0; while (i < s_esamp_count && s_esamp[i].key != key) i++;
         g_eng_bsamp[g_eng_bst_path][0]++; g_eng_bsamp[g_eng_bst_path][1] += i < s_esamp_count ? i + 1u : s_esamp_count;
@@ -7309,7 +7634,7 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
         .mipmapMode = d->mip_linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
         .addressModeU = vk_gcm_wrap(d->wrap_s), .addressModeV = vk_gcm_wrap(d->wrap_t),
         .addressModeW = vk_gcm_wrap(d->wrap_r),
-        .minLod = min_lod, .maxLod = max_lod,
+        .minLod = min_lod, .maxLod = max_lod, .mipLodBias = (float)bias32 / 32.0f,   /* [aa] 0 unless asked */
         .anisotropyEnable = aniso > 1 ? VK_TRUE : VK_FALSE, .maxAnisotropy = aniso > 1 ? (float)aniso : 1.0f,
         .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
     VkSampler smp;
@@ -7929,6 +8254,8 @@ static inline u32 vk_bind_ib_at(VkBuffer b, VkDeviceSize o, int known)
     return 0;
 }
 static unsigned long long s_ecs_skipped;
+extern u64 g_eng_aa_progs[5];   /* [aa] the engine's alpha-test rewrites (rsx_draw_engine.c) */
+#include "vk_msaa.inc"          /* [aa] PS3RECOMP_MSAA */
 /* PS3RECOMP_VK_BIAS_RESET (live, default 1; 0 = as before): a pipeline
  * without polygon offset (vk_idx bit 2 clear) declares the depth bias static,
  * and binding it makes the dynamic depth bias set earlier in the pass invalid
@@ -8281,17 +8608,42 @@ static void vk_eng_draw_ex_body(rsx_topology topology, const void* vertices, VkB
                    rt0->gw, rt0->gh);
         }
     }
-    VkImageView dview = (zo && zo->w >= w && zo->h >= h) ? zo->im.view : vk_eng_scratch_depth(w, h);
-    if (!dview) return;
-    const u32 dkey = (zo && dview == zo->im.view) ? s_eng_bound.depth : 0xFFFFFFFFu;
+    vk_eng_obj* const zfit = (zo && zo->w >= w && zo->h >= h) ? zo : NULL;
+    /* [aa] PS3RECOMP_MSAA: this pass into the targets' multisampled twins
+     * (msn samples, resolved at its end) or 1x into the targets, as before */
+    const u32 msn = s_ms.n > 1u ? vk_ms_pass(P, n, zfit, w, h) : 1u;
+    VkImageView dview = VK_NULL_HANDLE;
+    u32 dkey = 0xFFFFFFFFu;
+    if (msn == 1u) {
+        dview = zfit ? zfit->im.view : vk_eng_scratch_depth(w, h);
+        if (!dview) return;
+        dkey = zfit ? s_eng_bound.depth : 0xFFFFFFFFu;
+    }
     VK_BST(1);
 
-    const int use_bias = s_e2.bias_const != 0.0f || s_e2.bias_slope != 0.0f;
-    const u32 vk_idx = ((s_e2.depth_clamp && s_vk_depth_clamp_ok) ? 1u : 0u) | (use_bias ? 2u : 0u);
+    /* [aa] PS3RECOMP_ZEQ_BIAS=<units>: a single-target LEQUAL draw into the
+     * display-size depth (the forward re-draws after the deferred composite:
+     * the masts' ropes) moves that many depth units closer, so it passes on
+     * the depth its G-buffer twin wrote even when the two programs' positions
+     * differ by a few ULPs. The G-buffer (MRT) draws keep their depth. */
+    float bias_c = s_e2.bias_const, bias_s = s_e2.bias_slope;
+    if (__builtin_expect(s_zeq.units != 0.0f, 0) && bias_c == 0.0f && bias_s == 0.0f && n == 1u && zfit &&
+        P->rs.depth_test && P->rs.depth_func == 0x0203u && zfit->gw == s_vk.width && zfit->gh == s_vk.height) {
+        bias_c = -s_zeq.units;
+        s_zeq.draws++;
+    }
+    const int use_bias = bias_c != 0.0f || bias_s != 0.0f;
+    const u32 vk_idx = ((s_e2.depth_clamp && s_vk_depth_clamp_ok) ? 1u : 0u) | (use_bias ? 2u : 0u) |
+                       (msn > 1u ? 4u : 0u);                                  /* [aa] the MSAA variant */
     VkPipeline pipe = vk_eng_variant(P, (u32)topology - 1u, vk_idx);
-    VkRenderPass rp = vk_eng_render_pass(n);
-    VkFramebuffer fb = vk_eng_framebuffer(rp, s_eng_bound.rt, n, dview, dkey, w, h);
+    VkRenderPass rp = msn > 1u ? vk_ms_render_pass(n) : vk_eng_render_pass(n);
+    VkFramebuffer fb = msn > 1u ? vk_ms_framebuffer(rp, s_eng_bound.rt, n, zfit, s_eng_bound.depth, w, h)
+                                : vk_eng_framebuffer(rp, s_eng_bound.rt, n, dview, dkey, w, h);
     if (!pipe || !rp || !fb) return;
+    if (s_ms.n > 1u) {                         /* [aa] counted; a 1x draw marks what it writes */
+        if (msn > 1u) s_ms.draw_ms++;
+        else { s_ms.draw_1x++; vk_ms_note_1x(P, n, zfit, w, h); }
+    }
     VK_BST(2);
 
     const VkDeviceSize vbytes = vertices ? (VkDeviceSize)vertex_count * stride : 0;
@@ -8385,6 +8737,12 @@ static void vk_eng_draw_ex_body(rsx_topology topology, const void* vertices, VkB
         if (bm < 2)
         for (u32 i = 0; i < n; i++)
             vk_barrier_image(s_eobj[s_eng_bound.rt[i]].im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        if (msn > 1u) {                        /* [aa] the twins the pass draws into */
+            if (bm < 2)
+                for (u32 i = 0; i < n; i++)
+                    vk_barrier_image(s_eobj[s_eng_bound.rt[i]].ms.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            s_ms.pass_ms++;
+        } else if (s_ms.n > 1u) s_ms.pass_1x++;
         VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
                                       .renderPass = rp, .framebuffer = fb,
                                       .renderArea = { { 0, 0 }, { w, h } } };
@@ -8447,9 +8805,9 @@ static void vk_eng_draw_ex_body(rsx_topology topology, const void* vertices, VkB
     if (!known || s_ecs.sref != sref) {
         pvkCmdSetStencilReference(s_vk.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, sref); rec |= 8u; }
     int bias_set = known && s_ecs.bias_set;
-    if (use_bias && (!bias_set || s_ecs.bc != s_e2.bias_const || s_ecs.bs != s_e2.bias_slope)) {
-        pvkCmdSetDepthBias(s_vk.cmd, s_e2.bias_const, 0.0f, s_e2.bias_slope);
-        bias_set = 1; s_ecs.bc = s_e2.bias_const; s_ecs.bs = s_e2.bias_slope; rec |= 16u;
+    if (use_bias && (!bias_set || s_ecs.bc != bias_c || s_ecs.bs != bias_s)) {
+        pvkCmdSetDepthBias(s_vk.cmd, bias_c, 0.0f, bias_s);
+        bias_set = 1; s_ecs.bc = bias_c; s_ecs.bs = bias_s; rec |= 16u;
     }
     if (!use_bias) {   /* PS3RECOMP_VK_BIAS_RESET: this pipeline's depth bias is static */
         int br = __atomic_load_n(&s_bias_reset, __ATOMIC_RELAXED);
@@ -8529,7 +8887,7 @@ static void vk_eng_draw_ex_body(rsx_topology topology, const void* vertices, VkB
         s_mg.t_rec += vk_mg_tsc() - mg_t0;
         const vk_mg_draw md = { .pipe = pipe, .vp = vp, .sc = sc, .sref = sref,
                                 .d0 = (u32)ubase, .d1 = (u32)ps_dyn, .stride = stride,
-                                .bias = use_bias, .idx = has_idx, .bc = s_e2.bias_const, .bs = s_e2.bias_slope,
+                                .bias = use_bias, .idx = has_idx, .bc = bias_c, .bs = bias_s,
                                 .set = set, .vb = vbuf, .ib = has_idx ? ibuf : VK_NULL_HANDLE, .vo = voff };
         vk_mg_note(&md, cont, !batched || P->sblend || P->fbf_in, !vertices);
     }
@@ -9325,13 +9683,19 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
     }
     const vk_eng_obj* d = &s_eobj[dst];
     if (vk_begin()) return 0;
-    if (s_batch.recording) vk_barrier_all();
-    vk_barrier_image(s->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
-    vk_barrier_image(d->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+    /* (track C) PS3_RSX_BARBATCH: a copy right behind other copies / clears of other images shares
+     * the barrier in front of the first of them */
+    const int chained = s_batch.recording && vk_bb_chain_ok(s->im.img, d->im.img);
+    if (!chained) {
+        if (s_batch.recording) vk_barrier_all();
+        vk_barrier_image(s->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        vk_barrier_image(d->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+    }
     VkImageCopy r = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
                       .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
                       .extent = { s->w, s->h, 1 } };
     pvkCmdCopyImage(s_vk.cmd, s->im.img, VK_IMAGE_LAYOUT_GENERAL, d->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+    if (s_batch.recording) vk_bb_chain_add2(s->im.img, d->im.img);
     if (s_batch.recording) return dst;      /* GPU to GPU: stays in the batch */
     return vk_submit_and_wait() ? 0 : dst;
 }
@@ -9905,8 +10269,9 @@ static int vk_lfx_tone(const vk_eng_obj* src)
         s_lp.tone_fb_img = s_lp.tone_fb ? di->img : VK_NULL_HANDLE;
         if (!s_lp.tone_fb) return 0;
     }
+    /* [menu-e] sz.z: the F2 menu's compare line in pixels (vk_postfx.h; 0 = off) */
     const float tp[8] = { (float)sh / 100.0f, (float)mt / 100.0f, (float)hl / 100.0f, (float)cl / 100.0f,
-                          (float)di_w, (float)di_h, 0.0f, 0.0f };
+                          (float)di_w, (float)di_h, vk_postfx_compare_frac() * (float)di_w, 0.0f };
     memcpy(s_lp.tone_ubo.ptr, tp, sizeof tp);
     vk_pass_write_set(s_lp.set[VK_PASS_TONE], &s_lp.tone_ubo, src->im.view, VK_NULL_HANDLE, VK_NULL_HANDLE);
     if (vk_begin()) return 0;
@@ -10090,6 +10455,57 @@ static void vk_wide_decide(void)
 /* ---------------------------------------------------------------------------
  * Public entry points
  * -------------------------------------------------------------------------*/
+/* AMD Adrenalin 26.3.1 .. 26.5.x miscompile some shaders on RDNA3/RDNA4 (black spots on faces; RPCS3 wiki
+ * "Graphics Driver Issues": fixed in Adrenalin 26.6.1, 2026-06-02). The Windows driver store number
+ * (32.0.xxxxx.xxxx) does not order across AMD's branches (26.6.1 is 32.0.31019.2002, an older 25.x
+ * can be 32.0.31035.1003), so it is not used. AMD's proprietary driver reports the Adrenalin release in
+ * VkPhysicalDeviceDriverProperties.driverInfo ("26.6.1 (LLPC)", AMD GPUOpen "Decoding Radeon Vulkan versions");
+ * without it, the Vulkan driverVersion (major<<22 | minor<<12 | patch; 26.6.1 = 2.0.395, GPUOpen version table).
+ * Logs it, and says it once in the in-game notice. PS3RECOMP_AMD_DRIVER_NOTICE=0 turns the notice off. */
+#define VK_AMD_FIXED_ADRENALIN_Y 26
+#define VK_AMD_FIXED_ADRENALIN_M 6
+#define VK_AMD_FIXED_ADRENALIN_P 1
+#define VK_AMD_FIXED_VKPATCH     395u
+static void vk_amd_driver_check(void)
+{
+    VkPhysicalDeviceProperties p;
+    pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
+    if (p.vendorID != 0x1002u) return;
+    VkPhysicalDeviceDriverPropertiesKHR dr = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES_KHR };
+    int have = 0;
+    PFN_vkGetPhysicalDeviceProperties2KHR gp2 = (PFN_vkGetPhysicalDeviceProperties2KHR)
+        pvkGetInstanceProcAddr(s_vk.instance, "vkGetPhysicalDeviceProperties2KHR");
+    if (!gp2) gp2 = (PFN_vkGetPhysicalDeviceProperties2KHR)
+        pvkGetInstanceProcAddr(s_vk.instance, "vkGetPhysicalDeviceProperties2");
+    if (gp2 && vk_has_device_extension(s_vk.phys, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME)) {
+        VkPhysicalDeviceProperties2KHR p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR, .pNext = &dr };
+        gp2(s_vk.phys, &p2);
+        have = 1;
+    }
+    const unsigned dv = p.driverVersion;
+    VK_LOG("AMD driver: %s %s, Vulkan driverVersion %u.%u.%u (0x%08x)\n", have ? dr.driverName : "(unknown)",
+           have ? dr.driverInfo : "", dv >> 22, (dv >> 12) & 0x3ffu, dv & 0xfffu, dv);
+    /* only AMD's own Windows/Linux driver carries Adrenalin numbers; Mesa RADV does not */
+    if (have && strncmp(dr.driverName, "AMD proprietary", 15) != 0 && strncmp(dr.driverName, "AMD open-source", 15) != 0) return;
+    int old = -1, y = 0, m = 0, pa = 0;
+    if (have && sscanf(dr.driverInfo, "%d.%d.%d", &y, &m, &pa) == 3 && y >= 18 && y <= 99) {
+        old = (y * 10000 + m * 100 + pa) <
+              (VK_AMD_FIXED_ADRENALIN_Y * 10000 + VK_AMD_FIXED_ADRENALIN_M * 100 + VK_AMD_FIXED_ADRENALIN_P);
+        VK_LOG("AMD driver: Adrenalin %d.%d.%d, %s than %d.%d.%d\n", y, m, pa, old ? "older" : "not older",
+               VK_AMD_FIXED_ADRENALIN_Y, VK_AMD_FIXED_ADRENALIN_M, VK_AMD_FIXED_ADRENALIN_P);
+    } else if ((dv >> 22) == 2u && ((dv >> 12) & 0x3ffu) == 0u) {
+        old = (dv & 0xfffu) < VK_AMD_FIXED_VKPATCH;
+        VK_LOG("AMD driver: no Adrenalin version in driverInfo; Vulkan 2.0.%u is %s than 26.6.1 (2.0.%u)\n",
+               dv & 0xfffu, old ? "older" : "not older", VK_AMD_FIXED_VKPATCH);
+    }
+    if (old != 1) return;
+    VK_LOG("AMD driver older than 26.6.1: known shader bug on Radeon RX 7000/9000 (black spots on faces); update the driver\n");
+    const char* off = getenv("PS3RECOMP_AMD_DRIVER_NOTICE");
+    if (s_vk.windowed && !(off && off[0] == '0'))
+        vk_overlay_notice_for("Your AMD driver is older than 26.6.1, which has a known shader bug on Radeon RX 7000/9000 cards. "
+                              "Update your driver if you see black spots on faces.", 14.0);
+}
+
 static int vk_init_all(u32 width, u32 height, const char* title)
 {
     s_vk.width  = width  ? width  : 1280;
@@ -10182,8 +10598,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                     .queueFamilyIndex = s_vk.queue_family,
                                     .queueCount = 1, .pQueuePriorities = &prio };
-    const char* dev_exts[3];
+    const char* dev_exts[8];
     u32 ndext = 0;
+    /* [aa] PS3RECOMP_MSAA's extensions first (none when it is off): the
+     * fallbacks below drop the last one */
+    u32 n_ms_ext = vk_ms_device_exts(dev_exts, props2 != 0);
+    ndext = n_ms_ext;
     if (s_vk.windowed) dev_exts[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     /* (amdnan) PS3RECOMP_VK_NAN_PRESERVE: the guest programs declare
      * SignedZeroInfNanPreserve (rsx_shader_spirv.h). Without it a driver may
@@ -10255,6 +10675,14 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                                .ppEnabledExtensionNames = ndext ? dev_exts : NULL,
                                .pEnabledFeatures = &want };
     VkResult dr_ = pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device);
+    if (dr_ != VK_SUCCESS && n_ms_ext) {         /* [aa] never fail over MSAA */
+        VK_LOG("[aa] WARNING: the device would not take MSAA's extensions (%d): MSAA off\n", (int)dr_);
+        memmove(dev_exts, dev_exts + n_ms_ext, (ndext - n_ms_ext) * sizeof dev_exts[0]);
+        ndext -= n_ms_ext; n_ms_ext = 0; s_ms.exts = 0;
+        dci.enabledExtensionCount = ndext;
+        dci.ppEnabledExtensionNames = ndext ? dev_exts : NULL;
+        dr_ = pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device);
+    }
     if (dr_ != VK_SUCCESS && s_vram.budget_ok) {   /* (lowend) never fail over the budget extension */
         s_vram.budget_ok = 0;
         dci.enabledExtensionCount = --ndext;
@@ -10283,6 +10711,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
     VK_LOG("GPU memory: %u MB (heap %d)%s\n", vk_vram_device_local_mb(), s_vram.dl_heap,
            s_vram.budget_ok ? ", budget numbers on (VK_EXT_memory_budget)" : ", no budget numbers");
     if (vk_load_device_functions()) return -1;
+    vk_ms_device_ready();                         /* [aa] the sample count in effect */
     if (s_vk.windowed && vk_load_wsi_device_functions())
         vk_window_drop("the driver has no swapchain functions");
     pvkGetDeviceQueue(s_vk.device, s_vk.queue_family, 0, &s_vk.queue);
@@ -10351,10 +10780,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
         ps3_setting_register("PS3RECOMP_FPS_CAP", vk_set_fps_cap);
         ps3_setting_register("PS3RECOMP_VK_PRESENT", vk_set_present);
         ps3_setting_register("PS3RECOMP_VK_FULLSCREEN", vk_set_fullscreen);
+        ps3_setting_register("PS3RECOMP_VK_CAPTURE_FRIENDLY", vk_set_capture_friendly);
         const vk_overlay_attach_info oi = {
             pvkGetInstanceProcAddr, s_vk.instance, s_vk.phys, s_vk.device, s_vk.queue_family, s_vk.queue,
             s_vk.window, s_vk.width, s_vk.height };
         vk_overlay_attach(&oi);
+        vk_amd_driver_check();
     }
     return 0;
 }

@@ -111,17 +111,27 @@ static int dbg(void)
  * rather than through vm_read32/vm_write32 -- those are the functions that call
  * into this file, and routing back through them would recurse.
  * -----------------------------------------------------------------------*/
+/* PPU_LEAN_MEM (track A, 2026-11-16; runtime/memory/vm_guard.h VMG_RAW_SPU): while the windows'
+ * problem-state halves are guarded (no access, every PPU load and store of them emulated through
+ * spu_raw_guard_load / _store below), their memory lives here instead, one copy of the window
+ * span; the local-store halves stay guest memory. NULL = the window itself, as before. */
+static uint8_t* s_reg_alias;
+static inline uint8_t* reg_mem(uint32_t ea)
+{
+    return s_reg_alias ? s_reg_alias + (ea - SPU_RAW_BASE) : vm_base + ea;
+}
+
 static uint32_t be32_load(uint32_t ea)
 {
     uint32_t b;
-    memcpy(&b, vm_base + ea, 4);
+    memcpy(&b, reg_mem(ea), 4);
     return (b >> 24) | ((b >> 8) & 0xFF00u) | ((b << 8) & 0xFF0000u) | (b << 24);
 }
 
 static void be32_store(uint32_t ea, uint32_t v)
 {
     uint32_t b = (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
-    memcpy(vm_base + ea, &b, 4);
+    memcpy(reg_mem(ea), &b, 4);
 }
 
 static raw_spu* spu_for(uint32_t ea, uint32_t* off_out)
@@ -536,7 +546,7 @@ static int64_t sc_raw_spu_create(ppu_context* ctx)
 
         /* Zero the problem state. Local store is left alone: the guest may have
          * already staged code there, and hardware does not clear it either. */
-        memset(vm_base + s_spu[n].base + SPU_RAW_PROB_OFF, 0,
+        memset(reg_mem(s_spu[n].base + SPU_RAW_PROB_OFF), 0,
                SPU_RAW_STRIDE - SPU_RAW_PROB_OFF);
         be32_store(s_spu[n].base + SPU_RAW_MBOX_STATUS,
                    MBOX_STATUS(0, SPU_MBOX_DEPTH, 0));
@@ -717,4 +727,61 @@ void sys_raw_spu_init(lv2_syscall_table* tbl)
                          "sys_raw_spu_image_load", hle_raw_spu_image_load);
     ps3_hle_register_ctx(ps3_compute_nid("sys_spu_image_close"),
                          "sys_spu_image_close", hle_spu_image_close);
+}
+
+/* ---------------------------------------------------------------------------
+ * PPU_LEAN_MEM: the guarded windows (runtime/memory/vm_guard.h).
+ *
+ * The guard's fault handler hands every PPU access of a problem-state page here, as the
+ * out-of-line vm_read32 / vm_write32 handled it before: a 32-bit load the register file owns
+ * (the outbound mailbox pops, the derived status words) is answered by spu_raw_reg_load, any
+ * other load reads the registers' memory; a store lands in that memory and a 32-bit one runs the
+ * register's side effects after it. Values are the guest's (big-endian memory read as a number).
+ * -----------------------------------------------------------------------*/
+int spu_raw_guard_prepare(void)
+{
+    if (s_reg_alias) return 1;
+    uint8_t* a = (uint8_t*)calloc(1, SPU_RAW_SPAN);
+    if (!a) return 0;
+    if (vm_base)
+        for (uint32_t n = 0; n < SPU_RAW_COUNT; n++) {   /* whatever the windows hold so far */
+            const uint32_t at = n * SPU_RAW_STRIDE + SPU_RAW_PROB_OFF;
+            memcpy(a + at, vm_base + SPU_RAW_BASE + at, SPU_RAW_STRIDE - SPU_RAW_PROB_OFF);
+        }
+    __atomic_store_n(&s_reg_alias, a, __ATOMIC_SEQ_CST);
+    return 1;
+}
+
+void spu_raw_guard_abandon(void)
+{
+    uint8_t* a = __atomic_exchange_n(&s_reg_alias, (uint8_t*)NULL, __ATOMIC_SEQ_CST);
+    if (a && vm_base)
+        for (uint32_t n = 0; n < SPU_RAW_COUNT; n++) {
+            const uint32_t at = n * SPU_RAW_STRIDE + SPU_RAW_PROB_OFF;
+            memcpy(vm_base + SPU_RAW_BASE + at, a + at, SPU_RAW_STRIDE - SPU_RAW_PROB_OFF);
+        }
+    /* (a stays allocated: a thread may still be inside reg_mem) */
+}
+
+int spu_raw_guard_load(uint32_t ea, unsigned n, uint64_t* val)
+{
+    if (!s_reg_alias || !spu_raw_is_reg(ea)) return 0;
+    if (n == 4) {
+        uint32_t v;
+        if (spu_raw_reg_load(ea, &v)) { *val = v; return 1; }
+    }
+    const uint8_t* p = reg_mem(ea);
+    uint64_t v = 0;
+    for (unsigned i = 0; i < n; i++) v = (v << 8) | p[i];
+    *val = v;
+    return 1;
+}
+
+int spu_raw_guard_store(uint32_t ea, unsigned n, uint64_t val)
+{
+    if (!s_reg_alias || !spu_raw_is_reg(ea)) return 0;
+    uint8_t* p = reg_mem(ea);
+    for (unsigned i = 0; i < n; i++) p[i] = (uint8_t)(val >> (8 * (n - 1u - i)));
+    if (n == 4) spu_raw_reg_store(ea, (uint32_t)val, 4);
+    return 1;
 }

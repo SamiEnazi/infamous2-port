@@ -10,8 +10,11 @@
  *   F2           settings menu open/close (Esc also closes it)
  *   Alt+Enter, F11  fullscreen on/off
  * Controller: hold L3+R3 together for 1 s (any controller) to open/close the
- * menu; in it the D-pad / left stick move, Cross picks, Circle closes, L1/R1
- * switch pages.
+ * menu; in it the D-pad / left stick move between rows and change values,
+ * Cross picks, Circle goes back or closes, L1/R1 switch pages, L2/R2 move the
+ * compare line, Triangle asks to quit. The menu's look is design "E"
+ * (vk_overlay_menu.inc): the game stays visible, a panel on the left fades
+ * into it, one row per setting, a card with the focused one's line.
  * While the menu is open the game reads neutral input (cellPad's
  * g_pad_overlay_open) and gets no keyboard or mouse events.
  * The system's save-data list (cellSaveDataListSave2 / ListLoad2: pick, new
@@ -45,7 +48,11 @@
  *   PS3RECOMP_OVERLAY_MENU_AT="40:display,50:audio,60:close"  a timed script
  *                                        (seconds after the window opened); also
  *                                        hud0 / hud1, set=VAR=value (as the menu sets it)
- *                                        and cheat=id=value (as the Cheats page sets it)
+ *                                        and cheat=id=value (as the Cheats page sets it);
+ *                                        sub=remap|zip|notes|none, focus=<row id>,
+ *                                        nav=up|down|left|right|ok|back|l1|r1, split=<0..1>
+ *                                        (the menu's own: vk_overlay_menu.inc menu_script)
+ *   PAD_FILE / PAD_SCRIPT presses reach the menu while it is open (cellPad.c)
  *
  * Threads: everything runs on the thread that owns the window and presents
  * (the port's frame-clock / RSX thread): attach, draw, poll and the event
@@ -104,6 +111,10 @@ int  vk_overlay_event(const void* sdl_event);
 
 /* A notice in a corner for a few seconds (any thread). */
 void vk_overlay_notice(const char* text);
+void vk_overlay_notice_for(const char* text, double secs);   /* shown for secs seconds */
+
+/* rsx_vulkan_backend.c: the window is full screen (SDL fullscreen, or the capture-friendly borderless one) */
+int vk_backend_window_full(void);
 
 /* Open the menu (Esc with the menu closed). 1 = opened, 0 = no overlay. */
 int  vk_overlay_open_menu(void);

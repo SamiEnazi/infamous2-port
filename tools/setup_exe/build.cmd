@@ -10,7 +10,7 @@ rem setup.manifest: runs as the player (asInvoker), Windows 10/11, DPI aware. Th
 rem the [assembly: ...] lines at the top of SetupWizard.cs. No packing or obfuscation: the exe is what csc writes.
 "%CSC%" /nologo /target:winexe /optimize+ /warn:4 /highentropyva+ /win32manifest:setup.manifest /win32icon:..\setup.ico /resource:..\setup.ico,setup.ico /out:..\..\Setup.exe /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll SetupWizard.cs
 if errorlevel 1 exit /b 1
-for %%f in ("%~dp0..\..\Setup.exe") do echo Built %%~ff
+for %%f in ("%~dp0..\..\Setup.exe") do echo Built "%%~ff"
 exit /b 0
 :nocsc
 echo The .NET Framework 4 C# compiler was not found.

@@ -61,6 +61,8 @@
 
 #include "ppu_recomp.h"
 #include "ps3emu/ppu_hooks.h"
+#include "ps3emu/ps3_module.h"
+
 #include "ps3emu/ps3_cheats.h"
 #ifndef PS3_CHEATS_HAVE_NO_CASUAL   /* a toolkit without it: every cheat counts for RecompLauncher */
 #define PS3_CHEAT_NO_CASUAL 0
@@ -87,7 +89,33 @@
 #include <string.h>
 #ifndef _WIN32
 #include <sys/stat.h>
+
 #endif
+
+/* The game's own functions this file calls (slim split, 2026-11-14): they are the game module's,
+ * built on the player's PC, so they are found by guest address in its function table (once per
+ * call site) instead of being linked by name. */
+static ppu_hook_body cheats_game_fn(uint32_t addr)
+{
+    ppu_hook_body f = (ppu_hook_body)ps3_module_ppu_fn(addr);
+    if (!f) {
+        fprintf(stderr, "[cheats] FATAL: the game module has no function at 0x%08X\n", addr);
+        fflush(stderr);
+        abort();
+    }
+    return f;
+}
+#define CHEATS_GAME_FN(addr) ([]() -> ppu_hook_body { static const ppu_hook_body f = cheats_game_fn(addr); return f; }())
+#define func_0012F6E0 CHEATS_GAME_FN(0x0012F6E0u)
+#define func_0012FC6C CHEATS_GAME_FN(0x0012FC6Cu)
+#define func_00130228 CHEATS_GAME_FN(0x00130228u)
+#define func_001307C4 CHEATS_GAME_FN(0x001307C4u)
+#define func_00154CB4 CHEATS_GAME_FN(0x00154CB4u)
+#define func_00154DB4 CHEATS_GAME_FN(0x00154DB4u)
+#define func_002F96AC CHEATS_GAME_FN(0x002F96ACu)
+#define func_0030EFF0 CHEATS_GAME_FN(0x0030EFF0u)
+#define func_00363E54 CHEATS_GAME_FN(0x00363E54u)
+#define func_004AE348 CHEATS_GAME_FN(0x004AE348u)
 
 /* The in-game menu (libs/video/vk_overlay.cpp): 1 while F2's menu is open. The karma rank pick waits for 0. */
 extern "C" int vk_overlay_menu_open(void);
@@ -838,7 +866,12 @@ void hook_ring_max_body(struct ppu_context* ctx, ppu_hook_body body)
  * the camera so between its "look" steps) does not turn by the mouse either.
  * Exact when the mouse is not used: with no motion the hooks only call the game's code and write
  * nothing, so a controller or the keys see the game as before. PS3_MOUSE_CAM_HOOK=0: no hooks at all;
- * PS3_MOUSE_PROBE=1 (tests): one [mouse] line per camera frame with the angles. */
+ * PS3_MOUSE_PROBE=1 (tests): one [mouse] line per camera frame with the angles.
+ * GitHub #59 (2026-11-17): the free camera's turn is no longer carried -- all of it goes in in the frame the
+ * mouse moved, with the game's view speed limit lifted for that frame (kViewRate below); the carried way
+ * described above is what is left without the driver frame's hook or with PS3_MOUSE_VIEW_LIMIT=1.
+ * PS3_MOUSE_LOG=1 (for reports): a "[mouse] log" line per camera frame with mouse counts: counts in, the turn
+ * given, what is left, the view's yaw and pitch before and after that frame. */
 constexpr uint32_t kFnFreeCam = 0x0007E0A4, kFnAimCam = 0x00098A00, kFnCamRate = 0x0008D7C8, kFnCamStick = 0x0019609C;
 constexpr uint32_t kLrFreeRate = 0x0007E718, kLrAimRate = 0x000993EC, kLrFreeStick = 0x0007E53C;
 constexpr uint32_t kLrAimStick = 0x00098CB0;            /* the aim camera's stick read (both sticks, r4) */
@@ -872,6 +905,30 @@ int s_free_hold;                 /* free camera: frames left to keep the manual 
 constexpr int kFreeHold = 45;    /* ~0.3-0.7 s: the view catching up with the last of the turn */
 constexpr float kLead = 0.19f;   /* the target's lead on the view we allow (the game clamps at 0.2) */
 std::atomic<long long> s_mt_frames{0}, s_mt_turns{0}, s_mt_epsn{0};
+/* GitHub #59 (2026-11-17): a fast flick outside aiming was "floaty". The free camera's view follows its target
+ * at no more than 5 rad/s (yaw and pitch) and 1000 units/s (its distance): the vector at 0x007443B0 of the camera
+ * tuning table (0x00744210 + 0x1A0), read by the camera solver func_00081CE0 when it walks the camera from its
+ * old place to the new one (0x000820EC). A stick never asks for more (3.75 rad/s at most), a mouse does: a
+ * 180 deg flick took 0.6 s at any frame rate, and the hook had to carry the turn over those frames (the camera
+ * kept turning after the mouse had stopped). Now, in direct mode: in a frame that turns by the mouse the three
+ * speeds read as kViewRateFast for the free camera driver's frame only (hook_free_frame puts the game's
+ * values back when the frame is over, so nothing else ever sees them), and the whole turn goes into the target
+ * and into the angles the input step hands the solver: its 5th argument (r7 -> the driver's own vector: yaw,
+ * pitch, distance; in player control the target the step has just stored, 0x0007E9E4), which the driver gives
+ * the solver right after the step. So the view is there in the same frame: the same angle per count for a
+ * slow move and a flick, nothing left afterwards, and no frame of delay (the old way wrote the target after
+ * the step: the solver saw it a frame later). Needs the driver frame's hook slot (0x00082964, in hooks.txt
+ * since the field of view); without it, with PS3_MOUSE_VIEW_LIMIT=1, or where the step's vector is not the
+ * target, the old carried turn (the game's own view speed). Aiming never had the limit. */
+constexpr uint32_t kViewRate = 0x007443B0;      /* floats: yaw rad/s, pitch rad/s (5, 5), distance units/s (1000) */
+constexpr float kViewRateFast = 1.0e6f;
+bool s_mouse_fast = true;        /* PS3_MOUSE_VIEW_LIMIT=1 -> false */
+bool s_in_free_frame;            /* the free camera driver's frame runs (hook_free_frame) */
+bool s_rate_lifted;              /* ... and its view speed limit is lifted until it ends */
+uint32_t s_rate_saved[3];
+int s_mouse_log;                 /* PS3_MOUSE_LOG=1: a [mouse] log line per camera frame the mouse moved or turned */
+struct MouseLog { bool on, fast, manual; float dx, dy, ty, tp, vy0, vp0; };
+MouseLog s_ml;                   /* this free camera frame, for hook_free_frame's line */
 
 float wrap_pi(float a)
 {
@@ -881,6 +938,14 @@ float wrap_pi(float a)
     return a;
 }
 float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+/* PS3_MOUSE_VIEW_LIMIT (GitHub #59: 1 = the game's view speed) and PS3_MOUSE_LOG: at the start, and once more
+ * at the first free camera frame (a settings.ini line is in the environment only after main has started). */
+void mouse_env()
+{
+    if (const char* e = getenv("PS3_MOUSE_VIEW_LIMIT")) s_mouse_fast = e[0] == '0';
+    if (const char* e = getenv("PS3_MOUSE_LOG")) s_mouse_log = atoi(e);
+}
 
 /* This camera frame's motion; false = the mouse is not the camera's now (nothing taken). */
 bool mouse_take(float* sens, float* aim_sens)
@@ -1005,7 +1070,9 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
      * 100%). So the turn is carried: each frame as much of it goes into the target as keeps it within
      * 0.19 rad of the view, and the manual branch is kept (the epsilon stick) while some is still owed
      * and for kFreeHold frames after, until the view has caught up. Nothing is lost; the view turns as
-     * fast as the game lets its camera follow. Dropped when the free camera stops running (aim). */
+     * fast as the game lets its camera follow. Dropped when the free camera stops running (aim).
+     * (GitHub #59: that was the "floaty" flick. With the view speed limit lifted for the frame the turn is
+     * given whole, below; this carried way is the fallback.) */
     if (moved) {
         const float k = kRadPerCount * sens;
         s_owe_yaw += -s_mt_dx * k;
@@ -1015,6 +1082,11 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
     }
     const bool keep = (on || tp) && (s_owe_yaw != 0.0f || s_owe_pitch != 0.0f || s_free_hold > 0);
     if (s_free_hold > 0) s_free_hold--;
+    /* GitHub #59 (above kViewRate): the whole turn at once -- with the driver frame's hook there to end the
+     * lift; not a saved spot's camera turn (the carried way, as it was) */
+    const bool fast = s_mouse_fast && s_in_free_frame && on && !tp && gptr(d) && rdf(kViewRate) > 0.0f;
+    const uint32_t out = (uint32_t)ctx->gpr[7];    /* -> the angles the step hands the solver */
+    float ty = 0.0f, tpit = 0.0f;                  /* the turn put into the target this frame (the log) */
     s_mt_cam = keep ? CAM_FREE : CAM_NONE;
     s_mt_mask = on && s_mouse_tee ? CAM_FREE : CAM_NONE;   /* the motion is this camera's: not its stick too */
     s_mt_rate = s_mt_eps = false;
@@ -1036,28 +1108,38 @@ void hook_free_cam(struct ppu_context* ctx, ppu_hook_body body)
     if (!manual) {
         s_owe_yaw = s_owe_pitch = 0.0f;             /* no player camera control now: as for a stick, nothing */
         s_free_hold = 0;
+    } else if ((s_owe_yaw != 0.0f || s_owe_pitch != 0.0f) && fast && gptr(out) &&
+               vm_read32(out) == vm_read32(d + kDYaw) && vm_read32(out + 4) == vm_read32(d + kDPitch)) {
+        /* all of it, into the target and into the solver's copy of it (the same bits: player control) */
+        float y = y1, p = p1;
+        ps3_mouse_turn_whole(&s_owe_yaw, &s_owe_pitch, 0, rdf(kFreePitchLimits), rdf(kFreePitchLimits + 4), &y, &p);
+        ty = wrap_pi(y - y1); tpit = p - p1;
+        wrf(d + kDYaw, y);
+        wrf(d + kDPitch, p);
+        wrf(out, y);
+        wrf(out + 4, p);
+        s_free_hold = kFreeHold;                    /* keeps the manual branch: the idle one sets in later, as before */
+        s_mt_turns.fetch_add(1, std::memory_order_relaxed);
     } else if (s_owe_yaw != 0.0f || s_owe_pitch != 0.0f) {
-        const float lo = rdf(kFreePitchLimits), hi = rdf(kFreePitchLimits + 4);
-        const float vy = rdf(d + kDViewYaw), vp = rdf(d + kDViewPitch);   /* the view of the last frame */
-        /* yaw: target + s within view +- kLead (wrapped), towards the owed side only */
-        const float ly = wrap_pi(y1 - vy);
-        const float sy = s_owe_yaw > 0.0f ? clampf(s_owe_yaw, 0.0f, kLead - ly > 0.0f ? kLead - ly : 0.0f)
-                                           : clampf(s_owe_yaw, -kLead - ly < 0.0f ? -kLead - ly : 0.0f, 0.0f);
-        const float lp = p1 - vp;
-        float sp = s_owe_pitch > 0.0f ? clampf(s_owe_pitch, 0.0f, kLead - lp > 0.0f ? kLead - lp : 0.0f)
-                                      : clampf(s_owe_pitch, -kLead - lp < 0.0f ? -kLead - lp : 0.0f, 0.0f);
-        const float p2 = clampf(p1 + sp, lo, hi);
-        wrf(d + kDYaw, wrap_pi(y1 + sy));
-        wrf(d + kDPitch, p2);
-        s_owe_yaw -= sy;
-        s_owe_pitch -= sp;
-        if (p2 != p1 + sp || (s_owe_pitch > 0.0f && p2 >= hi) || (s_owe_pitch < 0.0f && p2 <= lo))
-            s_owe_pitch = 0.0f;                     /* at a pitch limit: the rest is gone, as for a stick */
-        if (s_owe_yaw > -1e-7f && s_owe_yaw < 1e-7f) s_owe_yaw = 0.0f;
-        if (s_owe_pitch > -1e-7f && s_owe_pitch < 1e-7f) s_owe_pitch = 0.0f;
+        /* the carried way: within kLead of the view of the last frame (the solver sees it in the next frame) */
+        float y = y1, p = p1;
+        ps3_mouse_turn_lead(&s_owe_yaw, &s_owe_pitch, rdf(d + kDViewYaw), rdf(d + kDViewPitch), kLead,
+                            rdf(kFreePitchLimits), rdf(kFreePitchLimits + 4), &y, &p);
+        ty += wrap_pi(y - y1); tpit += p - p1;
+        wrf(d + kDYaw, y);
+        wrf(d + kDPitch, p);
         s_free_hold = kFreeHold;                    /* the view still has the last of it to follow */
         s_mt_turns.fetch_add(1, std::memory_order_relaxed);
     }
+    /* the view follows the mouse's turn at once: no view speed limit for the rest of this driver frame (the
+     * solver runs after this step returns) -- in the frames that turn by the mouse only, all three speeds
+     * (looking up and down moves the camera in and out: with the distance's limit left on, the view fell
+     * behind a fast pitch turn and the game took the target back to within 0.2 rad of it) */
+    if (fast && manual && (ty != 0.0f || tpit != 0.0f) && !s_rate_lifted) {
+        for (int i = 0; i < 3; i++) { s_rate_saved[i] = vm_read32(kViewRate + 4 * i); wrf(kViewRate + 4 * i, kViewRateFast); }
+        s_rate_lifted = true;
+    }
+    s_ml = MouseLog{ on, fast, manual, s_mt_dx, s_mt_dy, ty, tpit, vy0, vp0 };
     s_mt_frames.fetch_add(1, std::memory_order_relaxed);
     if (s_mt_eps) s_mt_epsn.fetch_add(1, std::memory_order_relaxed);
     /* [spot] the camera's angles for Save this spot (host memory only; read on the menu's thread) */
@@ -1105,6 +1187,10 @@ void hook_aim_cam(struct ppu_context* ctx, ppu_hook_body body)
     s_mt_mask = CAM_NONE;
     s_aim_manual = s_mt_rate;
     s_mt_frames.fetch_add(1, std::memory_order_relaxed);
+    if (s_mouse_log && moved)
+        fprintf(stderr, "[mouse] log t=%.4f aim  in=(%g,%g) counts, turn (%+.5f,%+.5f) rad, yaw %.5f -> %.5f pitch %.5f -> %.5f, manual=%d\n",
+                now_s(), (double)s_mt_dx, (double)s_mt_dy, (double)wrap_pi(y1 - y0), (double)(p1 - p0), (double)y0,
+                (double)rdf(a + kAYaw), (double)p0, (double)rdf(a + kAPitch), s_aim_manual ? 1 : 0);
     if (s_mouse_probe) mouse_probe("aim", a, kAYaw, kAPitch, y0, p0, y1, p1);
     mouse_tally(kFnAimCam, (s_aim_manual ? 1u : 0u) | (on ? 2u : 0u), fabsf(s_mt_dx) + fabsf(s_mt_dy));
 }
@@ -1390,6 +1476,31 @@ void fov_mode_body(struct ppu_context* ctx, ppu_hook_body body, int m, bool star
 }
 template <int M> void hook_mode_frame(struct ppu_context* ctx, ppu_hook_body body) { fov_mode_body(ctx, body, M, false); }
 template <int M> void hook_mode_start(struct ppu_context* ctx, ppu_hook_body body) { fov_mode_body(ctx, body, M, true); }
+/* [mouse] func_00082964, the free camera driver's frame (r3 = driver D): the input step (hook_free_cam), then
+ * the solver and the view. Around it: the view speed limit a mouse turn lifted goes back (kViewRate), and
+ * PS3_MOUSE_LOG's line with what came in and what the view did -- counts in, yaw out, in the same frame. */
+void hook_free_frame(struct ppu_context* ctx, ppu_hook_body body)
+{
+    const uint32_t d = (uint32_t)ctx->gpr[3];
+    { static bool read; if (!read) { read = true; mouse_env(); } }
+    s_in_free_frame = true;
+    s_ml.on = false; s_ml.dx = s_ml.dy = s_ml.ty = s_ml.tp = 0.0f;
+    fov_mode_body(ctx, body, 0, false);
+    s_in_free_frame = false;
+    if (s_rate_lifted) {
+        for (int i = 0; i < 3; i++) vm_write32(kViewRate + 4 * i, s_rate_saved[i]);
+        s_rate_lifted = false;
+    }
+    if (s_mouse_log && gptr(d) && s_ml.on) {
+        const float vy = rdf(d + kDViewYaw), vp = rdf(d + kDViewPitch);
+        if (s_ml.dx != 0.0f || s_ml.dy != 0.0f || s_ml.ty != 0.0f || s_ml.tp != 0.0f ||
+            fabsf(wrap_pi(vy - s_ml.vy0)) > 1e-4f || fabsf(vp - s_ml.vp0) > 1e-4f)
+            fprintf(stderr, "[mouse] log t=%.4f free in=(%g,%g) counts, turn (%+.5f,%+.5f) rad, left (%+.5f,%+.5f), view yaw %.5f -> %.5f pitch %.5f -> %.5f, manual=%d limit=%s\n",
+                    now_s(), (double)s_ml.dx, (double)s_ml.dy, (double)s_ml.ty, (double)s_ml.tp, (double)s_owe_yaw,
+                    (double)s_owe_pitch, (double)s_ml.vy0, (double)vy, (double)s_ml.vp0, (double)vp, s_ml.manual ? 1 : 0,
+                    s_ml.fast ? "off" : "game");
+    }
+}
 const ppu_hook_fn kModeFrameHook[kNModes] = { hook_mode_frame<0>, hook_mode_frame<1>, hook_mode_frame<2>, hook_mode_frame<3>,
                                               hook_mode_frame<4>, hook_mode_frame<5>, hook_mode_frame<6> };
 const ppu_hook_fn kModeStartHook[kNModes] = { hook_mode_start<0>, hook_mode_start<1>, hook_mode_start<2>, hook_mode_start<3>,
@@ -1863,8 +1974,7 @@ ps3_cheat s_spot = { "spot", "Spot", s_spot_help, "Saved spots", PS3_CHEAT_CHOIC
 ps3_cheat s_spotgo = { "spotgo", "Go to saved spot (F7)", s_go_help, "Saved spots", PS3_CHEAT_ACTION, apply_spot_go,
     0, 0, 0, NULL, NULL, 0, NULL, PS3_CHEAT_HOTKEY };
 ps3_cheat s_spotsave = { "spotsave", "Save this spot",
-    "Adds where Cole stands now, the way he faces and the camera's angles as a new spot (Spot 1, Spot 2, ...) "
-    "and picks it.", "Saved spots", PS3_CHEAT_ACTION, apply_spot_save, 0, 0, 0, NULL, NULL, 0, NULL, PS3_CHEAT_NO_CASUAL };
+    "Adds where Cole stands now (and the camera) as a new spot.", "Saved spots", PS3_CHEAT_ACTION, apply_spot_save, 0, 0, 0, NULL, NULL, 0, NULL, PS3_CHEAT_NO_CASUAL };
 
 /* The page's texts and the combo (menu thread; also at start). spots.ini changed on disk: read again. */
 void spots_texts_locked()
@@ -1875,16 +1985,14 @@ void spots_texts_locked()
     const char* where = s_spots_path[0] ? s_spots_path : "this session only (PS3_CHEATS_SPOTS is empty)";
     if (s_nspots) {
         const Spot& s = s_spots[s_spot_sel];
-        snprintf(s_spot_help, sizeof s_spot_help, "x %.0f  y %.0f  z %.0f, %s, %s. Spots are kept in %s: rename or delete "
-                 "them there.", (double)s.x, (double)s.y, (double)s.z, s.has_facing ? "facing as saved" : "facing as Cole is",
-                 s.has_cam ? "camera as saved" : "camera as it is", where);
+        snprintf(s_spot_help, sizeof s_spot_help, "The spot Go to saved spot (F7) uses. Kept in %s.\nx %.0f  y %.0f  z %.0f, %s, %s.",
+                 where, (double)s.x, (double)s.y, (double)s.z, s.has_facing ? "facing as saved" : "facing as Cole is",
+                 s.has_cam ? "camera as saved" : "camera as it is");
     } else
-        snprintf(s_spot_help, sizeof s_spot_help, "No saved spots: Save this spot adds one. Spots are kept in %s.", where);
+        snprintf(s_spot_help, sizeof s_spot_help, "No saved spots yet: Save this spot adds one.\nKept in %s.", where);
     char st[240];
     { std::lock_guard<std::mutex> g(s_req_lock); snprintf(st, sizeof st, "%s", s_spot_status); }
-    snprintf(s_go_help, sizeof s_go_help, "Puts Cole at the picked spot, standing still and facing the saved way, and turns "
-             "the camera to the saved view (the game's own placing, as when it puts Cole back after a test play). Use it "
-             "in free play with Cole on his feet. F7 does it too, with the menu open or closed.%s%s",
+    snprintf(s_go_help, sizeof s_go_help, "Puts Cole at the picked spot (F7 too, menu open or closed).%s%s",
              st[0] ? "\nLast: " : "", st);
 }
 
@@ -1932,7 +2040,8 @@ void hooks_update()
     /* [fov] the camera modes: always (each frame marks gameplay / other for the renderer; with PS3_FOV != 100 the
      * gameplay ones see the game's fov), the requests only while PS3_FOV != 100 (fov_hooks_update) */
     for (int m = 0; m < kNModes; m++) {
-        if (m != kModeAim) ppu_hook_set(s_modes[m].frame, s_fov_hook ? kModeFrameHook[m] : nullptr);
+        if (m == 0 && s_mouse_hook) ppu_hook_set(s_modes[m].frame, hook_free_frame);   /* [mouse] and its [fov] */
+        else if (m != kModeAim) ppu_hook_set(s_modes[m].frame, s_fov_hook ? kModeFrameHook[m] : nullptr);
         if (s_modes[m].start) ppu_hook_set(s_modes[m].start, s_fov_hook ? kModeStartHook[m] : nullptr);
     }
     fov_hooks_update();
@@ -2025,41 +2134,38 @@ const char* const kSpeed[] = { "Normal", "Frozen", "Quarter speed", "Half speed"
 const char* const kGlide[] = { "Normal", "Longer", "2x as long", "3x as long" };   /* gravity /2, /4, /8: measured 3.1 s -> 6.4 s / 9.2 s */
 
 ps3_cheat s_god = { "god", "Invincibility",
-    "Cole's health never drops (healing still works). If you get stuck where the game expects you to "
-    "die, such as deep water, switch it off.", "Cole", PS3_CHEAT_TOGGLE, apply_god };
+    "Cole's health never drops. Switch it off if you get stuck in deep water.", "Cole", PS3_CHEAT_TOGGLE, apply_god };
 ps3_cheat s_energy = { "energy", "Infinite energy",
-    "Electricity refills every frame: use any power as often as you like.", "Cole", PS3_CHEAT_TOGGLE, apply_energy };
+    "Electricity refills every frame.", "Cole", PS3_CHEAT_TOGGLE, apply_energy };
 char s_ionic_help[600];
 ps3_cheat s_ionic = { "ionic", "Infinite ionic charges", s_ionic_help, "Cole", PS3_CHEAT_TOGGLE, apply_ionic };
 ps3_cheat s_jump = { "jump", "Super jump", "How high Cole jumps.", "Cole", PS3_CHEAT_CHOICE, apply_jump,
     0, 0, 0, NULL, kJump, 5 };
 ps3_cheat s_glide = { "glide", "Longer glide",
-    "Cole sinks more slowly while gliding with the Static Thrusters (hold R1 in the air), so a glide lasts "
-    "longer and goes farther. Only the glide changes: jumps, falls and everyone else are as normal.", "Cole",
+    "Cole sinks more slowly while gliding (hold R1 in the air).", "Cole",
     PS3_CHEAT_CHOICE, apply_glide, 0, 0, 0, NULL, kGlide, 4 };
 ps3_cheat s_onehit = { "onehit", "One-hit kills",
-    "Anyone Cole hurts dies from that hit. Hits from others are unchanged.", "Enemies", PS3_CHEAT_TOGGLE, apply_onehit };
+    "Anyone Cole hurts dies from that hit.", "Enemies", PS3_CHEAT_TOGGLE, apply_onehit };
 ps3_cheat s_speed = { "speed", "Enemy speed", "How fast enemies and other people move.", "Enemies",
     PS3_CHEAT_CHOICE, apply_speed, 0, 0, 0, NULL, kSpeed, 5 };
 ps3_cheat s_noattack = { "noattack", "Enemies hold fire",
-    "Most enemies never attack. Turrets and some mission enemies still do.", "Enemies", PS3_CHEAT_TOGGLE, apply_noattack };
+    "Most enemies never attack (turrets and some mission ones still do).", "Enemies", PS3_CHEAT_TOGGLE, apply_noattack };
 ps3_cheat s_xpc = { "xp", "Add XP", "Experience to spend on powers (pause menu, Powers).", "Progress",
     PS3_CHEAT_ACTION, apply_xp, 5000, 500, 50000, "%d XP", NULL, 0, "Add XP", PS3_CHEAT_SAVES };
 ps3_cheat s_maxbat = { "maxbat", "Max battery",
-    "Cole's battery at its full size (every blast shard level and both battery upgrades). The game "
-    "does not save it; Remember cheats switches it on again at the next start.", "Cole", PS3_CHEAT_TOGGLE, apply_maxbat };
+    "Cole's battery at its full size (not saved by the game).", "Cole", PS3_CHEAT_TOGGLE, apply_maxbat };
 ps3_cheat s_kside = { "karmaside", "Karma lock",
-    "Karma moves only towards the chosen side; the game ignores changes towards the other one.",
+    "Karma moves only towards the chosen side.",
     "Karma", PS3_CHEAT_CHOICE, apply_kside, 0, 0, 0, NULL, kKarmaSide, 3, NULL, PS3_CHEAT_SAVES };
 ps3_cheat s_kmult = { "karmamult", "Karma multiplier",
-    "Karma gains of the locked side (of both sides when the lock is off) count this many times.",
+    "Karma gains count this many times.",
     "Karma", PS3_CHEAT_INT, apply_kmult, 1, 1, 10, "%dx", NULL, 0, NULL, PS3_CHEAT_SAVES };
 ps3_cheat s_kxp = { "karmaxp", "XP for karma",
-    "Each karma point gained on the locked side (either side when the lock is off) also gives this much XP.",
+    "Each karma point gained also gives this much XP.",
     "Karma", PS3_CHEAT_INT, apply_kxp, 0, 0, 20, "%d XP per point", NULL, 0, NULL, PS3_CHEAT_SAVES };
-ps3_cheat s_kblue = { "karmablue", "hero karma", NULL, "Karma", PS3_CHEAT_ACTION, apply_kblue,
+ps3_cheat s_kblue = { "karmablue", "hero karma", "Adds this much hero karma.", "Karma", PS3_CHEAT_ACTION, apply_kblue,
     500, 50, 2500, "%d", NULL, 0, "Add hero karma (blue)", PS3_CHEAT_SAVES };
-ps3_cheat s_kred = { "karmared", "infamous karma", NULL, "Karma", PS3_CHEAT_ACTION, apply_kred,
+ps3_cheat s_kred = { "karmared", "infamous karma", "Adds this much infamous karma.", "Karma", PS3_CHEAT_ACTION, apply_kred,
     500, 50, 2500, "%d", NULL, 0, "Add infamous karma (red)", PS3_CHEAT_SAVES };
 
 /* Karma rank: the game's 7 ranks, top hero to top infamous (entry i = game rank 6 - i), with their ranges. */
@@ -2107,23 +2213,14 @@ void l_texts()
     const uint32_t ref = vm_read32(kEvilShaderRef);
     const long long sw = s_bl_swaps.load(), calls = s_bl_calls.load();
     snprintf(s_black_help, sizeof s_black_help,
-             "Electric arcs are drawn with the shader the game keeps for evil lightning (all its variants) instead of "
-             "their own: L_'s \"Black Lightning\", made for evil (infamous) karma. The code itself does not look at "
-             "karma; it needs the game to have that shader set (the line below says). Patch by L_ (RPCS3), re-made "
-             "for the port.\nNow: the game's evil-lightning shader is %s%s",
+             "Arcs use the game's evil-lightning shader (L_'s Black Lightning patch).\nNow: the shader is %s%s",
              gptr(ref) ? "set" : "NOT set (nothing changes until the game sets it)",
              !g_black ? "." : sw ? "; arcs redrawn with it since switching on." : calls ? "; arcs seen, none redrawn yet." :
                                                                            "; no arc drawn yet since switching on.");
     snprintf(s_fly_help, sizeof s_fly_help,
-             "While gliding (hold R1 in the air): hold Cross to climb, Circle to dive, neither to hover. Needs the game's "
-             "Improved Static Thrusters upgrade (L_'s name; in the code the last of the three thrusters upgrades, power "
-             "0x4C): without it nothing changes and the glide is the game's own. Circle in the air may also start the game's drop attack. Patch by L_ "
-             "(RPCS3), re-made for the port.\n%s", thr_tier_text());
+             "Gliding: hold Cross to climb, Circle to dive (needs Improved Static Thrusters; L_'s patch).\n%s", thr_tier_text());
     snprintf(s_fast_help, sizeof s_fast_help,
-             "Half a second into a glide Cole flies forward at this speed instead of the game's 1350 (upgraded "
-             "thrusters). Needs a Static "
-             "Thrusters upgrade (any of them, power 0x4A or later): without one nothing changes. Patch by L_ (RPCS3, "
-             "2000), re-made for the port.\n%s", thr_tier_text());
+             "Glide speed instead of the game's 1350 (needs a thrusters upgrade; L_'s patch).\n%s", thr_tier_text());
     /* karma rank: the current one (unless a pick waits), the pick, the values */
     const float k = rdf(kKarma);
     const int now = rank_of(k);
@@ -2131,14 +2228,10 @@ void l_texts()
     if (!pend) s_krank.value = kRanks - 1 - now;
     const int want = pend ? g_krank_want.load() : now;
     char pick[200] = "";
-    if (pend) snprintf(pick, sizeof pick, "Changes to %s (karma %.0f) when you close the menu.\n", kRankName[want],
+    if (pend) snprintf(pick, sizeof pick, "changes to %s (karma %.0f) when you close the menu", kRankName[want],
                        (double)kRankKarma[want]);
-    snprintf(s_krank_help, sizeof s_krank_help,
-             "%sNow: %s (karma %.0f). Picking a rank sets karma to the middle of it (Hero 2850, Champion 1750, Guardian "
-             "500, Neutral 0, Thug -500, Outlaw -1750, Infamous -2850) through the game's own karma setter when you "
-             "close the menu, so the karma meter, the rank screen and Cole's look follow. The change is real: the game "
-             "writes it into your save the next time it saves. Karma lock does not block it.",
-             pick, kRankName[now], (double)k);
+    snprintf(s_krank_help, sizeof s_krank_help, "Sets karma to the middle of the rank when you close the menu.\nNow: %s (karma %.0f)%s%s.",
+             kRankName[now], (double)k, pick[0] ? "; " : "", pick);
 }
 
 /* Unlock all powers: the page's texts (menu thread; guest reads only). */
@@ -2153,18 +2246,9 @@ void pw_texts()
         }
         snprintf(now, sizeof now, "\nNow: %d of the game's %d power numbers owned.", owned, kNPowers);
     }
-    snprintf(s_pw_help, sizeof s_pw_help,
-             "Every power in the game is Cole's: bought, unlocked and not switched off by a mission, through the game's "
-             "own power code, so the Powers menu and the power wheel show them at once. Karma does not matter while "
-             "this is on (hero and evil powers together). It checks again every second, so the story cannot take "
-             "them back. Off stops that and takes nothing away.\n"
-             "PERMANENT: the game writes the powers into the save that is loaded the next time it saves. A mission "
-             "that rewards a power may not count your progress while you already own it (bungholio saw it with the "
-             "Pincer Bolt).%s", now);
+    snprintf(s_pw_help, sizeof s_pw_help, "Every power is Cole's at once, hero and evil. Permanent once the game saves.%s", now);
     snprintf(s_pwboth_help, sizeof s_pwboth_help,
-             "Hero and evil karma powers work together, at any karma: the game's own rule once both endings are done "
-             "(its power code skips the karma checks then). Nothing is written to the save; off = the karma rules "
-             "again. Unlock all powers does this too while it is on.%s",
+             "Hero and evil karma powers work together. Nothing is saved.%s",
              ppu_hook_exists(kFnPowerWord) ? "" : "\nThis build lacks its two hook slots (a new lift is needed).");
 }
 
@@ -2175,9 +2259,7 @@ void ionic_text()
     if (const uint32_t c = vm_base ? player() : 0)
         snprintf(now, sizeof now, "\nNow: %d of %d.", (int32_t)vm_read32(kIonicCount), (int32_t)vm_read32(c + kColeIonicMax));
     snprintf(s_ionic_help, sizeof s_ionic_help,
-             "Cole always has 3 ionic charges, the game's most, whether or not the story has given him any yet: they "
-             "refill the moment one is used, so the Ionic powers fire as often as you like (they also need the Ionic "
-             "powers themselves: Unlock all powers). The game saves the count.%s", now);
+             "Always 3 ionic charges (the Ionic powers need Unlock all powers).%s", now);
 }
 
 void refresh()
@@ -2282,6 +2364,10 @@ void timeline_poll(struct ppu_context* ctx, uint32_t c)
 #endif
             cellPad_host_mouse_direct_provider(s_mouse_tee ? 2 : 1);
             fprintf(stderr, "[mouse] tee %s\n", s_mouse_tee ? "on" : "off (the claim)");
+        }
+        else if (!strcmp(e.id, "mouselimit")) {     /* [mouse] tests: the game's view speed limit (1) / lifted (0) */
+            s_mouse_fast = e.v == 0.0;
+            fprintf(stderr, "[mouse] view speed limit: %s\n", s_mouse_fast ? "lifted while the mouse turns the camera" : "the game's");
         }
         else if (!strcmp(e.id, "mousemode")) {      /* [mouse] tests: direct (1) / stick (0) mode */
             cellPad_host_set_mouse_mode(e.v != 0.0);
@@ -2448,6 +2534,7 @@ struct Init {
         if (const char* e = getenv("PS3_MOUSE_TEE")) s_mouse_tee = e[0] != '0';         /* [mouse] GitHub #27 */
 #endif
         s_mouse_probe = getenv("PS3_MOUSE_PROBE") ? atoi(getenv("PS3_MOUSE_PROBE")) : 0;
+        mouse_env();
         if (const char* e = getenv("PS3_FOV_HOOK")) s_fov_hook = e[0] != '0';             /* [fov] */
         s_fov_probe = getenv("PS3_FOV_PROBE") ? atoi(getenv("PS3_FOV_PROBE")) : 0;
         ps3_setting_register("PS3_FOV", fov_apply);   /* the menu's Display page > Camera (PS3_FOV is read after main) */

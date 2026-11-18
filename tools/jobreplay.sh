@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # SPU job equivalence check on Linux (tools/jobreplay.ps1's counterpart): replay the job recordings in
 # <dir> through an exe's own lifted SPU code and compare every output bit for bit (toolkit
 # runtime/spu/spu_jobrec.c, PS3_JOBREPLAY). The game does not boot (no window, no display needed).

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # inFAMOUS 2 native port -- Linux: one script for everything (launchers such as Quiver run this).
 #   ./setup.sh                    first time: find your game, build it (15-60 min), then play;
 #                                 after that: just play
@@ -8,8 +8,8 @@
 #   ./setup.sh --prepare --disc <folder> [--dry-run]   for launchers (recomplauncher.json, as Setup.exe --prepare):
 #                                 build only, no message boxes, no desktop entry, Setup.exe's exit codes
 #                                 (71 no PS3_GAME, 79 the build failed: play/setup.log); --game = --disc
-# The game is built from YOUR copy, here, once: nothing of the game is in this download. You need RPCS3 with the
-# PS3 firmware and the game's 1.04 update installed (RPCS3: File > Install Firmware / Install Packages).
+# The game is built from YOUR copy, here, once: nothing of the game is in this download. RPCS3 is not needed: the
+# game's update and the PS3 firmware files come from Sony's own servers (or from RPCS3, when it has them).
 # Your game folder is found in RPCS3's game list (games.yml) when you added it there; otherwise you are asked.
 set -u -o pipefail
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -23,7 +23,9 @@ prepare=0; dry=0   # --prepare: a launcher's setup step (see the top)
 say() { printf '%s\n' "$*"; }
 gui_msg() {   # a message box when there is no terminal (a launcher started us), else the terminal
     if [ -t 1 ] || [ $prepare = 1 ]; then say "$1"; return; fi   # --prepare: the launcher shows the exit code's message
-    if command -v zenity >/dev/null 2>&1; then zenity --info --title="inFAMOUS 2" --width=520 --text="$1" 2>/dev/null
+    # (zenity's text is Pango markup: a "&" or "<" in a folder name would hide the whole message)
+    local m; m="$(printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+    if command -v zenity >/dev/null 2>&1; then zenity --info --title="inFAMOUS 2" --width=520 --text="$m" 2>/dev/null
     elif command -v kdialog >/dev/null 2>&1; then kdialog --title "inFAMOUS 2" --msgbox "$1" 2>/dev/null
     else say "$1"; fi
 }
@@ -44,19 +46,27 @@ find_disc() {
     done
     return 1
 }
+# Prints the chosen folder, and nothing else, on stdout: the caller reads it with $(ask_disc). The question and
+# every message go to stderr (GitHub #54: the question was printed on stdout, so it became the "folder").
 ask_disc() {
     local d=""
-    local text="Choose your inFAMOUS 2 game folder: the one that holds PS3_GAME (Europe or US disc, set up in RPCS3)."
+    local text="Choose your inFAMOUS 2 game folder: the one that holds PS3_GAME (your Europe or US disc's files)."
     if [ -t 0 ]; then
-        say "$text"; read -r -p "Game folder: " d
+        say "$text" >&2; read -r -p "Game folder: " d
+        # typed or dragged into the terminal: quotes around it, a trailing space, ~ for the home folder
+        d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"
+        case "$d" in \'*\') d="${d#\'}"; d="${d%\'}" ;; \"*\") d="${d#\"}"; d="${d%\"}" ;; esac
+        case "$d" in "~") d="$HOME" ;; "~/"*) d="$HOME/${d#"~/"}" ;; esac
     elif command -v zenity >/dev/null 2>&1; then
-        d="$(zenity --file-selection --directory --title="$text" 2>/dev/null)"
+        d="$(zenity --file-selection --directory --title="$text" 2>/dev/null | tail -n 1)"
     elif command -v kdialog >/dev/null 2>&1; then
-        d="$(kdialog --getexistingdirectory "$HOME" --title "$text" 2>/dev/null)"
+        d="$(kdialog --getexistingdirectory "$HOME" --title "$text" 2>/dev/null | tail -n 1)"
     fi
-    d="${d%/}"
-    [ -n "$d" ] && [ -f "$d/PS3_GAME/PARAM.SFO" ] && { printf '%s\n' "$d"; return 0; }
-    [ -n "$d" ] && [ -f "$(dirname "$d")/PS3_GAME/PARAM.SFO" ] && { dirname "$d"; return 0; }
+    [ "$d" = "/" ] || d="${d%/}"
+    [ -z "$d" ] && return 1
+    [ -f "$d/PS3_GAME/PARAM.SFO" ] && { printf '%s\n' "$d"; return 0; }
+    [ -f "$(dirname "$d")/PS3_GAME/PARAM.SFO" ] && { dirname "$d"; return 0; }   # PS3_GAME itself was picked
+    say "There is no PS3_GAME/PARAM.SFO in: $d" >&2
     return 1
 }
 
@@ -70,7 +80,7 @@ build() {
         [ -z "$disc" ] && disc="$(find_disc)"
         [ -z "$disc" ] && disc="$(ask_disc)"
         if [ -z "$disc" ]; then
-            gui_msg "Setup needs your inFAMOUS 2 game folder (the one holding PS3_GAME). Add the game to RPCS3's list, or run: ./setup.sh --disc <your game folder>"
+            gui_msg "Setup needs your inFAMOUS 2 game folder (the one holding PS3_GAME). Run: ./setup.sh --disc <your game folder>"
             exit 2
         fi
         say "Your game folder: $disc"

@@ -23,7 +23,7 @@ if (-not $py) {
     $tar = Join-Path $env:WINDIR "System32\tar.exe"
     if (-not (Test-Path -LiteralPath $tar)) { throw "Windows' tar.exe is missing (it comes with Windows 10 1803 and newer)" }
     $dir = Join-Path $cache "python"
-    if (Test-Path -LiteralPath $dir) { cmd /c rd /s /q "$dir" | Out-Null }
+    Remove-Tree $dir
     "  unpacking Python 3.12"
     & $tar -xzf $tgz -C $cache                 # the archive's top folder is python\
     if ($LASTEXITCODE -or -not (Test-Path -LiteralPath (Join-Path $dir "python.exe"))) { throw "unpacking Python failed (tar exit code $LASTEXITCODE)" }

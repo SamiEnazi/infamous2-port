@@ -1,0 +1,98 @@
+{
+ "format": 1,
+ "made": "2026-11-17 23:26:49",
+ "release": "v0.6.2",
+ "engine_kit": "208d1da06dd7",
+ "module": {
+  "abi": 2,
+  "layout": [
+   1104,
+   1100,
+   279520,
+   265840,
+   24,
+   2733544116,
+   2973121090,
+   2
+  ],
+  "file": {
+   "windows": "Infamous2Game.dll",
+   "linux": "libInfamous2Game.so"
+  },
+  "entry": "ps3_game_module",
+  "env_override": "PS3_GAME_MODULE",
+  "next_to": "Infamous2Recomp.exe (the engine finds the module beside itself)",
+  "built_by": "tools/rebuild_win.py with PORT_ENGINE_EXE=<engine exe> PORT_LLVM=<toolchain> (steps inputs..compile; compile = tools/build_module.py)",
+  "sample_build": "clang 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1), no PGO"
+ },
+ "total_download_bytes": 50208119,
+ "assets": [
+  {
+   "role": "python",
+   "name": "python-3.13.17-embed-amd64.zip",
+   "unpack": "zip",
+   "into": "tools-cache\\slim\\python",
+   "version": "3.13.17",
+   "after_unpack": "delete python3XX._pth (with it the lifter scripts cannot import their sibling modules: no script folder on sys.path); then run tools with -E -s or -I",
+   "upstream": "https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip",
+   "release": "v0.6.0",
+   "size": 11441267,
+   "sha256": "9E35319BFFEDAB8B36AD44D8F377CB4F1733BCEC257A0B6D04D94F01486DDB38"
+  },
+  {
+   "role": "pycrypto",
+   "name": "pycryptodome-4.3.0-cp39-abi3-win_amd64.whl",
+   "unpack": "zip",
+   "into": "tools-cache\\slim\\python\\Lib\\site-packages",
+   "version": "4.3.0",
+   "optional": true,
+   "use": "tools/ps3tool.py is fast with it (Sony's packages in seconds, not minutes)",
+   "upstream": "https://pypi.org/project/pycryptodome/4.3.0/",
+   "release": "v0.6.0",
+   "size": 1675134,
+   "sha256": "195C9D781905605B3B9DE8567C47986A9D0EE513566B5150EB9400692465B610"
+  },
+  {
+   "role": "toolchain",
+   "name": "llvm-22.1.8-slim-win-x64.tar.xz",
+   "unpack": "tar.xz (the port's own Python: tarfile; tools/slim_tools.ps1)",
+   "into": "tools-cache\\slim\\llvm",
+   "version": "22.1.8",
+   "unpacked_bytes": 185486710,
+   "contents": [
+    "bin/clang.exe",
+    "bin/lld.exe",
+    "bin/llvm-profdata.exe",
+    "lib/clang/22/include/ (177 x86 headers)",
+    "lib/clang/22/lib/windows/clang_rt.profile-x86_64.lib",
+    "LICENSE.TXT"
+   ],
+   "use": "PORT_LLVM=<that folder> (tools/build_module.py: clang.exe --driver-mode=cl, lld.exe -flavor link)",
+   "release": "v0.6.1",
+   "size": 33175636,
+   "sha256": "109482E22835BE89638DDCFF25FDB94F45CA5DFCB2989D63F7D3C44732966E0F",
+   "same_as": [
+    "C8BA2E2E45E63C2ECEDC1D7C75E337793094D60BA420A679FE7A4AAB25D5F5D7"
+   ],
+   "same_as_note": "llvm-22.1.8-slim-win-x64.7z of v0.6.0: the same files (an install that unpacked it keeps them)"
+  },
+  {
+   "role": "engine",
+   "name": "Infamous2-engine-win-x64.zip",
+   "unpack": "zip",
+   "into": "tools-cache\\slim\\engine",
+   "contents": [
+    "Infamous2Recomp.exe",
+    "SDL2.dll"
+   ],
+   "files_sha256": {
+    "Infamous2Recomp.exe": "43C24D93A0030A858122215D6D018DEE193BA332DACEEA37B07387D9DAD1A64E",
+    "SDL2.dll": "F1A82C299206D5BD3231F5EDB16FB7F33AAF4DC7C20BF57C25CF8E92EDA6EC72"
+   },
+   "release": "v0.6.2",
+   "size": 3916082,
+   "sha256": "5F5147A32D191CD207305FCAA3648D945CABC88C89528D69660421D6FB2E9FF2"
+  }
+ ],
+ "release_note": "each asset names the release that holds it (\"release\"): the engine is new in v0.6.2, the compiler in v0.6.1, Python and pycryptodome are v0.6.0's"
+}

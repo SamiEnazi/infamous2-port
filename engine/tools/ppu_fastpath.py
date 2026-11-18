@@ -33,6 +33,16 @@ computes -- only the order and number of tests change.
                     entry's value from the ELF, while the runtime vouches for it per entry
                     (g_ppu_toc_dirty: checked against guest memory at start, set by any
                     store into the TOC); else the load (see toc_setup).
+  PPU_LEAN_MEM=1    (track A; needs PPU_MOVBE and PPU_ST_PMAP) a guest load is one host load at
+                    vm_base + ea, nothing else: no range test, no gcm poll-word compare. A store
+                    keeps the page-map test and its re-check; one the map does not clear calls
+                    ppu_lean_st<N> (the careful path, out of line). The runtime's guard pages and
+                    live gcm ref word replace the tests (runtime/ppu/ppu_loader.cpp, see _LEAN_NOTE).
+  PPU_DRAIN_NONE=1  (track A; needs PPU_XTAIL) no trampoline drain after any call: no function of an
+                    XTAIL lift returns with the trampoline set, and the runtime drains what an
+                    import (ps3_hle_call) or an indirect call leaves before it returns.
+  PPU_ICALL_INLINE=1 (track A) an indirect call tests the lift's own target table first
+                    (g_ppu_icall_tbl, filled by ps3_indirect_call): a hit is one direct host call.
   PPU_VMX_CLEAN, PPU_VMX_INT, PPU_FP_SINGLE, PPU_FP_CVT (ppu-vmx, 2026-11-10): the
                     dataflow fast paths of tools/ppu_vmx_flow.py, applied after these.
 
@@ -242,9 +252,66 @@ _MM_ACC_NEED = ("vm_read16_mm(", "vm_read32_mm(", "vm_read64_mm(", "#define VM_M
 _TOC: dict = {}     # toc_setup: base, lo, hi, image (bytes of [lo, hi)), fold switch
 
 
-def _mm_block(movbe: bool, pmap: bool, toc: bool) -> str:
+# PPU_LEAN_MEM (track A, 2026-11-16). _LEAN_NOTE: what the runtime does instead of the tests the
+# accessors no longer make. The whole 4 GB guest window is reserved (an ea of any value is a host
+# address inside it; one crossing 4 GB runs into the 64 KB guard behind it), so the range test only
+# ever sent four kinds of address out of line, each now off the fast path:
+#  - the null page: read-only, a store there dropped by the runtime's fault handler, as vm_write*
+#    dropped it (runtime/memory/vm_guard.c VMG_NULL_PAGE);
+#  - the raw-SPU register windows (0xE0000000 + n MB + 0x40000..): no-access pages whose accesses the
+#    fault handler emulates through the raw-SPU register file (VMG_RAW_SPU; plain memory without a
+#    raw SPU, as the out-of-line path served them);
+#  - the gcm ref word (the 32-bit poll compare): plain memory the RSX side publishes into as it
+#    drains fences, the poll's kick moved to the guest's sleeps (libs/video/cellGcmSys.c
+#    PS3_GCM_REF_LIVE);
+#  - an armed memory diagnostic (vm_inline_ok 0): it no longer sees lifted loads (the runtime says so).
+# The loads are the same single volatile access PPU_MOVBE made after its tests, so every value read
+# is the one the old path read. Stores: the page-map protocol of PPU_ST_PMAP unchanged; the careful
+# path behind it (range, reservation bit, TOC watch, the out-of-line accessor) is ppu_lean_st<N>.
+_LEAN_DECL = """/* PPU_LEAN_MEM (track A): the careful store, out of line (runtime/ppu/ppu_loader.cpp) */
+#ifdef __cplusplus
+extern "C" {
+#endif
+void ppu_lean_st8(uint32_t ea, uint8_t v);
+void ppu_lean_st16(uint32_t ea, uint16_t v);
+void ppu_lean_st32(uint32_t ea, uint32_t v);
+void ppu_lean_st64(uint32_t ea, uint64_t v);
+int  ppu_lean_mem_register(int flags);
+#ifdef __cplusplus
+}
+#endif
+"""
+_TAKE_OLD = """static inline ppu_mm ppu_mm_take(void)
+{
+    const uint32_t hi = (ppu_vm_size != 0 && ppu_vm_size < 0xE0000000u) ? ppu_vm_size : 0xE0000000u;
+    ppu_mm m;
+    m.vb = vm_base;
+    m.span = vm_inline_ok ? (int64_t)(hi - 0x10000u) : 0;
+    m.poll = ppu_hle_inject_base + 0x2008u;
+    m.armed = g_spu_coh_armed;
+    m.bits = g_spu_coh_bitmap;
+    return m;
+}
+"""
+_TAKE_LEAN = """static inline ppu_mm ppu_mm_take(void)
+{   /* PPU_LEAN_MEM: the base alone -- the accessors test nothing else (see ppu_fastpath.py) */
+    ppu_mm m;
+    m.vb = vm_base;
+    m.span = 0; m.poll = 0; m.armed = 0; m.bits = 0;
+    return m;
+}
+"""
+
+
+def _lean_on() -> bool:
+    return _on("PPU_LEAN_MEM")
+
+
+def _mm_block(movbe: bool, pmap: bool, toc: bool, lean: bool = False) -> str:
     L = []
     W = {8: "uint8_t", 16: "uint16_t", 32: "uint32_t", 64: "uint64_t"}
+    if lean:
+        L.append(_LEAN_DECL.rstrip("\n"))
     if movbe:
         L.append("/* PPU_MOVBE (ppu-mem): one volatile access of the width, alignment 1 (see ppu_fastpath.py) */")
         for w in (16, 32, 64):
@@ -259,6 +326,11 @@ def _mm_block(movbe: bool, pmap: bool, toc: bool) -> str:
         T, n = W[w], w // 8
         poll = " && __builtin_expect(ea != m->poll, 1)" if w == 32 else ""
         L.append("static inline %s vm_read%d_mm(const ppu_mm* m, uint64_t a)\n{\n    const uint32_t ea = (uint32_t)a;" % (T, w))
+        if lean:   # PPU_LEAN_MEM: the access alone
+            acc = ("*(volatile const uint8_t*)(m->vb + ea)" if w == 8 else
+                   "__builtin_bswap%d(*(volatile const ppu_u%du*)(m->vb + ea))" % (w, w))
+            L.append("    return %s;\n}" % acc)
+            continue
         if movbe:
             acc = ("*(volatile const uint8_t*)(m->vb + ea)" if w == 8 else
                    "__builtin_bswap%d(*(volatile const ppu_u%du*)(m->vb + ea))" % (w, w))
@@ -299,6 +371,9 @@ def _mm_block(movbe: bool, pmap: bool, toc: bool) -> str:
             L.append("        __atomic_signal_fence(__ATOMIC_SEQ_CST);   /* store, then re-check: see spu_coh_reserve */")
             L.append("        if (__builtin_expect(!vm_pm_fast(ea), 0)) ppu_store_pm_recheck(ea, %d);" % n)
             L.append("        return; }")
+            if lean:   # PPU_LEAN_MEM: the careful path out of line (it watches the TOC itself)
+                L.append("    ppu_lean_st%d(ea, v);\n}" % w)
+                continue
             L.append("    PPU_PM_WATCH(ea, %du);" % n)
         L.append("    if (vm_mm_st_ok(m, ea, %d)) { %s; vm_mm_after(m, ea, %d); return; }" % (n, st, n))
         L.append("    (vm_write%d)(a, v);   /* the out-of-line accessor, not the macro */\n}" % w)
@@ -327,14 +402,20 @@ def header_preamble(text: str) -> str:
         if _RESV_OLD not in text:
             raise RuntimeError("PPU_ST_LEAN needs PPU_MM=1 (or the lifter's vm_mm_resv changed; update ppu_fastpath.py)")
         text = text.replace(_RESV_OLD, _RESV_NEW)
-    movbe, pmap, toc = _on("PPU_MOVBE"), _on("PPU_ST_PMAP"), _toc_on()
+    movbe, pmap, toc, lean = _on("PPU_MOVBE"), _on("PPU_ST_PMAP"), _toc_on(), _lean_on()
+    if lean:
+        if not (movbe and pmap):
+            raise RuntimeError("PPU_LEAN_MEM needs PPU_MOVBE=1 and PPU_ST_PMAP=1")
+        if _TAKE_OLD not in text:
+            raise RuntimeError("PPU_LEAN_MEM: the lifter's ppu_mm_take changed; update ppu_fastpath.py")
+        text = text.replace(_TAKE_OLD, _TAKE_LEAN)
     if movbe or pmap:
         i = text.find(_MM_ACC_START)
         j = text.find(_MM_ACC_END, i) if i >= 0 else -1
         if i < 0 or j < 0 or not all(s in text[i:j] for s in _MM_ACC_NEED):
             raise RuntimeError("PPU_ST_PMAP / PPU_MOVBE need PPU_MM=1 (or the lifter's PPU_MM accessors changed; "
                                "update ppu_fastpath.py)")
-        text = text[:i] + (_toc_header() if toc else "") + _mm_block(movbe, pmap, toc) + text[j + len(_MM_ACC_END):]
+        text = text[:i] + (_toc_header() if toc else "") + _mm_block(movbe, pmap, toc, lean) + text[j + len(_MM_ACC_END):]
     return text
 
 
@@ -479,12 +560,23 @@ def _toc_sub(m) -> str:
     return ("PPU_TOC_LD32(%s, %s, %d, 0x%08Xu)" if w == 32 else "PPU_TOC_LD64(%s, %s, %d, 0x%016Xull)") % (reg, m.group(3), k, v)
 
 
+def _track_a_flags() -> int:
+    """What a track-A lift tells the runtime it was built with (ppu_lean_mem_register)."""
+    return (1 if _lean_on() else 0) | (2 if _drain_none() else 0) | (4 if _icall_inl() else 0)
+
+
 def trailer_lines() -> list:
-    """Lines for the end of the last chunk: the TOC image PPU_TOC_FOLD lifted against."""
+    """Lines for the end of the last chunk: the TOC image PPU_TOC_FOLD lifted against, and what a
+    track-A lift registers."""
+    out = []
+    f = _track_a_flags()
+    if f:
+        out += ["", "/* track A: what this lift was built with (1 lean memory, 2 no drains, 4 inline indirect calls) */",
+                "static const int s_ppu_lean_reg = ppu_lean_mem_register(%d);" % f]
     if not _toc_on():
-        return []
+        return out
     t, img = _TOC, _TOC["image"]
-    out = ["", "/* PPU_TOC_FOLD: the TOC bytes the folded loads assume; ppu_run compares them with guest memory */",
+    out += ["", "/* PPU_TOC_FOLD: the TOC bytes the folded loads assume; ppu_run compares them with guest memory */",
            "static const unsigned char s_ppu_toc_image[%d] = {" % len(img)]
     for k in range(0, len(img), 32):
         out.append("    " + ",".join("0x%02X" % c for c in img[k:k + 32]) + ",")
@@ -494,8 +586,59 @@ def trailer_lines() -> list:
     return out
 
 
+def _drain_none() -> bool:
+    return _on("PPU_DRAIN_NONE")
+
+
+def _icall_inl() -> bool:
+    return _on("PPU_ICALL_INLINE")
+
+
+_DRAIN_NONE_C = """
+/* PPU_DRAIN_NONE (track A): no function of this lift returns with the trampoline set (PPU_XTAIL), and
+ * the runtime drains what an import or an indirect call leaves before it returns (ps3_hle_call,
+ * ps3_indirect_call): the drain after a call has nothing to do. */
+#undef DRAIN_TRAMPOLINE
+#define DRAIN_TRAMPOLINE(ctx) ((void)0)
+"""
+# The lift's own copy of the indirect-call target cache (runtime/ppu/ppu_loader.cpp g_ppu_icall_tbl):
+# 8192 words, guest address in the high half, the function's offset from function_table in the low
+# half, ~0 = empty; only EBOOT functions are entered (a lifted firmware function may return with a
+# trampoline pending). A hit makes the host call ps3_indirect_call's fast path made, without its
+# bookkeeping (the active context -- already this one --, the depth cap and the virtual-call stack,
+# both diagnostics); a miss is ps3_indirect_call, which fills the slot.
+_ICALL_C = """
+/* PPU_ICALL_INLINE (track A): an indirect call through the lift's target table first */
+#ifdef __cplusplus
+extern "C" uint64_t g_ppu_icall_tbl[8192];
+#else
+extern uint64_t g_ppu_icall_tbl[8192];
+#endif
+static inline void ppu_icall_inl(ppu_context* ctx)
+{
+    const uint32_t a = (uint32_t)ctx->ctr;
+    const uint64_t e = __atomic_load_n(&g_ppu_icall_tbl[(a >> 2) & 8191u], __ATOMIC_RELAXED);
+    if (__builtin_expect((uint32_t)(e >> 32) == a, 1)) {
+        ((void (*)(ppu_context*))(void*)((const char*)(const void*)function_table + (int32_t)(uint32_t)e))(ctx);
+        return;
+    }
+    ps3_indirect_call(ctx);
+}
+"""
+
+
 def source_preamble(text: str) -> str:
     """The per-chunk source preamble with the switched-on helper rewrites."""
+    if _drain_none():
+        if not _on("PPU_XTAIL"):
+            raise RuntimeError("PPU_DRAIN_NONE needs PPU_XTAIL=1 (a lift without it sets the trampoline itself)")
+        if "#define DRAIN_TRAMPOLINE(ctx)" not in text:
+            raise RuntimeError("PPU_DRAIN_NONE: the lifter's DRAIN_TRAMPOLINE changed; update ppu_fastpath.py")
+        text += _DRAIN_NONE_C
+    if _icall_inl():
+        if 'extern "C" void ps3_indirect_call(ppu_context* ctx);' not in text:
+            raise RuntimeError("PPU_ICALL_INLINE: the lifter's ps3_indirect_call declaration changed; update ppu_fastpath.py")
+        text += _ICALL_C
     if _on("PPU_FP_ONE_NAN"):
         for old, new in ((_FP_BIN_OLD, _FP_BIN_NEW), (_FMA_OLD, _FMA_NEW), (_STFS_OLD, _STFS_NEW),
                          (_STFS_AT, _STFS_FAST + _STFS_AT)):
@@ -754,6 +897,16 @@ _RE_PATCH_SLOT = re.compile(r"g_ppu_patch\[(\d+)\] == 1\b")
 
 def rewrite_body(lines: list) -> list:
     """A chunk's function lines with the switched-on statement rewrites."""
+    if _drain_none() and any("g_trampoline_fn = (void" in ln for ln in lines):
+        raise RuntimeError("PPU_DRAIN_NONE: a function of this lift sets the trampoline (a tail jump PPU_XTAIL "
+                           "did not make a tail call); the drains cannot be left out")
+    if _icall_inl():
+        k = 0
+        for i, ln in enumerate(lines):
+            if "ps3_indirect_call(ctx);" in ln:
+                lines[i] = ln.replace("ps3_indirect_call(ctx);", "ppu_icall_inl(ctx);")
+                k += 1
+        STATS["icall_inl"] = STATS.get("icall_inl", 0) + k
     if _natives() or _hooks():
         lines = _native_wrap(lines)
     if _patches():   # the instruction slots this chunk lifted: the runtime can tell they exist

@@ -3,6 +3,10 @@
 # with spu_native_register, runtime/spu/spu_channels.c, and declines -> the lifted body runs).
 # <image name> <addr>[:<continuation>] ...
 #
+# image 218 (jobmod_ab654d30fd90_efe70): skeletal animation -- the layer blend 0x16320
+# (native_218.c, Track B2: AVX2, eight bones per op, byte-exact by the job replay)
+jobmod_ab654d30fd90_efe70 0x16320 0x17780 0x18B80 0x13FC0 0x1D8E8 0x1DAC0
+#
 # image 216 (US: jobmod_d7096a8ffc1c_e60C0 / image 220): the BSP polygon clipper 0x68D8
 # (job216_bsp_native.c, from ThiagoFraga761/infamous2-pc job220_native.c, MIT)
 jobmod_9cb47b0cc0eb_e60c0 0x68D8

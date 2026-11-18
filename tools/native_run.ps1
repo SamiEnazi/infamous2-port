@@ -27,6 +27,8 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "port_paths.ps1")   # Get-PortPath rpcs3 (config.local.json)
+# a folder whose path the game's C file functions can't take: its plain-named link (tools\safe_paths.ps1)
+try { $root = Get-BuildRoot $root -Create } catch {}
 $game = Join-Path $root "game"
 $out = Join-Path $root "native\recordings\$Tag"
 New-Item -ItemType Directory -Force $out | Out-Null
@@ -98,6 +100,13 @@ $psi.WorkingDirectory = $out            # gamedata-relative writes land in the r
 $psi.UseShellExecute = $false
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
+# The game reads %APPDATA% (settings.ini, mods.ini) and %LOCALAPPDATA% (the shader cache) through its C runtime's
+# ANSI functions: a user folder named in another alphabet than the PC's language for non-Unicode programs reaches it
+# as "????". Then their short 8.3 names, the same folders (tools\safe_paths.ps1).
+foreach ($k in "APPDATA", "LOCALAPPDATA") {
+    $v = [Environment]::GetEnvironmentVariable($k)
+    if ($v -and -not (Test-AnsiPath $v)) { $a = Get-AnsiPath $v; if ($a) { $vars[$k] = $a } }
+}
 foreach ($k in $vars.Keys) { $psi.EnvironmentVariables[$k] = $vars[$k] }
 
 if ($Driver) { $LiveLog = $true }

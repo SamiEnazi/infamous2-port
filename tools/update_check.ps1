@@ -9,8 +9,15 @@
 # answer is a short "304"), and only for a copy between two releases, once, how its commit relates to the
 # release. At most every 6 hours (-Force: now; -CacheOnly: never), 5 s per question; offline or limited,
 # the last answer stays.
+# With each question to GitHub it also fetches the supporters list F2 > About shows (supporters.json at the
+# repository's root, from raw.githubusercontent.com): same moments, same switch, same 5 s, silent when it
+# fails. At most 64 KB and one JSON object, else the copy already here stays; the game reads it as
+# untrusted text (engine\libs\video\vk_overlay_about_file.h) and falls back to the copy that came with
+# the install (supporters.json in the port folder). -SupportersUrl / INF2_SUPPORTERS_URL: another address
+# or a local file (tests).
 # Files, in work\update\ (never published, never in a release zip):
 #   status.txt   what the game reads (engine\libs\video\vk_overlay_update_status.h: key=value)
+#   supporters.json  the supporters list as last fetched
 #   check.json   the answers kept between starts
 #   setup\       Setup.exe built from this copy's tools\setup_exe for -StartUpdate (the in-box C# compiler)
 param(
@@ -21,7 +28,8 @@ param(
     [switch]$DryRun,
     [string]$ApiBase = "https://api.github.com",
     [double]$MaxAgeHours = 6,
-    [int]$TimeoutMs = 5000
+    [int]$TimeoutMs = 5000,
+    [string]$SupportersUrl = ""
 )
 $ErrorActionPreference = "Stop"
 if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
@@ -30,7 +38,11 @@ $Repo = "SamiEnazi/infamous2-port"
 $Dir = Join-Path $Root "work\update"
 $StatusFile = Join-Path $Dir "status.txt"
 $CacheFile = Join-Path $Dir "check.json"
+$SupportersFile = Join-Path $Dir "supporters.json"
+if (-not $SupportersUrl) { $SupportersUrl = $env:INF2_SUPPORTERS_URL }
+if (-not $SupportersUrl) { $SupportersUrl = "https://raw.githubusercontent.com/$Repo/main/supporters.json" }
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
+. (Join-Path $PSScriptRoot "safe_paths.ps1")   # Invoke-Cmd, Remove-Tree (any folder name: GitHub #34)
 
 # ---------------------------------------------------------------- this copy
 
@@ -171,6 +183,56 @@ function Get-Relation($c, [string]$TagSha, [string]$Sha, [bool]$MayAsk) {
     } catch { return $null }
 }
 
+# ---------------------------------------------------------------- the supporters list (F2 > About)
+
+# Fetches supporters.json into work\update. Silent: offline, a timeout, too big (64 KB) or not one JSON
+# object, and the copy already there stays. Nothing in it is trusted here or in the game.
+function Update-Supporters {
+    $max = 64KB
+    try {
+        $bytes = $null
+        if ($SupportersUrl -match '^https?://') {
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}   # TLS 1.2
+            $r = [Net.HttpWebRequest]::Create($SupportersUrl)
+            $r.UserAgent = "inFAMOUS2-port-updater"
+            $r.Timeout = $TimeoutMs
+            $r.ReadWriteTimeout = $TimeoutMs
+            $r.AllowAutoRedirect = $false
+            $resp = $r.GetResponse()
+            try {
+                if ([int]$resp.StatusCode -ne 200 -or $resp.ContentLength -gt $max) { return }
+                $in = $resp.GetResponseStream()
+                $ms = New-Object IO.MemoryStream
+                $buf = New-Object byte[] 8192
+                $until = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+                while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                    $ms.Write($buf, 0, $n)
+                    if ($ms.Length -gt $max -or [DateTime]::UtcNow -gt $until) { return }
+                }
+                $bytes = $ms.ToArray()
+            } finally { $resp.Close() }
+        } else {
+            $p = $SupportersUrl -replace '^file:///?', ''
+            if ((Get-Item -LiteralPath $p).Length -gt $max) { return }
+            $bytes = [IO.File]::ReadAllBytes($p)
+        }
+        if (-not $bytes -or $bytes.Length -gt $max) { return }
+        $text = $Utf8.GetString($bytes).TrimStart([char]0xFEFF).Trim()
+        if (-not $text.StartsWith("{")) { return }
+        $j = $text | ConvertFrom-Json
+        if ($j -is [array] -or $j -isnot [System.Management.Automation.PSCustomObject]) { return }
+        New-Item -ItemType Directory -Force $Dir | Out-Null
+        $tmp = "$SupportersFile.tmp"
+        [IO.File]::WriteAllBytes($tmp, $bytes)
+        for ($i = 0; ; $i++) {   # the game may be reading the old one: try again
+            try {
+                if (Test-Path -LiteralPath $SupportersFile) { [IO.File]::Replace($tmp, $SupportersFile, [NullString]::Value) } else { [IO.File]::Move($tmp, $SupportersFile) }
+                break
+            } catch { if ($i -ge 20) { throw }; Start-Sleep -Milliseconds 100 }
+        }
+    } catch {}
+}
+
 # ---------------------------------------------------------------- release notes: plain lines
 
 function ConvertTo-PlainNotes([string]$Md) {
@@ -267,6 +329,7 @@ function Invoke-Check {
     try { Save-Cache $c } catch {}
     $notes = if ($c.release) { ConvertTo-PlainNotes $c.release.body } else { @() }
     Write-Status $a $notes
+    if ($ask) { Update-Supporters }   # after the answer: the game never waits for the list
 }
 
 # ---------------------------------------------------------------- the update itself
@@ -301,18 +364,18 @@ function Get-UpdateSetup {
         if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $stamp) -and ([IO.File]::ReadAllText($stamp).Trim() -eq $h)) { return $exe }
         # build.cmd writes ..\..\Setup.exe and reads ..\setup.ico: a copy laid out the same way
         $b = Join-Path $setupDir "src"
-        if (Test-Path -LiteralPath $b) { cmd /c rd /s /q "$b" | Out-Null }
+        Remove-Tree $b
         New-Item -ItemType Directory -Force (Join-Path $b "tools\setup_exe") | Out-Null
         Get-ChildItem -LiteralPath $src | Copy-Item -Destination (Join-Path $b "tools\setup_exe") -Recurse -Force
         if (Test-Path -LiteralPath $ico) { Copy-Item -LiteralPath $ico -Destination (Join-Path $b "tools") }
         Write-Host "  building Setup.exe from tools\setup_exe (the C# compiler that comes with Windows)"
         $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        try { cmd /c "`"$(Join-Path $b 'tools\setup_exe\build.cmd')`"" 2>&1 | ForEach-Object { Write-Host "    $_" } } finally { $ErrorActionPreference = $eap }
+        try { Invoke-Cmd '"%INF2_P1%"' @(Join-Path $b 'tools\setup_exe\build.cmd') | ForEach-Object { Write-Host "    $_" } } finally { $ErrorActionPreference = $eap }
         $built = Join-Path $b "Setup.exe"
         if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $built)) {
             Move-Item -LiteralPath $built -Destination $exe -Force
             [IO.File]::WriteAllText($stamp, $h, $Utf8)
-            cmd /c rd /s /q "$b" | Out-Null
+            try { Remove-Tree $b } catch {}
             return $exe
         }
         Write-Host "  could not build Setup.exe (exit code $LASTEXITCODE)"

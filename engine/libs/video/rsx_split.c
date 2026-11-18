@@ -49,6 +49,7 @@
  */
 #include "rsx_split.h"
 #include "rsx_dispatch.h"
+#include "rsx_tc.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -93,7 +94,7 @@ typedef struct { u16 type, kind; u32 size; } sp_hdr;            /* size: the who
 typedef struct { sp_hdr h; u32 n, pad; } sp_state;              /* then n sp_blk */
 typedef struct { u32 id, pad; u8 b[RSX_DSP_BLK_BYTES]; } sp_blk;
 typedef struct { u32 current_primitive, in_begin_end, pair_packets, vp_gen, tgen, mgen, const_gen, pad; } sp_scal;   /* const_gen: (merge) rsx-vtx's PS3RECOMP_VK_CONST_REUSE */
-typedef struct { sp_hdr h; u32 a, b; sp_scal s; } sp_event_rec; /* EV_INLINE: then a bytes */
+typedef struct { sp_hdr h; u32 a, b; sp_scal s; u64 dg; } sp_event_rec; /* EV_INLINE: then a bytes; dg: (track C) PS3_RSX_DIGEST=check, the walker's state hash at END (0 = none) */
 typedef struct { sp_hdr h; u32 a, b, c, pad; } sp_act_rec;      /* SP_ACT, SP_LIMIT */
 
 static struct {
@@ -111,10 +112,22 @@ static struct {
     unsigned long long t_report;
 } s_sp;
 static u64 s_sp_dirty[RSX_DSP_DIRTY_WORDS + 1];
+/* (track C) PS3_RSX_LBLWAIT: per word of the label window (label base + 0..0xFFFF) the
+ * ring position at the end of the last queued action that writes it, and the end of the
+ * last action whose target the walker cannot name (a 2D / memory-copy word, a flip).
+ * An acquire waits for the exec thread only up to those two positions. */
+#define SP_LBL_WORDS (0x10000u >> 2)
+static u64 s_sp_lbl[SP_LBL_WORDS];
+static u64 s_sp_lbl_any;
+u32 gcm_label_base(void);   /* cellGcmSys.c: the label window's guest address */
 static __declspec(align(64)) volatile LONG64 s_sp_w;     /* published write position (walker) */
 static __declspec(align(64)) volatile LONG64 s_sp_r;     /* consumed position (exec thread) */
 static __declspec(align(64)) volatile LONG   s_sp_bsleep; /* the exec thread is (about to be) asleep */
 static __declspec(align(64)) volatile LONG   s_sp_await;  /* the walker waits for s_sp_r */
+/* (track C) PS3_RSX_SPWAKE: the position the waiting walker needs s_sp_r to reach (written
+ * before s_sp_await is raised); 0 = wake at every END as before */
+static __declspec(align(64)) volatile LONG64 s_sp_await_tgt;
+static int s_sp_wake_tgt = -1;
 
 extern u32 g_rsx_dsp_tex_gen, g_rsx_dsp_misc_gen;
 extern void (*g_rsx_dsp_limit_hook)(int what, u32 n);
@@ -122,7 +135,9 @@ extern void (*g_rsx_dsp_limit_hook)(int what, u32 n);
 static int sp_switch(void)
 {
     static int on = -1;
-    if (on < 0) { const char* e = getenv("PS3RECOMP_RSX_SPLIT"); on = (e && *e && *e != '0'); }   /* (next) default OFF: the critic measured it a net loss (semaphore stalls, sync points); =1 opts in */
+    /* (next) default OFF: the critic measured it a net loss (semaphore stalls, sync points); =1 opts in.
+     * (track C) PS3RECOMP_RSX_SPLIT wins when set; else PS3_RSX_SPLIT (rsx_tc.c's table). */
+    if (on < 0) { const char* e = getenv("PS3RECOMP_RSX_SPLIT"); on = (e && *e) ? (*e != '0') : rsx_tc(TC_SPLIT); }
     return on;
 }
 
@@ -265,6 +280,8 @@ static void sp_wait_r(u64 target)
         r = sp_load_r();
         if (r >= target) break;
         if (__rdtsc() - t0 < spin) { _mm_pause(); continue; }
+        if (s_sp_wake_tgt < 0) s_sp_wake_tgt = rsx_tc(TC_SPWAKE);
+        InterlockedExchange64(&s_sp_await_tgt, s_sp_wake_tgt ? (LONG64)target : 0);
         InterlockedExchange(&s_sp_await, 1);
         r = sp_load_r();
         if (r < target) {
@@ -274,7 +291,9 @@ static void sp_wait_r(u64 target)
         InterlockedExchange(&s_sp_await, 0);
     }
     rsx_diag_wait(NULL);
-    s_sp.wait_ticks += __rdtsc() - t0;
+    { const u64 dt = __rdtsc() - t0;
+      s_sp.wait_ticks += dt;
+      rsx_tc_count(TCC_WAIT_US, s_sp.ticks_us ? dt / s_sp.ticks_us : 0); }
     s_sp.rc = r;
 }
 
@@ -367,7 +386,9 @@ static void sp_event(u32 kind, u32 a, u32 b, const u8* data, u32 bytes)
     e->s.vp_gen = r->vp_gen;
     e->s.tgen = s_sp.tgen;
     e->s.mgen = s_sp.mgen;
-    e->s.const_gen = r->const_gen; e->s.pad = 0;
+    e->s.const_gen = r->const_gen; e->s.pad = g_rsx_tc_src;   /* (track C) the draw's source */
+    /* (track C) PS3_RSX_DIGEST=check: the walker's state as the engine must see it at this END */
+    e->dg = (kind == EV_END && rsx_tc_digest_mode() == 2) ? ((rsx_tc_state_hash(r) ^ rsx_tc_pair_hash(1)) | 1u) : 0u;
     if (bytes) memcpy(e + 1, data, bytes);
     sp_commit((const u8*)e);
     if (kind == EV_END || kind == EV_CLEAR || kind == EV_FLIP) sp_publish();   /* one draw's worth at a time */
@@ -375,14 +396,15 @@ static void sp_event(u32 kind, u32 a, u32 b, const u8* data, u32 bytes)
 
 /* The walker's instance's sinks: the engine's, as events. */
 static void rec_clear(void* u, const rsx_dispatch* r, u32 mask) { (void)u; (void)r; sp_event(EV_CLEAR, mask, 0, NULL, 0); }
-static void rec_begin(void* u, const rsx_dispatch* r, u32 prim) { (void)u; (void)r; sp_event(EV_BEGIN, prim, 0, NULL, 0); }
+static void rec_begin(void* u, const rsx_dispatch* r, u32 prim) { (void)u; (void)r; rsx_tc_pair_reset(1); sp_event(EV_BEGIN, prim, 0, NULL, 0); }
 static void rec_end(void* u, const rsx_dispatch* r) { (void)u; (void)r; sp_event(EV_END, 0, 0, NULL, 0); }
-static void rec_arrays(void* u, const rsx_dispatch* r, u32 first, u32 count) { (void)u; (void)r; sp_event(EV_ARRAYS, first, count, NULL, 0); }
-static void rec_index(void* u, const rsx_dispatch* r, u32 first, u32 count) { (void)u; (void)r; sp_event(EV_INDEX, first, count, NULL, 0); }
+static void rec_arrays(void* u, const rsx_dispatch* r, u32 first, u32 count) { (void)u; (void)r; rsx_tc_pair_note(1, 1, first, count); sp_event(EV_ARRAYS, first, count, NULL, 0); }
+static void rec_index(void* u, const rsx_dispatch* r, u32 first, u32 count) { (void)u; (void)r; rsx_tc_pair_note(1, 2, first, count); sp_event(EV_INDEX, first, count, NULL, 0); }
 static void rec_inline(void* u, const rsx_dispatch* r, const u8* data, u32 bytes)
 {
     (void)u; (void)r;
     if (bytes > RSX_DSP_INLINE_MAX_BYTES) bytes = RSX_DSP_INLINE_MAX_BYTES;   /* cannot happen: the dispatcher's cap */
+    rsx_tc_pair_note(1, 3, bytes, 0);
     sp_event(EV_INLINE, bytes, 0, data, bytes);
 }
 static void rec_flip(void* u, const rsx_dispatch* r, u32 arg) { (void)u; (void)r; sp_event(EV_FLIP, arg, 0, NULL, 0); }
@@ -425,7 +447,8 @@ static void sp_exec(const u8* p, rsx_dispatch* e)
         switch (h->kind) {
         case EV_CLEAR:  if (k->clear) k->clear(k->user, e, r->a); break;
         case EV_BEGIN:  if (k->begin) k->begin(k->user, e, r->a); break;
-        case EV_END:    if (k->end) k->end(k->user, e); break;
+        case EV_END:    g_rsx_tc_ref = r->dg; g_rsx_tc_src_exec = r->s.pad; if (k->end) k->end(k->user, e);
+                        g_rsx_tc_ref = 0; g_rsx_tc_src_exec = ~0u; break;
         case EV_ARRAYS: if (k->draw_arrays) k->draw_arrays(k->user, e, r->a, r->b); break;
         case EV_INDEX:  if (k->draw_index_array) k->draw_index_array(k->user, e, r->a, r->b); break;
         case EV_INLINE: {
@@ -465,6 +488,7 @@ static DWORD WINAPI sp_exec_thread(LPVOID arg)
     const u8* const ring = s_sp.ring;
     u64 r = (u64)s_sp_r;
     const u64 spin = s_sp.ticks_us * 30u;
+    s_sp_wake_tgt = rsx_tc(TC_SPWAKE);
     for (;;) {
         u64 w = (u64)__atomic_load_n(&s_sp_w, __ATOMIC_ACQUIRE);
         if (w == r) {                             /* idle: spin a little, then sleep until published */
@@ -492,12 +516,22 @@ static DWORD WINAPI sp_exec_thread(LPVOID arg)
             sp_exec(p, e);
             r += h.size;
             if (h.type == SP_EVENT && h.kind == EV_END) {   /* a draw done: the walker may be waiting on it */
-                __atomic_store_n(&s_sp_r, (LONG64)r, __ATOMIC_RELEASE);
-                if (s_sp_await) WakeByAddressSingle((PVOID)&s_sp_r);
+                if (s_sp_wake_tgt > 0) {
+                    /* (track C) PS3_RSX_SPWAKE: a full barrier (the walker raises s_sp_await, then
+                     * re-reads s_sp_r), and a wake only when its wait is over */
+                    InterlockedExchange64(&s_sp_r, (LONG64)r);
+                    if (s_sp_await && (u64)__atomic_load_n(&s_sp_await_tgt, __ATOMIC_ACQUIRE) <= r) {
+                        rsx_tc_count(TCC_WAKES, 1);
+                        WakeByAddressSingle((PVOID)&s_sp_r);
+                    }
+                } else {
+                    __atomic_store_n(&s_sp_r, (LONG64)r, __ATOMIC_RELEASE);
+                    if (s_sp_await) { rsx_tc_count(TCC_WAKES, 1); WakeByAddressSingle((PVOID)&s_sp_r); }
+                }
             }
         }
         InterlockedExchange64(&s_sp_r, (LONG64)r);   /* full barrier: before the walker's flag is read */
-        if (s_sp_await) WakeByAddressSingle((PVOID)&s_sp_r);
+        if (s_sp_await) { rsx_tc_count(TCC_WAKES, 1); WakeByAddressSingle((PVOID)&s_sp_r); }
     }
     return 0;
 }
@@ -654,6 +688,27 @@ void rsx_split_method(u32 method, u32 arg)
     rsx_dispatch_method(s_sp.a, m, arg);
 }
 
+/* (track C) PS3_RSX_LBLWAIT: which label an action writes (gcm_split_run's cases) */
+static void sp_lbl_note(u32 kind, u32 a)
+{
+    const u64 end = s_sp.wl;
+    const u32 base = gcm_label_base();
+    u32 la;
+    if (kind == RSX_SPLIT_ACT_SEMA) la = a;                         /* NV406E release: a = the label */
+    else if (kind == RSX_SPLIT_ACT_WORD) {
+        const u32 subch = a >> 13, m = a & 0x1FFCu;
+        if (a == 0xEB00u || a == 0xEB04u || a == 0xE920u || a == 0xE924u || (subch == 7 && m == 0x0B00u)) return;
+        if (subch > 1) { s_sp_lbl_any = end; return; }              /* the 2D / memory-copy engines: anywhere */
+        if (m != 0x1D70u && m != 0x1D74u) return;                   /* SET_REFERENCE, reports, 0x1D6C: no label */
+        /* the back-end / texture-read release (rsx_commands.c): base + (SEMAPHORE_OFFSET & 0xFFFFFF);
+         * the walker's instance holds the offset the exec thread will have by then (same order) */
+        la = base + (s_sp.a->regs[0x1D6Cu >> 2] & 0x00FFFFFFu);
+    } else { s_sp_lbl_any = end; return; }                          /* a flip: say anything */
+    const u32 off = la - base;
+    if (off < 0x10000u) s_sp_lbl[off >> 2] = end;
+    else s_sp_lbl_any = end;
+}
+
 void rsx_split_act(u32 kind, u32 a, u32 b, u32 c)
 {
     sp_flush_state();                 /* the engine's state is the walker's when the action runs */
@@ -662,6 +717,7 @@ void rsx_split_act(u32 kind, u32 a, u32 b, u32 c)
     r->a = a; r->b = b; r->c = c; r->pad = 0;
     sp_commit((const u8*)r);
     s_sp.label_pos = s_sp.wl;
+    sp_lbl_note(kind, a);
 }
 
 void rsx_split_wait_labels(void)
@@ -671,9 +727,46 @@ void rsx_split_wait_labels(void)
     sp_wait_r(s_sp.label_pos);
 }
 
+/* (track C) before the walker reads label `la` for a semaphore acquire */
+void rsx_split_wait_label(u32 la)
+{
+    rsx_tc_count(TCC_ACQ, 1);
+    if (!rsx_tc(TC_LBLWAIT)) {
+        if (s_sp.rc >= s_sp.label_pos) return;
+        rsx_tc_count(TCC_ACQ_WAIT, 1);
+        sp_publish();
+        sp_wait_r(s_sp.label_pos);
+        return;
+    }
+    const u32 off = la - gcm_label_base();
+    u64 need = s_sp_lbl_any;
+    if (off < 0x10000u) { const u64 p = s_sp_lbl[off >> 2]; if (p > need) need = p; }
+    else need = s_sp.label_pos;
+    if (s_sp.rc < need) s_sp.rc = sp_load_r();
+    if (s_sp.rc >= need) {
+        if (s_sp.rc < s_sp.label_pos) rsx_tc_count(TCC_ACQ_SKIP, 1);   /* the old rule would have waited */
+        return;
+    }
+    rsx_tc_count(TCC_ACQ_WAIT, 1);
+    sp_publish();
+    sp_wait_r(need);
+}
+
+/* (track C) PS3_RSX_WALKON: has the exec thread run everything queued? */
+int rsx_split_idle(void)
+{
+    if (!s_sp.inited) return 1;
+    if (s_sp.rc >= s_sp.wl) return 1;
+    s_sp.rc = sp_load_r();
+    return s_sp.rc >= s_sp.wl;
+}
+/* ...and publish what is queued, so it does (the walker is about to poll). */
+void rsx_split_publish(void) { if (s_sp.inited) { sp_flush_state(); sp_publish(); } }
+
 void rsx_split_sync(void)
 {
     if (!s_sp.inited) return;
+    rsx_tc_count(TCC_SYNC, 1);
     sp_flush_state();
     sp_publish();
     sp_wait_r(s_sp.wl);
@@ -690,5 +783,8 @@ void rsx_split_burst(u32 method, int incr, const u32* be_words, u32 count) { (vo
 void rsx_split_method(u32 method, u32 arg) { (void)method; (void)arg; }
 void rsx_split_act(u32 kind, u32 a, u32 b, u32 c) { (void)kind; (void)a; (void)b; (void)c; }
 void rsx_split_wait_labels(void) {}
+void rsx_split_wait_label(u32 la) { (void)la; }
+int  rsx_split_idle(void) { return 1; }
+void rsx_split_publish(void) {}
 void rsx_split_sync(void) {}
 #endif

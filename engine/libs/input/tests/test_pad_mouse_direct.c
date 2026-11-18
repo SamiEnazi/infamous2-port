@@ -4,12 +4,18 @@
  * stick every count and the title its own copy only while it holds the claim,
  * emptied once when the claim lapses; the mouse's stick axes; the script feeds
  * whole counts whose totals are exact, spread over a duration, from the anchor or
- * the start.
+ * the start. And the turn a title's camera hook owes its camera
+ * (include/ps3emu/ps3_mouse_camera.h, GitHub #59): given whole, a flick and a slow
+ * move of the same counts turn by the same angle, at any frame rate, with nothing
+ * left when the mouse stops; the carried way never lets the target lead the view
+ * by more than its lead and loses nothing either.
  *
  *   cc -std=gnu17 libs/input/tests/test_pad_mouse_direct.c -o /tmp/t && /tmp/t
  *   (Windows: clang -std=gnu17 libs\input\tests\test_pad_mouse_direct.c -o t.exe && t.exe)
  */
 #include "../pad_mouse_direct.h"
+#include "../../../include/ps3emu/ps3_mouse_camera.h"
+#include <math.h>
 #include <stdio.h>
 
 static int s_fail;
@@ -160,12 +166,94 @@ static void test_script(void)
     CHECK(pmd_script_parse(&h, "") == 0);
 }
 
+/* ---- the owed turn (ps3_mouse_camera.h) ----------------------------------- */
+static const float kK = 0.0008f, kLo = -1.4137f, kHi = 1.4137f;
+
+/* `counts` of mouse motion spread evenly over `frames` camera frames, each given whole:
+ * the yaw turned in all, *left = what is still owed after the last frame with motion. */
+static float turn_whole_run(int counts, int frames, float* left)
+{
+    float owe_y = 0.0f, owe_p = 0.0f, yaw = 3.0f, pitch = 0.12f, turned = 0.0f;
+    int fed = 0;
+    for (int f = 1; f <= frames; f++) {
+        const int now = (int)((long long)counts * f / frames) - fed;
+        fed += now;
+        owe_y += -(float)now * kK;
+        const float y0 = yaw;
+        ps3_mouse_turn_whole(&owe_y, &owe_p, 0, kLo, kHi, &yaw, &pitch);
+        turned += ps3_mouse_wrap_pi(yaw - y0);
+    }
+    *left = owe_y;
+    return turned;
+}
+
+static void test_turn_whole(void)
+{
+    /* 3000 counts (2.4 rad): one frame (a flick), 2 frames (30 ms at 60 fps), 6 (30 ms at 200 fps), 600 (a slow drag) */
+    static const int frames[] = { 1, 2, 6, 180, 600 };
+    for (int i = 0; i < 5; i++) {
+        float left;
+        const float t = turn_whole_run(3000, frames[i], &left);
+        CHECK(fabsf(t - (-3000.0f * kK)) < 1e-4f);     /* 1:1, whatever the speed and the frame rate */
+        CHECK(left == 0.0f);                          /* nothing after the mouse stops */
+    }
+    /* a turn across +-pi stays in -pi..pi */
+    { float oy = 1.0f, op = 0.0f, y = 3.0f, p = 0.0f;
+      ps3_mouse_turn_whole(&oy, &op, 0, kLo, kHi, &y, &p);
+      CHECK(fabsf(y - (4.0f - 6.28318531f)) < 1e-5f && oy == 0.0f); }
+    /* pitch stops at the limit and what is past it is gone (no turn back later) */
+    { float oy = 0.0f, op = 3.0f, y = 0.0f, p = 1.0f;
+      ps3_mouse_turn_whole(&oy, &op, 0, kLo, kHi, &y, &p);
+      CHECK(p == kHi && op == 0.0f);
+      op = -0.1f;
+      ps3_mouse_turn_whole(&oy, &op, 0, kLo, kHi, &y, &p);
+      CHECK(fabsf(p - (kHi - 0.1f)) < 1e-6f); }
+    /* an axis the game switched off does not turn, and its turn is not kept for later */
+    { float oy = 0.5f, op = 0.25f, y = 1.0f, p = 0.0f;
+      ps3_mouse_turn_whole(&oy, &op, 1, kLo, kHi, &y, &p);
+      CHECK(y == 1.0f && fabsf(p - 0.25f) < 1e-6f && oy == 0.0f && op == 0.0f);
+      oy = 0.5f; op = 0.25f;
+      ps3_mouse_turn_whole(&oy, &op, 2, kLo, kHi, &y, &p);
+      CHECK(fabsf(y - 1.5f) < 1e-6f && fabsf(p - 0.25f) < 1e-6f && oy == 0.0f && op == 0.0f); }
+}
+
+static void test_turn_lead(void)
+{
+    /* a view that follows its target at 5 rad/s, 60 fps: a 3.2 rad flick is carried, the target never
+     * leads the view by more than the lead, and all of it arrives */
+    const float lead = 0.19f, dt = 1.0f / 60.0f, rate = 5.0f;
+    float oy = -3.2f, op = 0.0f, yaw = 1.0f, pitch = 0.12f, view = 1.0f, turned = 0.0f;
+    int frames = 0;
+    while (oy != 0.0f && frames < 1000) {
+        const float y0 = yaw;
+        ps3_mouse_turn_lead(&oy, &op, view, pitch, lead, kLo, kHi, &yaw, &pitch);
+        turned += ps3_mouse_wrap_pi(yaw - y0);
+        CHECK(fabsf(ps3_mouse_wrap_pi(yaw - view)) <= lead + 1e-5f);
+        float d = ps3_mouse_wrap_pi(yaw - view);            /* the game's view step */
+        d = ps3_mouse_clampf(d, -rate * dt, rate * dt);
+        view = ps3_mouse_wrap_pi(view + d);
+        frames++;
+    }
+    CHECK(fabsf(turned - (-3.2f)) < 1e-4f);
+    CHECK(frames > 30 && frames < 60);      /* ~0.64 s: the floaty flick of GitHub #59 */
+    /* a small turn fits at once */
+    { float y = 0.0f, p = 0.0f; oy = 0.05f; op = -0.02f;
+      ps3_mouse_turn_lead(&oy, &op, 0.0f, 0.0f, lead, kLo, kHi, &y, &p);
+      CHECK(fabsf(y - 0.05f) < 1e-7f && fabsf(p + 0.02f) < 1e-7f && oy == 0.0f && op == 0.0f); }
+    /* pitch at its limit: the rest is gone */
+    { float y = 0.0f, p = kHi - 0.01f; oy = 0.0f; op = 0.1f;
+      ps3_mouse_turn_lead(&oy, &op, 0.0f, kHi - 0.01f, lead, kLo, kHi, &y, &p);
+      CHECK(p == kHi && op == 0.0f); }
+}
+
 int main(void)
 {
     test_claim();
     test_tee();
     test_axes();
     test_script();
+    test_turn_whole();
+    test_turn_lead();
     printf("%s (%d failure(s))\n", s_fail ? "FAIL" : "PASS", s_fail);
     return s_fail != 0;
 }

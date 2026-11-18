@@ -56,7 +56,8 @@ New-Item -ItemType Directory -Force $runsDir | Out-Null
 function Remove-Tree([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { cmd /c rd /s /q "$Path" 2>&1 | Out-Null } finally { $ErrorActionPreference = $eap }
+    # (Invoke-Cmd: the path goes to cmd as a variable in quotes, "&" or "%" in a folder name stay letters)
+    try { Invoke-Cmd 'rd /s /q "%INF2_P1%"' @($Path) | Out-Null } finally { $ErrorActionPreference = $eap }
 }
 # a counters file llvm-profdata can read (not empty, not cut off by a kill mid-write)
 function Test-Profraw([string]$Path) {

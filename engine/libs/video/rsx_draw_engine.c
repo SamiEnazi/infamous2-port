@@ -22,6 +22,7 @@
  * probe, and every YZ_PERF_PROFILE block.
  */
 #include "rsx_draw_engine.h"
+#include "rsx_tc.h"   /* (track C) PS3_RSX_DIGEST, the track's counters */
 #include "rsx_split.h"          /* (rsx-par2) rsx_diag_wait: PS3_STALL_MS */
 
 #include "rsx_button_icons.h"   /* prompt glyphs that follow the controller */
@@ -641,6 +642,9 @@ static inline void dl_note_bump(u32 slot)
     else s_dl_nbumps = 9u;   /* more than a replay holds: not reusable */
 }
 
+/* [shadow] PS3RECOMP_SHADOW_BIAS: the slope term x the shadow map's scale for a draw into a
+ * scaled map (rsx_shadow_res.inc eng_shres_bias_k sets it before each call; 1 = as the game) */
+static float s_shres_bias_k = 1.0f;
 static void eng_apply_depth_bias(u32 zeta_offset, const rsx_be_render_state* rs)
 {
     if (!g.be->set_depth_bias) return;
@@ -663,6 +667,7 @@ static void eng_apply_depth_bias(u32 zeta_offset, const rsx_be_render_state* rs)
         if (slope != slope) slope = 0.0f;
         if (constant != constant) constant = 0.0f;
         constant *= units_k * (float)mode;   /* mode > 1: diagnostic multiple */
+        slope *= s_shres_bias_k;             /* [shadow] PS3RECOMP_SHADOW_BIAS (1 unless set) */
         if (slope > 0.0f && constant >= 0.0f) {   /* PS3RECOMP_ENG_SOFT_BIAS */
             int sbv = __atomic_load_n(&s_soft_bias, __ATOMIC_RELAXED);
             if (__builtin_expect(sbv < 0, 0)) sbv = ps3_toggle_watch(PS3T_ENG_SOFT_BIAS, eng_soft_bias_set) != 0;
@@ -724,6 +729,26 @@ static void eng_apply_depth_clip(u32 zeta_offset, const rsx_be_render_state* rs,
 /* The decompilers' HLSL. The VP decompiler builds bodies up to 192 KB. */
 static char s_vs_hlsl[256 * 1024];
 static char s_ps_hlsl[256 * 1024];
+
+/* [aa] PS3RECOMP_ALPHA_AA's programs: [0] rewritten, [1] another comparison
+ * (plain test), [2] text not the test's own (plain test kept); [3] mip level
+ * helpers added, [4] no room for them (the level is 0: plain test). Read by
+ * the Vulkan backend's [aa] stats line. */
+u64 g_eng_aa_progs[5];
+/* The mip level the thin-cut-out test reads (rsx_fp_alpha_aa_lod), defined on
+ * the final text; when it cannot be, the test reads level 0 (the plain one). */
+static void eng_aa_lod(void)
+{
+    if (!strstr(s_ps_hlsl, "_rsx_alod")) return;
+    const int r = rsx_fp_alpha_aa_lod(s_ps_hlsl, sizeof s_ps_hlsl);
+    if (r > 0) { g_eng_aa_progs[3]++; return; }
+    if (r < 0) {
+        g_eng_aa_progs[4]++;
+        eng_hlsl_replace(s_ps_hlsl, sizeof s_ps_hlsl, "max(_rsx_alod, 0.0)", "0.0");
+        static u32 said;
+        if (said++ < 4) fprintf(stderr, "[aa] WARNING: no room for the mip-level helpers: plain alpha test\n");
+    }
+}
 
 /* The draw accumulator: one BEGIN_END group's batches, references and cuts. */
 static struct {
@@ -1242,10 +1267,14 @@ static void eng_fxres_init(void)
     eng_fxres_apply(getenv("PS3RECOMP_FX_RES"));
 }
 
+#include "rsx_shadow_res.inc"   /* [shadow] PS3RECOMP_SHADOW_RES: the sun-shadow maps at 2x / 4x */
+
 /* The scale (quarter steps, 4 = none) the target at this address and guest
  * size gets now. */
 static u32 eng_fxres_kq(u32 location, u32 offset, u32 w, u32 h)
 {
+    { const u32 sk = eng_shres_kq(location, offset, w, h);   /* [shadow] a registered shadow map: its own scale */
+      if (__builtin_expect(sk != 0u, 0)) return sk; }
     int q = __atomic_load_n(&s_fxres_q, __ATOMIC_RELAXED);
     if (__builtin_expect(q == 4, 1)) return 4u;
     if (q == -1) { eng_fxres_init(); q = __atomic_load_n(&s_fxres_q, __ATOMIC_RELAXED); if (q == 4) return 4u; }
@@ -1515,6 +1544,7 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
      * A, and the MRT selectors add B, C and D on top of it. */
     const u32 sel = (sf.color_target == CELL_GCM_SURFACE_TARGET_1) ? 1u : 0u;
     const rsx_be_format fmt = eng_surface_format(sf.color_format);
+    eng_shres_detect(&sf, sel);   /* [shadow] a depth-only square pass: a shadow map (PS3RECOMP_SHADOW_RES) */
     const u32 first = eng_surface_get(sf.color_location[sel], sf.color_offset[sel],
                                       sf.clip_w, sf.clip_h, fmt);
     if (first == ENG_INVALID) return 0;
@@ -2275,6 +2305,7 @@ void rsx_texpack_status(unsigned* packs, unsigned* files, unsigned* applied, int
  *   PS3_MODS_ON=0|1                      the packs PS3_MODS named at start, off / on
  *   PS3_MODS_DUMP_ON=0|1                 the dump (into PS3_MODS_DUMP_TO, else the packs folder's _dump)
  *   PS3RECOMP_FX_GLOW_MODE=0|1|2         (fx12) PS3RECOMP_FX_GLOW
+ *   PS3RECOMP_SHADOW_RES=1|2|4           [shadow] the shadow maps' scale
  * each applied as the PC menu would, at the next present after it changes. */
 static void eng_fx_toggle_poll(void)
 {
@@ -2301,6 +2332,29 @@ static void eng_fx_toggle_poll(void)
         __atomic_store_n(&s_mods_dirty, 1, __ATOMIC_RELAXED);
     }
     last_d = d;
+    { static int last_s = -1;   /* [shadow] PS3RECOMP_SHADOW_RES=1|2|4 from the toggle file */
+      const int sr = ps3_toggle_get("PS3RECOMP_SHADOW_RES", -1);
+      if (sr != last_s && sr >= 1) { char b[16]; snprintf(b, sizeof b, "%d", sr); eng_shres_apply(b); }
+      last_s = sr;
+      static int last_e = -1;   /* PS3RECOMP_SHADOW_EDGE=0|1: Edge's viewport with the map (diagnostic) */
+      const int se = ps3_toggle_get("PS3RECOMP_SHADOW_EDGE", -1);
+      if (se != last_e && se >= 0) {
+          s_shres_edge = se != 0;
+          for (u32 i = 0; i < s_shres_n; i++) s_shres_t[i].kq = 0u;   /* eng_shres_kq tells Edge again */
+          if (!se) eng_shres_edge(4u, 0u);
+          fprintf(stderr, "[shadow] test toggle: Edge viewport %s\n", se ? "scaled with the map" : "as the game gives it");
+      }
+      last_e = se;
+      static int last_t = -1;   /* PS3RECOMP_MESH_TRIM=0|1 (Edge's triangle culling, tools/spu_patches.txt) as the menu sets it */
+      const int mt = ps3_toggle_get("PS3RECOMP_MESH_TRIM", -1);
+      if (mt != last_t && mt >= 0) { ps3_setting_apply("PS3RECOMP_MESH_TRIM", mt ? "1" : "0");
+          fprintf(stderr, "[shadow] test toggle: PS3RECOMP_MESH_TRIM=%d\n", mt); }
+      last_t = mt;
+      static int last_b = -1;   /* PS3RECOMP_SHADOW_BIAS=0|1 */
+      const int sb = ps3_toggle_get("PS3RECOMP_SHADOW_BIAS", -1);
+      if (sb != last_b && sb >= 0) { s_shres_bias = sb != 0;
+          fprintf(stderr, "[shadow] test toggle: PS3RECOMP_SHADOW_BIAS=%d\n", sb); }
+      last_b = sb; }
     const int gm = ps3_toggle_get("PS3RECOMP_FX_GLOW_MODE", -1);   /* (fx12) */
     if (gm != last_g && gm >= 0 && gm <= 2) eng_glow_apply(gm == 0 ? "0" : gm == 2 ? "2" : "1");
     last_g = gm;
@@ -3400,6 +3454,22 @@ static void eng_decode_sampler(u32 filter, u32 wrap, u32 control0,
     out->max_lod = out->mip_present ? (float)((control0 >> 7) & 0xFFFu) / 256.0f
                                     : 0.0f;
     if (out->max_lod < out->min_lod) out->max_lod = out->min_lod;
+    /* [aa] the LOD bias the guest asked for (applied by the backend only with
+     * PS3RECOMP_ENG_LOD_BIAS); its first distinct values are logged */
+    const u32 b13 = filter & 0x1FFFu;
+    const int bi = (b13 & 0x1000u) ? (int)b13 - 0x2000 : (int)b13;
+    out->lod_bias = (float)bi / 256.0f;
+    if (__builtin_expect(bi != 0, 0)) {
+        static int seen[16]; static int n;
+        int k = 0;
+        while (k < n && seen[k] != bi) k++;
+        if (k == n && n < 16) {
+            seen[n++] = bi;
+            fprintf(stderr, "[aa] guest texture LOD bias %+.3f (filter 0x%08X, min filter %u, mips %s)%s\n",
+                    (double)out->lod_bias, filter, minf, out->mip_present ? "yes" : "no",
+                    n == 16 ? " (16 values: no more logged)" : "");
+        }
+    }
 }
 
 /* ---- pipelines ----------------------------------------------------------- */
@@ -3520,6 +3590,7 @@ typedef struct {
     int kp_ok;
     u32 kp_n;
     u16* kp_blk;
+    u32 bcap;                   /* (track C) PS3_RSX_GROWBUF: bytes the `bytes` buffer holds */
     rsx_fp_constant_block constants;
 } eng_fp_memo;
 
@@ -3658,6 +3729,7 @@ typedef struct {
     u64 structural; int constants_ok;
     u32 tex_mask, sampled_units, gamma_cand, expand_cand;
     u32 nconst, vcap; u32 (*vals)[4];
+    u32 bcap;                       /* (track C) PS3_RSX_GROWBUF: bytes the `bytes` buffer holds */
 } eng_fpc_entry;
 static eng_fpc_entry s_fpc[ENG_FPC_SIZE];
 #define ENG_VPC_SIZE 128u
@@ -3912,9 +3984,15 @@ static const eng_fp_memo* eng_fp_current(void)
     for (u32 i = 1; i < s_fp_cap; i++)
         if (s_fp_use[i] < s_fp_use[v]) v = i;
     eng_fp_memo* m = &s_fp_memo[v];
-    u8* copy = (u8*)realloc(m->bytes, size);
-    if (!copy) return NULL;
-    m->bytes = copy;
+    /* (track C) PS3_RSX_GROWBUF: a buffer that holds the program already is kept (the
+     * entry is compared and copied by `size` alone); a realloc of the same size was a
+     * heap round trip per miss */
+    if (!m->bytes || m->bcap < size || !rsx_tc(TC_GROWBUF)) {
+        u8* copy = (u8*)realloc(m->bytes, size);
+        if (!copy) return NULL;
+        m->bytes = copy;
+        m->bcap = size;
+    }
     memcpy(m->bytes, uc, size);
     m->loc = loc;
     m->off = off;
@@ -3968,8 +4046,11 @@ static const eng_fp_memo* eng_fp_current(void)
     m->expand_cand = rsx_fp_texture_expand_units(uc, size, all);
     if (ce) {                               /* remembered for the next upload of these bytes */
         const u32 nk = m->constants.count;
-        u8* cb = (u8*)realloc(ce->bytes, size);
-        if (cb) ce->bytes = cb;
+        u8* cb = ce->bytes;
+        if (!cb || ce->bcap < size || !rsx_tc(TC_GROWBUF)) {   /* (track C) PS3_RSX_GROWBUF */
+            cb = (u8*)realloc(ce->bytes, size);
+            if (cb) { ce->bytes = cb; ce->bcap = size; }
+        }
         u32 (*cv)[4] = ce->vals;
         if (cb && nk > ce->vcap) {
             cv = (u32 (*)[4])realloc(ce->vals, (size_t)nk * 16u);
@@ -4547,6 +4628,21 @@ key_done:;
             rsx_fp_apply_alpha_test_buffered(s_ps_hlsl, sizeof s_ps_hlsl,
                                              rs->alpha_func) < 0)
             fi = -1;
+        /* [aa] PS3RECOMP_ALPHA_AA: the test keeps thin cut-outs at a distance
+         * (mip) and becomes a coverage mask in MSAA passes (cov). A text it
+         * cannot rewrite keeps the plain test. */
+        if (fi > 0 && rs->alpha_test_enable && (rsx_fp_alpha_aa_mip() || rsx_fp_alpha_aa_cov())) {
+            const int r = rsx_fp_apply_alpha_aa(s_ps_hlsl, sizeof s_ps_hlsl, rs->alpha_func,
+                                                (fp_ctrl_key & RSX_FP_CTRL_DEPTH_EXPORT) != 0);
+            if (r > 0) g_eng_aa_progs[0]++; else if (r == 0) g_eng_aa_progs[1]++; else g_eng_aa_progs[2]++;
+            static u32 said;
+            if ((r < 0 && said < 4) || (r > 0 && g_eng_aa_progs[0] == 1)) {
+                said += r < 0;
+                fprintf(stderr, "[aa] alpha-tested fp %016llx (func 0x%04X): %s\n", (unsigned long long)in_fp,
+                        rs->alpha_func, r > 0 ? "first program with the thin-cut-out test (more not logged)"
+                                              : "WARNING: text not the alpha test's own, plain test kept");
+            }
+        }
         if (fi > 0 && (fp_ctrl_key & RSX_FP_CTRL_DEPTH_EXPORT)) {
             if (rsx_fp_apply_depth_export(s_ps_hlsl, sizeof s_ps_hlsl) < 0) fi = -1;
             static u32 said;
@@ -4627,6 +4723,7 @@ key_done:;
         if (rsx_fp_apply_fbfetch(s_ps_hlsl, sizeof s_ps_hlsl, s_fbf.cand, s_fbf.att, s_fbf.sel, &fbf_applied) < 0)
             fbf_applied = 0;
     }
+    if (fi > 0) eng_aa_lod();   /* [aa] the mip level the thin-cut-out test reads */
     if (vi > 0 && fi > 0)
         handle = g.be->pipeline_create(g.be->user, s_vs_hlsl, s_ps_hlsl, rs,
                                        layout, layout->stride, rt_fmt, rt_count);
@@ -4637,6 +4734,7 @@ key_done:;
                                 (unsigned long long)in_fp);
         memcpy(s_ps_hlsl, fbf_orig, strlen(fbf_orig) + 1);
         fbf_applied = 0;
+        eng_aa_lod();
         handle = g.be->pipeline_create(g.be->user, s_vs_hlsl, s_ps_hlsl, rs,
                                        layout, layout->stride, rt_fmt, rt_count);
     }
@@ -5953,9 +6051,12 @@ static void eng_vplog(const rsx_dispatch* r)
             vp.scale[0], vp.scale[1], vp.translate[0], vp.translate[1], vp.w, vp.h, vp.x, vp.y, win, coff, clip);
 }
 
+static int s_tc_dg;   /* (track C) PS3_RSX_DIGEST (rsx_tc.h): 0 off; read at engine init */
+static int s_tc_stats;   /* (track C) PS3_RSX_STATS (or the check mode): count draws by source */
 static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
 {
     (void)user; (void)prim;
+    if (__builtin_expect(s_tc_dg != 0, 0)) rsx_tc_pair_reset(0);
     eng_vplog(r);
     dc_reset();
 }
@@ -5992,6 +6093,7 @@ static void eng_batch_lost(void)
 static void sink_draw_arrays(void* user, const rsx_dispatch* r, u32 first, u32 count)
 {
     (void)user; (void)r;
+    if (__builtin_expect(s_tc_dg != 0, 0)) rsx_tc_pair_note(0, 1, first, count);
     dc.n_packets++;
     if (eng_batch_merge(dc.arr, dc.n_arr, first, count)) return;
     if (dc.n_arr >= ENG_MAX_BATCHES) { eng_batch_lost(); return; }
@@ -6009,6 +6111,7 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
                               const u8* data, u32 bytes)
 {
     (void)user;
+    if (__builtin_expect(s_tc_dg != 0, 0)) rsx_tc_pair_note(0, 3, bytes, 0);
     const u32 stride = rsx_vertex_inline_layout(r, NULL);
     if (!stride || bytes < stride) {
         static int n;
@@ -6038,6 +6141,7 @@ static void eng_constlog_draw(u32 rt, u32 cw, u32 ch, u32 n, int indexed);
 static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 count)
 {
     (void)user;
+    if (__builtin_expect(s_tc_dg != 0, 0)) rsx_tc_pair_note(0, 2, first, count);
     dc.n_packets++;
     const u32 base = eng_packet_base(r);
     if (eng_batch_merge(dc.idx, dc_idx_merge_n(base), first, count)) return;
@@ -6361,13 +6465,39 @@ static u32 eng_fp_tex_mask(void)
 /* PS3RECOMP_ENG_FBFETCH: is unit u (sampling the draw's own target
  * target_slots[k] == own_slot) one the pipeline may read from attachment k?
  * Records it in s_fbf and returns 1 (the unit stays unbound for now). */
+/* (track C) PS3_RSX_FBF1X: framebuffer fetch at render scale 1.0 too, when the switch is
+ * unset on any GPU but AMD (vendor 0x1002) once the vendor is known. Measured at the dock
+ * (720p, 2026-11-16): 63 -> 23 passes a frame, GPU 7.1 -> 4.1 ms, pictures unchanged. */
+static int eng_fbf_1x(void)
+{
+    static int v = -2;
+    if (__builtin_expect(v == -2, 0)) {
+        const int sw = rsx_tc(TC_FBF1X);
+        /* [next] MSAA (PS3RECOMP_MSAA=2|4|8) draws a pass that reads its targets as input
+         * attachments 1x (vk_msaa.inc MSW_FBF_IN): at 1.0 the merged FBF passes would take most of
+         * the scene out of MSAA. Unset with MSAA on: off (an explicit PS3_RSX_FBF1X=1 still wins). */
+        const char* ms = getenv("PS3RECOMP_MSAA");
+        const int ms_on = ms && *ms && strcmp(ms, "off") && strcmp(ms, "0") && atol(ms) >= 2;
+        if (sw >= 0) v = sw;
+        else if (ms_on) {
+            v = 0;
+            fprintf(stderr, "[rsx engine] framebuffer fetch at render scale 1.0 off: MSAA is on (PS3RECOMP_MSAA=%s; PS3_RSX_FBF1X=1 forces it)\n", ms);
+        } else {
+            const u32 vendor = rsx_fp_host_vendor();
+            if (!vendor) return 0;   /* not known yet: as before, ask again later */
+            v = vendor != 0x1002u;
+        }
+        fprintf(stderr, "[rsx engine] framebuffer fetch at render scale 1.0: %s (PS3_RSX_FBF1X)\n", v ? "on" : "off");
+    }
+    return v;
+}
 static int eng_fbf_candidate(u32 u, const rsx_dsp_texture* t, const u32* target_slots,
                              u32 n_targets, u32 own_slot)
 {
     int mode = __atomic_load_n(&s_fbf_mode, __ATOMIC_RELAXED);   /* (lowend) watched from eng_fbf_init */
     /* Unset: on when the targets are scaled on either axis (PS3_RES_SCALE,
      * PS3_ASPECT) -- rsx_fp_wpos_scale() is 1 only when both axes are. */
-    if (mode < 0) mode = rsx_fp_wpos_scale() != 1.0f;
+    if (mode < 0) mode = rsx_fp_wpos_scale() != 1.0f || eng_fbf_1x();
     if (!mode || !g.be->surface_view || u >= 16 || t->cubemap || t->dimension != 2) return 0;
     u32 k = 0;
     while (k < n_targets && target_slots[k] != own_slot) k++;
@@ -6697,6 +6827,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
                       s_tex_volatile = 1;
                       const u32 snap = eng_zdepth_snapshot_sized(i, t.width, t.height);
                       if (snap) textures[u] = snap;
+                      eng_shres_check_lookup(&g.zdepths[i], &t, u);   /* [shadow] */
                       break;
                   }
               if (textures[u]) continue;
@@ -6847,6 +6978,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
                     s_tex_volatile = 1;   /* (rnd1) */
                     const u32 snap = eng_zdepth_snapshot_sized(i, t.width, t.height);
                     if (snap) textures[u] = snap;
+                    eng_shres_check_lookup(&g.zdepths[i], &t, u);   /* [shadow] */
                     break;
                 }
             if (textures[u]) continue;
@@ -7034,6 +7166,17 @@ static int s_wide_fill = 1;               /* (dofov) PS3RECOMP_WIDE_FILL, read w
 static unsigned long long s_wide_filled;  /* (dofov) draws after the composite that filled (the [widelog] line) */
 static int s_hud_n = -1, s_hud_after;
 static u32 s_hud_frame = ~0u, s_hud_slice, s_hud_seen;
+/* (GitHub #47) The overlay-only verdict (menus, movies, loading: pinned 16:9 with bars) has hysteresis. Into it: the
+ * frames without a composite must come ENW_FRAMES in a row over ENW_MS (frames with fewer than ENW_MIN_DRAWS draws
+ * are ignored: they say nothing); out of it at once, at the composite. A 3D frame that came without a composite
+ * for a frame or two (more of them at a high frame rate) was judged a menu and squeezed to 16:9 for a moment. Starts
+ * in the overlay state (the logos, before the first 3D frame). */
+#define ENW_FRAMES 8u
+#define ENW_MS 100ull
+#define ENW_MIN_DRAWS 6u
+static int s_ov_mode = 1;
+static u32 s_ov_cnt;
+static unsigned long long s_ov_t0;
 
 #include "rsx_draw_delta.inc"   /* (rnd1) PS3RECOMP_ENG_DELTA */
 #include "rsx_draw_fast.inc"    /* (fastdraw) PS3RECOMP_ENG_FASTDRAW */
@@ -8010,8 +8153,8 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
             int composite = 0;
             for (int k = 0; k < s_hud_n; k++) if (fk && fk == s_hud_fp[k]) composite = 1;
             display = g.surfaces[target].w == g.width && g.surfaces[target].h == g.height;
-            if (composite) { s_hud_after = 1; s_hud_seen = s_hud_slice; s_hud_comp_vp = vk; }
-            else if (display) hud = s_hud_after || !s_hud_seen || s_hud_slice - s_hud_seen > 1u;
+            if (composite) { s_hud_after = 1; s_hud_seen = s_hud_slice; s_hud_comp_vp = vk; s_ov_mode = 0; s_ov_cnt = 0; }
+            else if (display) hud = s_hud_after || s_ov_mode;
             /* (dofov) PS3RECOMP_WIDE_FILL (default 1): a draw after the composite that covers the whole guest
              * screen is a full-screen effect (the hurt overlay, fades, colour flashes), not a HUD piece: it fills
              * the wide picture like the 3D frame under it (stretched across, as the game drew it over 16:9).
@@ -8116,6 +8259,7 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
     /* Dynamic, and deliberately outside the pipeline key. */
     g.be->set_stencil_ref(g.be->user,
                           rsx_dsp_reg(&g.rsx, M_STENCIL_FUNC_REF) & 0xFFu);
+    s_shres_bias_k = eng_shres_bias_k(tkq, target);   /* [shadow] */
     eng_apply_depth_bias(sf.zeta_offset, &rs);
     eng_apply_depth_clip(sf.zeta_offset, &rs, vp.scale[1]);
 
@@ -8151,6 +8295,7 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
         g.zdepths[zslot].had_write = 1;
         g.zdepths[zslot].stamp = ++s_surf_clock;
         g.zdepths[zslot].kq = (u8)tkq;   /* PS3RECOMP_FX_RES: readers crop at this scale */
+        eng_shres_note_draw(tkq, target);   /* [shadow] the caster count of the scaled maps */
         /* A published depth image is only good until the next depth write:
          * a reader later in the stream resolves again. Kept across writes,
          * inFAMOUS 2's occlusion volumes (drawn after the G-buffer) sampled a
@@ -8168,6 +8313,13 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
 /* (rnd1) PS3RECOMP_ENG_DELTA's counters: the time a draw takes on this thread. */
 static void sink_end(void* user, const rsx_dispatch* r)
 {
+    /* (track C) PS3_RSX_DIGEST: the draw's state + packets as the engine starts it;
+     * =check: against the split walker's hash of the same draw (g_rsx_tc_ref) */
+    if (__builtin_expect(s_tc_dg != 0, 0) && g.ready) {
+        const u64 ref = g_rsx_tc_ref;
+        rsx_tc_draw((rsx_tc_state_hash(&g.rsx) ^ rsx_tc_pair_hash(0)) | 1u, ref != 0, ref);
+    }
+    if (__builtin_expect(s_tc_stats != 0, 0)) rsx_tc_src_draw(g_rsx_tc_src_exec != ~0u ? g_rsx_tc_src_exec : g_rsx_tc_src);
     if (__builtin_expect(s_fd_on < 0, 0) && g.ready) fd_init();   /* (fastdraw) PS3RECOMP_ENG_FASTDRAW */
     if (__builtin_expect(s_dl_stats != 0, 0)) {
         if (__builtin_expect(s_dl_cost != 0, 0)) {   /* (fastdraw) two marks back to back: one mark's own cost */
@@ -8236,9 +8388,14 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
     if (mask & (RSX_CLEAR_DEPTH | RSX_CLEAR_STENCIL)) {
         rsx_dsp_surface sf;
         rsx_dsp_get_surface(&g.rsx, &sf);
+        /* [shadow] a scaled shadow map's depth is cleared at the size its
+         * draws make it (else the first clear of a session made a 1x zeta the
+         * first draw then replaced); 1x: ckq 4, the lookup exactly as before */
+        const u32 ckq = eng_shres_scaled(targets[0]) ? g.surfaces[targets[0]].kq : 4u;
         const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
-                                         sf.clip_w, sf.clip_h);
+                                         eng_fxres_px(sf.clip_w, ckq), eng_fxres_px(sf.clip_h, ckq));
         if (zslot == ENG_INVALID) return;
+        if (ckq > 4u) s_shres_st.clears++;   /* [shadow] */
         u32 flags = 0;
         if (mask & RSX_CLEAR_DEPTH)   flags |= RSX_BE_CLEAR_DEPTH;
         if (mask & RSX_CLEAR_STENCIL) flags |= RSX_BE_CLEAR_STENCIL;
@@ -8401,6 +8558,7 @@ static void eng_present(u32 buffer_id)
                       ps3_lightfx_get(PS3_LFX_TONE_SHADOWS), ps3_lightfx_get(PS3_LFX_TONE_MIDTONES),
                       ps3_lightfx_get(PS3_LFX_TONE_HIGHLIGHTS), ps3_lightfx_get(PS3_LFX_CLARITY)); }
     eng_mods_poll();   /* the PC menu switched texture packs or their dump (and the tests' toggle file) */
+    eng_shres_frame();   /* [shadow] every 600 frames: caster draws and clears into the scaled maps */
     const u32 target = eng_present_surface(buffer_id);
     if (target == ENG_INVALID) return;
     if (getenv("PS3RECOMP_METAL_FRAME_DUMP") && g.frames % 120 == 0) {
@@ -8423,8 +8581,25 @@ static void eng_present(u32 buffer_id)
           if (g.surfaces[i].offset == off) { g.be->present(g.be->user, g.surfaces[i].handle); goto presented; } }
     /* PS3_ASPECT_HUD_AFTER: a frame of overlay alone (no composite in it or
      * the one before) is presented with black bars beside its 16:9. */
-    if (g.be->set_hud && s_hud_n > 0 && g.guest_draws && s_hud_frame == g.frames)
-        g.be->set_hud(g.be->user, (!s_hud_after && (!s_hud_seen || s_hud_slice - s_hud_seen > 1u)) ? 3 : 4, 0);
+    if (g.be->set_hud && s_hud_n > 0 && g.guest_draws && s_hud_frame == g.frames) {
+        { extern unsigned long long ps3_ms_now(void);
+          const int raw = !s_hud_after && (!s_hud_seen || s_hud_slice - s_hud_seen > 1u);
+          if (s_hud_after) { s_ov_mode = 0; s_ov_cnt = 0; }
+          else if (g.guest_draws >= ENW_MIN_DRAWS) {
+              if (!raw) s_ov_cnt = 0;
+              else {
+                  const unsigned long long now = ps3_ms_now();
+                  if (!s_ov_cnt) s_ov_t0 = now;
+                  if (++s_ov_cnt >= ENW_FRAMES && now - s_ov_t0 >= ENW_MS) s_ov_mode = 1;
+              }
+          } }
+        const int bars = !s_hud_after && s_ov_mode;
+        { static int wl = -1; static int last = -1;   /* PS3RECOMP_WIDE_LOG=1: a change of the bars verdict (GitHub #47) */
+          if (wl < 0) { const char* e = getenv("PS3RECOMP_WIDE_LOG"); wl = e && *e == '1'; }
+          if (wl && bars != last) { fprintf(stderr, "[widebars] frame %u slice %u: %s (composite seen in slice %u, after=%d, draws %u)\n",
+                                            g.frames, (unsigned)s_hud_slice, bars ? "BARS (frame judged overlay-only)" : "3D frame", (unsigned)s_hud_seen, (int)s_hud_after, g.guest_draws); last = bars; } }
+        g.be->set_hud(g.be->user, bars ? 3 : 4, 0);
+    }
     { const u64 t = eng_ds_now();
       g.be->present(g.be->user, g.surfaces[target].handle);
       const int src = s_present_src;
@@ -8568,6 +8743,7 @@ presented:;
               done = 1; FILE* f = fopen(mark, "w"); if (f) fclose(f);
               fprintf(stderr, "[rsx engine] world mark: frame %u, %u draws -> %s\n", g.frames, g.guest_draws, mark); } } }
     g.frames++;
+    rsx_tc_frame();   /* (track C) the digest's frame line, the counters */
     if (__atomic_load_n(&s_fx_dof_mode, __ATOMIC_RELAXED) == 2) eng_fx_dof_frame();   /* (dofov) =play */
     if (rsx_wt_mode()) rsx_wt_frame(g.frames);
     s_icon_gen = rsx_button_icons_frame();
@@ -8639,6 +8815,9 @@ int rsx_draw_engine_init(u32 width, u32 height)
      * this path reads it; see rsx_dispatch.h no_seen). */
     { const char* e = getenv("PS3RECOMP_DSP_SEEN"); g.rsx.no_seen = !(e && *e == '1'); }
     dl_init();   /* (rnd1) PS3RECOMP_ENG_DELTA: the dirty bitmap of this instance, the group map */
+    s_tc_dg = rsx_tc_digest_mode();   /* (track C) */
+    { const char* e = getenv("PS3_RSX_STATS"); s_tc_stats = (e && *e && *e != '0') || s_tc_dg == 2; }
+    rsx_tc_banner();
     s_vpgen_memo = NULL;   /* PS3RECOMP_ENG_VP_GEN: vp_gen starts over */
     /* The game's post effects the PC menu turns off (ENG_DOF_BLEND_FP). */
     ps3_setting_register("PS3RECOMP_DOF", eng_fx_dof_apply);
@@ -8647,6 +8826,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
     /* The PC menu's Effects page: effects resolution and texture packs. */
     eng_fxres_init();
     ps3_setting_register("PS3RECOMP_FX_RES", eng_fxres_apply);
+    eng_shres_init();                                                 /* [shadow] the one startup line */
+    ps3_setting_register("PS3RECOMP_SHADOW_RES", eng_shres_apply);    /* [shadow] Lighting page, live */
     eng_glow_init();                                                  /* (fx12) */
     ps3_setting_register("PS3RECOMP_FX_GLOW", eng_glow_apply);
     eng_texpack_register();
@@ -8826,6 +9007,7 @@ int rsx_draw_engine_write_back_to(int local, u32 offset, u32 pitch, int dst_loca
         if (offset < z->offset || offset >= z->offset + row) continue;
         if (z->wb_stamp == z->stamp) break;
         if (z->kq > 4u) {   /* PS3RECOMP_FX_RES: written at a scale the guest's layout does not have */
+            eng_shres_block_zeta(location, z->offset);   /* [shadow] a shadow map: 1x for good (logged) */
             static int said; if (!said++)
                 fprintf(stderr, "[fxres] depth %u:0x%08X written at effects scale is read back by the guest: skipped\n",
                         location, z->offset);

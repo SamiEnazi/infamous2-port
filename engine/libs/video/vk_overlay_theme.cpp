@@ -20,18 +20,19 @@ static ImVec4 alpha(const ImVec4& c, float a) { return ImVec4(c.x, c.y, c.z, a);
     ImVec4(0.600f, 0.650f, 0.720f, 1.00f), /* text_dim  */                   \
     ImVec4(1.000f, 0.620f, 0.220f, 1.00f)  /* warn      */
 
+/* [menu-e] the accents of the menu design Sami picked (E): Hero #4cc3ff, Infamous #e5483b */
 static const VkOvTheme kHero = {
-    ImVec4(0.30f, 0.72f, 1.00f, 1.0f),     /* accent: electric blue */
-    ImVec4(0.74f, 0.93f, 1.00f, 1.0f),     /* accent_hi */
+    ImVec4(0.298f, 0.765f, 1.000f, 1.0f),  /* accent: electric blue #4cc3ff */
+    ImVec4(0.560f, 0.863f, 1.000f, 1.0f),  /* accent_hi #8fdcff */
     ImVec4(0.12f, 0.33f, 0.51f, 1.0f),     /* accent_dim */
     ImVec4(0.075f, 0.19f, 0.30f, 1.0f),    /* sel_bg */
     SD_PANELS
 };
 static const VkOvTheme kInfamous = {
-    ImVec4(1.00f, 0.38f, 0.15f, 1.0f),     /* accent: ember */
-    ImVec4(1.00f, 0.78f, 0.50f, 1.0f),     /* accent_hi */
-    ImVec4(0.52f, 0.16f, 0.07f, 1.0f),     /* accent_dim */
-    ImVec4(0.27f, 0.085f, 0.04f, 1.0f),    /* sel_bg */
+    ImVec4(0.898f, 0.282f, 0.231f, 1.0f),  /* accent: infamous red #e5483b */
+    ImVec4(1.000f, 0.620f, 0.560f, 1.0f),  /* accent_hi */
+    ImVec4(0.50f, 0.14f, 0.11f, 1.0f),     /* accent_dim */
+    ImVec4(0.27f, 0.075f, 0.06f, 1.0f),    /* sel_bg */
     SD_PANELS
 };
 

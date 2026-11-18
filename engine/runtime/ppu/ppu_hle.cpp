@@ -214,7 +214,11 @@ static void ps3_hle_unresolved(uint32_t nid, ppu_context* ctx)
 
 extern "C" void ppu_prof_stamp(void* ctx, unsigned lr);
 extern "C" uint32_t ppu_prof_resolve_host(void* ra);
-extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+/* (C functions: the body's own block-scope declarations of them took C linkage from the
+ * extern "C" function they sat in before the drain wrapper below) */
+extern "C" void ppu_dump_guest_stack(ppu_context*, const char*);
+extern "C" void ppu_dump_bctrl_ring(uint32_t, const char*);
+static void ps3_hle_call_body(uint32_t nid, ppu_context* ctx)
 {
     /* HLE_BT_EVERY=<n>: dump the calling thread's guest stack every nth HLE
      * call it makes. WAITBT_EVERY only samples threads that are blocking on an
@@ -486,6 +490,21 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
         if(rv>=0x10000000u && (rv & 0xFFFF0000u)!=0x80010000u && (rv & 0xFFFF0000u)!=0x80020000u){
           static int _n=0; if(PS3_LOG_FIRST(_n, 40)) fprintf(stderr,"[PTRLEAK] NID 0x%08X %s returned 0x%08X (out-of-guest-RAM host ptr?)\n",
             nid, e->name?e->name:"?", rv); } } }
+}
+
+/* The import call, and then the trampoline drain its lifted caller ran right after it (track A,
+ * 2026-11-16): an HLE that runs lifted firmware code can return with that code's last tail jump
+ * pending (g_trampoline_fn); draining it here, on the way out, is the same call at the same point,
+ * so a PPU_DRAIN_NONE lift leaves the drain out after every call. A lift that keeps its drains
+ * finds nothing left to run. */
+extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+{
+    ps3_hle_call_body(nid, ctx);
+    while (g_trampoline_fn) {
+        void (*tf)(void*) = g_trampoline_fn;
+        g_trampoline_fn = 0;
+        tf((void*)ctx);
+    }
 }
 
 /* Populated by the generated registration unit (gen_hle_nids.py). Weak so a

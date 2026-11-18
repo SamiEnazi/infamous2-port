@@ -75,6 +75,10 @@ typedef struct rsx_be_sampler_desc {
      * seen (inFAMOUS 2's video chroma planes border at 0x80 = neutral). */
     u8  border;
     float min_lod, max_lod;
+    /* [aa] SET_TEXTURE_FILTER [12:0], the guest's LOD bias (signed 4.8 fixed
+     * point, RPCS3's decode_fxp<4, 8>); a backend applies it only when asked
+     * (PS3RECOMP_ENG_LOD_BIAS) -- the reference engine never did. */
+    float lod_bias;
 } rsx_be_sampler_desc;
 
 /* The NV4097 render state a pipeline is built from: rsx_live_draw.c's
@@ -586,6 +590,9 @@ void rsx_draw_engine_write_topology_indices(u32 primitive, u32 source_refs,
  * replaced so far, whether a dump runs). */
 const char* rsx_texpack_dir(void);
 void rsx_texpack_status(unsigned* packs, unsigned* files, unsigned* applied, int* dumping);
+/* [shadow] PS3RECOMP_SHADOW_RES in quarter steps (4 = the PS3's 1024x1024 maps, 8 = 2x,
+ * 16 = 4x): the engine's value, for the PC menu (vk_overlay_shadow.inc; rsx_shadow_res.inc). */
+int rsx_draw_engine_shadow_res_q(void);
 
 #ifdef __cplusplus
 }

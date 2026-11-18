@@ -33,6 +33,7 @@ static volatile int s_upd_checking;      /* a request is out, until the status f
 static double       s_upd_check_t;
 static volatile int s_upd_ask;           /* 1 open "Quit and update now?", 2 showing */
 static int          s_upd_auto = -1;     /* PS3_UPDATE_CHECK: 1 on, 0 off, -1 not read yet */
+static volatile bool s_upd_cancel;       /* [menu-e] Esc / Circle on "Quit and update?" */
 
 /* the file's write time and size as one number; false = no file */
 static bool upd_sig(const char* path, unsigned long long* sig)
@@ -106,88 +107,6 @@ static void update_attach(void)
     std::thread(upd_watch).detach();
 }
 
-static void tab_update(double now)
-{
-    section("Update");
-    if (!s_upd_dir[0]) {
-        const char* by = getenv("PS3_UPDATE_BY");
-        if (by && !strcmp(by, "recomplauncher"))
-            hint("RecompLauncher keeps this copy up to date: it installs each new release of the port by itself.");
-        else if (by && !strcmp(by, "git"))
-            hint("This folder is a git clone: \"git pull\" gets the newest code, then Setup.exe "
-                 "(or Setup.cmd) builds it.");
-        else
-            hint("No update information: the game was not started with \"Play inFAMOUS 2\" (or the desktop shortcut) "
-                 "from a folder Setup.exe made.");
-        return;
-    }
-    static UpdateStatus v;
-    static unsigned vseq = ~0u;
-    static bool vhave;
-    {
-        std::lock_guard<std::mutex> g(s_upd_lock);
-        if (s_upd_seq != vseq) { v = s_upd; vseq = s_upd_seq; vhave = s_upd_have; }
-    }
-    if (s_upd_auto < 0) { const char* e = getenv("PS3_UPDATE_CHECK"); s_upd_auto = (e && e[0] == '0' && !e[1]) ? 0 : 1; }
-    const bool avail = vhave && !strcmp(v.state, "available");
-    const ImVec4 kGreen(0.45f, 0.85f, 0.45f, 1.0f);
-
-    ImGui::Text("This copy:  %s", vhave && v.installed[0] ? v.installed : "...");
-    if (!vhave) ImGui::TextColored(kGrey, "Asking GitHub for the newest version...");
-    else if (avail) {
-        ImGui::PushFont(vk_ov_theme_bold(), 0.0f);
-        ImGui::TextColored(kOrange, "New:  %s", v.latest[0] ? v.latest : "a newer version");
-        ImGui::PopFont();
-        if (v.published[0]) { ImGui::SameLine(); ImGui::TextColored(kGrey, "(out since %s)", v.published); }
-    } else if (!strcmp(v.state, "current")) ImGui::TextColored(kGreen, "You have the newest version.");
-    if (v.message[0]) hint(v.message);
-    if (vhave && v.checked[0]) { char b[96]; snprintf(b, sizeof b, "Last asked GitHub: %s", v.checked); hint(b); }
-
-    if (avail) {
-        ImGui::Spacing();
-        if (ps3_host_can_update()) {
-            const bool pending = ps3_host_update_pending() != 0;
-            if (ImGui::Button(pending ? "Don't update when I quit" : "Update when I quit")) {
-                ps3_host_set_update(pending ? 0 : 1);
-                notice_for(pending ? "No update: the game quits as usual" : "The update starts when you quit the game", 5.0);
-            }
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, kOrange);
-            if (ImGui::Button("Quit and update now")) s_upd_ask = 1;
-            ImGui::PopStyleColor();
-            if (pending) ImGui::TextColored(kOrange, "The update starts when you quit the game.");
-            hint("Setup downloads the new version and builds it from your copy of the game, in its own window: a few "
-                 "minutes when only a little changed (the first update after an install takes about as long as the "
-                 "install). Your saves, settings, mods and controls are kept. Press Play there when it is done.");
-        } else hint("Run Setup.exe in the game's folder and choose \"Update to the latest version\".");
-    }
-
-    ImGui::Spacing();
-    const bool asking = s_upd_checking && now - s_upd_check_t < 30.0;
-    if (asking) ImGui::BeginDisabled();
-    if (ImGui::Button(asking ? "Asking GitHub..." : "Check now")) { s_upd_check_t = now; s_upd_checking = 1; s_upd_check_req = 1; }
-    if (asking) ImGui::EndDisabled();
-    ImGui::SameLine();
-    bool aut = s_upd_auto != 0;
-    if (ImGui::Checkbox("Check for updates automatically", &aut)) {
-        s_upd_auto = aut ? 1 : 0;
-        extra_set("PS3_UPDATE_CHECK", aut ? "1" : "0");   /* play.ps1 reads it at the next start */
-    }
-    hint("When the game starts, at most every 6 hours: a short question to GitHub, in the background (the game "
-         "never waits for it). Off: only Check now asks.");
-
-    if (avail && !v.notes.empty()) {
-        char h[120];
-        snprintf(h, sizeof h, "What's new in %s", v.latest[0] ? v.latest : "the new version");
-        section(h);
-        if (v.title[0]) { ImGui::PushFont(vk_ov_theme_bold(), 0.0f); ImGui::TextWrapped("%s", v.title); ImGui::PopFont(); }
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(v.notes.c_str(), v.notes.c_str() + v.notes.size());
-        ImGui::PopTextWrapPos();
-        if (v.url[0]) hint(v.url);
-    }
-}
-
 static void update_confirm(void)
 {
     if (s_upd_ask == 1) { ImGui::OpenPopup("###updask"); s_upd_ask = 2; }
@@ -196,7 +115,7 @@ static void update_confirm(void)
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (!ImGui::BeginPopupModal("Quit and update?###updask", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
                                                                 ImGuiWindowFlags_NoSavedSettings)) {
-        s_upd_ask = 0; return;
+        s_upd_ask = 0; s_upd_cancel = false; return;
     }
     ImGui::TextUnformatted("The game closes and Setup updates it, in its own window.");
     ImGui::TextUnformatted("Progress since your last save is lost. Your saves, settings and mods are kept.");
@@ -205,7 +124,7 @@ static void update_confirm(void)
     ImGui::SameLine();
     const bool cancel = ImGui::Button("Cancel");
     ImGui::SetItemDefaultFocus();   /* Cancel: a stray Cross does not quit */
-    if (cancel) { s_upd_ask = 0; ImGui::CloseCurrentPopup(); }
+    if (cancel || s_upd_cancel) { s_upd_ask = 0; s_upd_cancel = false; ImGui::CloseCurrentPopup(); }   /* [menu-e] Esc / Circle too */
     else if (go) {
         s_upd_ask = 0;
         ImGui::CloseCurrentPopup();

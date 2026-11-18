@@ -22,15 +22,18 @@ What Install does, in order. It asks nothing it can find out itself:
 
    It goes into a folder next to Setup.exe (else `%LOCALAPPDATA%\inFAMOUS2-port`), about 40 MB. Then
    Setup.exe copies itself in.
-2. **RPCS3 and the game.** It finds them by itself:
-   - RPCS3: the saved choice, a running RPCS3, next to Setup.exe, the user's Desktop, Downloads and
-     Documents, Program Files, the top of each drive
-   - the game: RPCS3's own game list (`config\games.yml`)
-
-   Only if one of them can't be found does a small *"Where is RPCS3?"* or *"Where is your inFAMOUS 2
-   game folder?"* dialog appear.
+2. **The game, and RPCS3 if it is there.** RPCS3 is optional:
+   - RPCS3 (looked for: the saved choice, a running RPCS3, next to Setup.exe, the user's Desktop, Downloads
+     and Documents, Program Files, the top of each drive): its game list (`config\games.yml`) finds the game,
+     and its 1.04 update, firmware files and HDD install are copied instead of downloaded
+   - the game: `--disc`, the `game\disc` link of an earlier install, RPCS3's game list; else a small
+     *"Where is your inFAMOUS 2 game folder?"* dialog appears
+   - without RPCS3, `tools\setup_build.ps1` downloads the game's updates 1.01, 1.03 and 1.04 (236 MB) and the
+     PS3 system software 4.93 (197 MB, of which three modules are kept) from Sony's own servers
+     (`tools\sony_files.py`) and unpacks them with `tools\ps3tool.py`, which also decrypts the EBOOT and the
+     three modules (`tools\decrypt.ps1`: ps3tool first, RPCS3 when ps3tool cannot)
 3. **The checks** of `tools\setup_common.ps1`. A one-line reason appears only for what the player must
-   fix: no PS3 firmware or no 1.04 update in RPCS3, RPCS3 still open, or a PC that can't run the port.
+   fix: a PC that can't run the port, a folder that isn't the game, or the digital version without RPCS3.
 4. **The build:** `tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup`. It downloads portable build
    tools into `tools-cache\` with `tools\fetch_tools.ps1` (nothing is installed, no admin rights):
    - CPython 3.12
@@ -153,37 +156,24 @@ exit code 83 under `--prepare`.
 `Setup.exe` is not committed: it is attached to a GitHub Release (see the next section).
 
 GitHub Actions builds it the same way: `.github/workflows/setup-exe.yml` runs `build.cmd` on GitHub's own Windows
-machine for every change to these files and for every release, and keeps the exe as the run's artifact.
+machine for every change to these files, and keeps the exe as the run's artifact.
 
-## Releases and signing
+## Releases
 
-Release Setup.exe files are signed by [SignPath Foundation](https://signpath.org) (free for open source; the
-README's *Code signing policy*). SignPath signs only the exe the workflow built from the release's tag, and only
-after the approver has approved it. Its settings are the repository's `SIGNPATH_*` secret and variables (listed at
-the top of the workflow). Without them the workflow only builds, and releases are made as before.
+Setup.exe is **not code-signed** (signing a program costs money). Windows SmartScreen or an antivirus may warn
+about a new, unsigned file: the README's FAQ says what to click and links the release's VirusTotal scan.
 
 1. Set the version at the top of `SetupWizard.cs` (the three `[assembly: ...Version]` lines) and in
    `setup.manifest`. Commit and push `main`.
-2. Publish the release on GitHub (tag `v<version>`) without Setup.exe. The release notes link the README's
-   *Code signing policy* (SignPath asks for that term on the download page).
-3. The workflow builds Setup.exe from the tag and sends it to SignPath. SignPath e-mails the approver: open the
-   request on app.signpath.io and approve it (the workflow waits up to an hour).
-4. The workflow checks the signature (Windows must accept it) and attaches the signed Setup.exe to the release.
-   If the approval came too late: Actions > Setup.exe > Run workflow, pick the tag.
-5. The zip, with that same signed exe:
+2. Build it: `tools\setup_exe\build.cmd` (or take the workflow's artifact `Setup.exe` of that commit).
+3. The zip, with that same exe:
 
    ```
-   gh release download v<version> -R SamiEnazi/infamous2-port -p Setup.exe -D work\release\signed
-   tools\make_release_zip.ps1 -Version <version> -SetupExe work\release\signed\Setup.exe -RequireSigned
-   gh release upload v<version> -R SamiEnazi/infamous2-port work\release\inFAMOUS2-port-v<version>-Windows-x64.zip
+   tools\make_release_zip.ps1 -Version <version> -SetupExe Setup.exe
    ```
 
-To publish everything at once instead: push the tag, create the release as a draft, run the workflow on the tag
-(Run workflow, pick the tag), approve, attach the zip, then publish. The workflow then finds the signed
-Setup.exe on the release and does not sign it again.
-
-SignPath's `test-signing` policy (the first one SignPath sets up) signs with a certificate Windows does not
-trust: the workflow keeps that exe as the run's artifact `Setup.exe-signed` and attaches nothing.
+4. Publish the release on GitHub (tag `v<version>`) with Setup.exe, the zips and the tool files of
+   `tools/slim_assets.json`.
 
 ## Test switches
 
@@ -191,13 +181,14 @@ trust: the workflow keeps that exe as the run's artifact `Setup.exe-signed` and 
 |---|---|
 | `--test-build` | press Install right away |
 | `--rpcs3 <folder>`, `--disc <folder>` (or `--game <folder>`) | use these instead of looking |
+| `--no-rpcs3` (or `PORT_SETUP_NO_RPCS3=1`) | do not look for RPCS3 nor use it: everything from Sony's servers and ps3tool |
 | `--folder <folder>` | where a downloaded-alone Setup.exe puts the port |
 | `--no-shortcut` | pass `-NoShortcut` (no desktop shortcut) |
 | `--no-cleanup` | keep the build tools and files afterwards |
 | `--only-cache` | the build sees only `tools-cache\`: `PORT_ONLY_CACHE=1` and a PATH of Windows folders only |
 | `--no-pgo` | start with "Optimise for this PC" off (no `-Pgo`) |
 | `--exit-when-done` | close after the build. The exit code is 0 for built, 1 for stopped and 2 for closed early. |
-| `--page done` / `--page ask` | show the Play screen / the "Where is RPCS3?" dialog (for screenshots) |
+| `--page done` / `--page ask` | show the Play screen / the "Where is your game folder?" dialog (for screenshots) |
 | `--test-fail-build` | make the build fail on purpose at step 2 (no license flag), to check that the old game and the saves come back |
 | `PORT_SETUP_API`, `PORT_SETUP_CODELOAD` (environment) | a stand-in for `https://api.github.com` and `https://codeload.github.com` (e.g. `http://127.0.0.1:8765`), to test the download and the update with a local copy of a commit |
 
@@ -211,7 +202,7 @@ switches Setup.exe is exactly as before.
 
 - `Setup.exe --prepare --disc <game folder> [--rpcs3 <folder>]` (`--game` works as well as `--disc`) is the launcher's setup step, after the player
   picks their game folder. It does what Install does after the download:
-  - finds RPCS3 the same way
+  - finds RPCS3 the same way (optional; `--no-rpcs3`)
   - runs the same checks
   - backs up an existing game and its saves
   - runs `tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup -NoShortcut`. The launcher's setup screen says that
@@ -249,12 +240,12 @@ build or the game stops too. Exit codes (`recomplauncher.json`'s `exit_codes` ha
 |---|---|
 | 69 | Setup is already running in this folder |
 | 70 | the port's files are not next to Setup.exe |
-| 71 | no `PS3_GAME\PARAM.SFO` in the game folder |
+| 71 | no game in the game folder: no `PS3_GAME\PARAM.SFO`, and not a PSN title folder (`PARAM.SFO` + `USRDIR\EBOOT.BIN`) |
 | 72 | not a supported copy of inFAMOUS 2 |
-| 73 | RPCS3 not found |
-| 74 | no PS3 firmware in RPCS3 |
-| 75 | no 1.04 update in RPCS3 (or, for the digital version, no game) |
-| 76 | RPCS3 is open |
+| 73 | (not used since RPCS3 became optional) |
+| 74 | (not used since RPCS3 became optional) |
+| 75 | the digital version without its 01.03 game, or without its license in RPCS3 |
+| 76 | (not used since RPCS3 became optional) |
 | 77 | this PC can't run the port (64-bit Windows, AVX2, Vulkan) |
 | 78 | a drive that can't hold the `game\disc` link |
 | 79 | the checks or the build failed (`play\setup.log`) |
@@ -264,7 +255,7 @@ build or the game stops too. Exit codes (`recomplauncher.json`'s `exit_codes` ha
 
 ## Known limits
 
-- Until the releases are signed (see *Releases and signing*), Windows SmartScreen says "Windows protected your
+- Setup.exe is not code-signed (see *Releases*), so Windows SmartScreen says "Windows protected your
   PC" on the first start. Click **More info**, then **Run anyway**. A few machine-learning virus scanners on
   VirusTotal flagged v0.4.1's unsigned exe (false positives).
 - The port's folder must be on a local NTFS (or ReFS) drive, because `game\disc` is a junction to the

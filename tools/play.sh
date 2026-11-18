@@ -1,10 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Play the native Linux build of inFAMOUS 2 (tools/play.ps1's Linux counterpart).
 #   tools/play.sh [--fullscreen] [--volume 0-100] [--fps N] [--spu-lighting] [--no-log] [--no-hud]
-#                 [--no-kbm] [--trace] [--exe <path>]
+#                 [--no-kbm] [--trace] [--exe <path>] [--wayland]
 # In the game: F1 FPS counter, F2 (or hold L3+R3) the PC settings menu, Alt+Enter / F11 fullscreen,
-# F9 marks a slow moment in the session log. The menu saves to ~/.config/infamous2-port/settings.ini
-# ($XDG_CONFIG_HOME); --fps / --volume / --fullscreen given here win over it for this session.
+# F9 marks a slow moment in the session log. The menu saves to settings.ini in the port's folder (v0.6.0: with
+# mods.ini, spots.ini and the shader cache in work/shader_cache, so the folder can be moved or copied and plays the
+# same; the files of ~/.config/infamous2-port are copied in once); --fps / --volume / --fullscreen given here win
+# over it for this session.
 # Controls: any controller SDL knows (buttons by position, as on a PlayStation pad); keyboard + mouse
 # (WASD, mouse = camera after a click in the window, right button = aim, left = R1, Space = Cross,
 # Shift = Circle, F = Square, Q = Triangle, Enter = START, Esc = PC menu). Remapping: input.toml in
@@ -15,10 +17,11 @@
 set -u
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 exe="$root/work/port/build/Infamous2Recomp"
-fullscreen=0; volume=""; fps=""; spulight=0; nolog=0; nohud=0; nokbm=0; trace=0
+fullscreen=0; volume=""; fps=""; spulight=0; nolog=0; nohud=0; nokbm=0; trace=0; wayland=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --fullscreen) fullscreen=1 ;;
+        --wayland) wayland=1 ;;   # a Wayland desktop: never start the game again through X11 (see x11_watch)
         --volume) volume="$2"; shift ;;
         --fps) fps="$2"; shift ;;
         --spu-lighting) spulight=1 ;;
@@ -112,6 +115,37 @@ In the game, F2 > Mods lists them: turn each one on or off and pick its options 
 the next time the game starts ("Restart to apply" does that at once).
 EOF
 
+# DLC (GitHub #48, #56): the "dlc" folder. The game's unlock files (*.edat) put there, in it or in subfolders, are
+# copied to where the game opens them (game/dev_hdd0/game/<ID>/USRDIR/dlc/ulf, lower-case names: the game opens
+# lower-case), only when missing or different. tools/setup.sh copies RPCS3's the same way. Never stops the game.
+mkdir -p "$root/dlc" 2>/dev/null
+[ -f "$root/dlc/README.txt" ] || cp "$root/tools/dlc_readme.txt" "$root/dlc/README.txt" 2>/dev/null
+for td in "$game"/dev_hdd0/game/*/; do
+    td="${td%/}"
+    case "$td" in *_INSTALL) continue ;; esac
+    [ -f "$td/USRDIR/EBOOT.BIN" ] || continue
+    ulf="$td/USRDIR/dlc/ulf"; nnew=0
+    while IFS= read -r f; do
+        name="$(basename "$f")"; dst="$ulf/${name,,}"
+        if ! cmp -s "$f" "$dst"; then
+            mkdir -p "$ulf" && rm -f "$dst" "$dst.dec" && cp "$f" "$dst" && chmod u+rw "$dst" && nnew=$((nnew + 1))
+        fi
+    done < <(find "$root/dlc" -type f -iname '*.edat' 2>/dev/null | sort)
+    have=0; lic=0
+    while IFS= read -r f; do
+        have=$((have + 1))
+        # the license kind in the file's header: 3 = free; 1 or 2 = bound to a license (.rap)
+        if [ "$(head -c 3 "$f" 2>/dev/null)" = NPD ]; then
+            case "$(od -An -tu1 -j11 -N1 "$f" 2>/dev/null | tr -d ' ')" in 1|2) lic=$((lic + 1)) ;; esac
+        fi
+    done < <(find "$td/USRDIR/dlc" -type f -iname '*.edat' 2>/dev/null)
+    line="DLC: none in game/dev_hdd0/game/$(basename "$td")/USRDIR/dlc (optional: put your DLC's *.edat files in the dlc folder)"
+    [ $have -gt 0 ] && line="DLC: $have unlock file(s) in game/dev_hdd0/game/$(basename "$td")/USRDIR/dlc"
+    [ $nnew -gt 0 ] && line="$line ($nnew new from the dlc folder)"
+    [ $lic -gt 0 ] && line="$line; $lic need their license (.rap): not supported yet"
+    echo "$line"
+done
+
 flash="$game/dev_flash"
 [ -d "$flash/sys" ] || flash="${PORT_DEV_FLASH:-${XDG_CONFIG_HOME:-$HOME/.config}/rpcs3/dev_flash}"
 defaults="PS3RECOMP_FPS_CAP=60;PS3_AUDIO_VOLUME=100;PS3RECOMP_RENDER_SCALE=1.5;PS3RECOMP_SOFT_SHADOWS=2;PS3RECOMP_SSAO=2;"
@@ -121,6 +155,24 @@ defaults+="PS3RECOMP_SSAO_STRENGTH=125;PS3RECOMP_LIGHT_DITHER=1;PS3RECOMP_FX_RES
 if [ "$(cat /sys/devices/virtual/dmi/id/board_vendor 2>/dev/null)" = Valve ]; then
     defaults="${defaults/PS3RECOMP_RENDER_SCALE=1.5/PS3RECOMP_RENDER_SCALE=1.0};PS3RECOMP_VK_FULLSCREEN=1"
 fi
+# everything in the port's folder (v0.6.0); an older version's files copied in once (they stay where they were)
+if [ ! -f "$root/work/settings-moved-in.txt" ]; then
+    oldcfg="${XDG_CONFIG_HOME:-$HOME/.config}/infamous2-port"; took=""
+    for f in settings.ini mods.ini spots.ini; do
+        if [ -f "$oldcfg/$f" ] && [ ! -f "$root/$f" ]; then cp -p "$oldcfg/$f" "$root/$f" && took="$took $f"; fi
+    done
+    oldsc="${XDG_CACHE_HOME:-$HOME/.cache}/ps3recomp/shader_cache"
+    if [ ! -d "$root/work/shader_cache" ]; then
+        for d in "$oldsc"/inFAMOUS*; do [ -d "$d" ] && cp -a "$d" "$root/work/shader_cache" && took="$took shader-cache" && break; done
+    fi
+    [ -n "$took" ] && echo "Your settings are kept in this folder now: copied in$took (those files stay where they were)."
+    mkdir -p "$root/work" && echo "$(date '+%F %T')$took" > "$root/work/settings-moved-in.txt"
+fi
+[ -n "${PS3_OVERLAY_INI+x}" ] || export PS3_OVERLAY_INI="$root/settings.ini" PS3_CHEATS_SPOTS="$root/spots.ini" PS3_GAME_MODS_STATE="$root/mods.ini"
+[ -n "${PS3RECOMP_VK_SHADER_CACHE+x}" ] || export PS3RECOMP_VK_SHADER_CACHE="$root/work/shader_cache"
+if ! grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
+    echo "This PC's CPU has no AVX2, and the game is built for CPUs with it (Intel 4th gen / AMD Ryzen or newer)."; exit 1
+fi
 export PS3_VFS_ROOT="$game/disc" PS3_HDD0_ROOT="$game/dev_hdd0" PS3_DEV_FLASH="$flash" \
        PS3_GAMEDATA_ROOT="$game/gamedata" PS3_TITLE="inFAMOUS 2" PS3_GAME_MODS_DIR="$mods" \
        PS3_LAUNCHER_RESTART=1 GCM_SEMA_ACQUIRE=1 GCM_SEMA_ACQUIRE_MS=200 GCM_PARK_GRACE_MS=1000 \
@@ -129,6 +181,7 @@ export PS3_VFS_ROOT="$game/disc" PS3_HDD0_ROOT="$game/dev_hdd0" PS3_DEV_FLASH="$
        SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0 SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1
 if [ $spulight = 0 ]; then export PS3RECOMP_ENG_GPU_LIGHT=07000B80:07384B80 PS3RECOMP_ENG_GPU_SSAO=0F800000; fi
 [ -f "$toml" ] && export PS3_INPUT_MAP="$toml"
+[ -f "$root/supporters.json" ] && export PS3_SUPPORTERS_FILE="$root/supporters.json"   # F2 > About: the list that came with this copy (nothing is fetched here)
 [ $fullscreen = 1 ] && export PS3RECOMP_VK_FULLSCREEN=1
 [ -n "$fps" ] && export PS3RECOMP_FPS_CAP="$fps"
 [ -n "$volume" ] && export PS3_AUDIO_VOLUME="$volume"
@@ -159,6 +212,33 @@ echo "Starting inFAMOUS 2... F1 = FPS counter, F2 = settings."
 [ $nolog = 0 ] && echo "Press F9 in the game window whenever something feels slow or stutters. Session folder: $out"
 t0=$(date +%s)
 run=0
+# A Wayland desktop where the game's window cannot be made (GitHub #54, #44: the game went on without one: sound,
+# no picture, and nothing to close). The cause seen there is fixed in the engine; should another one drop the
+# window, the game is started once more through X11 (XWayland), which worked for those players. Only when the
+# choice is ours: not with --wayland, not when SDL_VIDEODRIVER is set, not without an X display.
+# x11_watch reads this run's part of stderr.log for up to 90 s: the window's swapchain line = all is well;
+# "window disabled" after SDL chose 'wayland' = stop the game (retry-x11 tells the loop below why).
+x11_retry=0
+if [ $wayland = 0 ] && [ -z "${SDL_VIDEODRIVER+x}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ]; then x11_retry=1; fi
+x11_watch() {
+    local n0="$1" pid="" new i
+    for i in $(seq 1 90); do
+        sleep 1
+        if [ -z "$pid" ]; then pid="$(cat "$out/game.pid" 2>/dev/null)"; [ -n "$pid" ] || continue; fi
+        kill -0 "$pid" 2>/dev/null || return 0
+        new="$(tail -n +"$((n0 + 1))" "$out/stderr.log" 2>/dev/null)"
+        case "$new" in
+            *"window disabled, continuing headless"*)
+                case "$new" in *"SDL video driver 'wayland'"*)
+                    : > "$out/retry-x11"; kill "$pid" 2>/dev/null
+                    for i in 1 2 3 4 5; do sleep 1; kill -0 "$pid" 2>/dev/null || return 0; done
+                    kill -9 "$pid" 2>/dev/null ;;
+                esac
+                return 0 ;;
+            *"window swapchain "*) return 0 ;;
+        esac
+    done
+}
 # F2 > Mods > "Restart to apply" ends the game with status 0x52455354 ("REST"; a Linux exit status
 # keeps its low byte, 0x54) and the line "[restart] exit 0x52455354": started again here, same
 # settings, same session folder; the game comes back at its title screen (Continue goes on).
@@ -172,8 +252,19 @@ while :; do
         [ -f "$out/hitches.tsv" ] && mv -f "$out/hitches.tsv" "$out/hitches.$((run - 1)).tsv"
     fi
     n0=0; [ -f "$out/stderr.log" ] && n0=$(wc -l < "$out/stderr.log")
-    (cd "$out" && exec "$exe" "$root/work/EBOOT.elf") >> "$out/stdout.log" 2>> "$out/stderr.log"
+    rm -f "$out/game.pid" "$out/retry-x11"; watch=""
+    if [ $x11_retry = 1 ]; then x11_watch "$n0" & watch=$!; fi
+    (cd "$out" && echo "$BASHPID" > "$out/game.pid" && exec "$exe" "$root/work/EBOOT.elf") >> "$out/stdout.log" 2>> "$out/stderr.log"
     rc=$?
+    if [ -n "$watch" ]; then kill "$watch" 2>/dev/null; wait "$watch" 2>/dev/null; fi
+    if [ -f "$out/retry-x11" ]; then
+        rm -f "$out/retry-x11"; x11_retry=0; run=$((run - 1))
+        export SDL_VIDEODRIVER=x11
+        echo "The game could not open its window on Wayland: starting it again through X11 (XWayland)."
+        echo "Please report it with $out/stderr.log; SDL_VIDEODRIVER=x11 tools/play.sh starts it this way at once."
+        echo "=== $(date +%H:%M:%S) no window on Wayland: started again with SDL_VIDEODRIVER=x11 ===" >> "$out/stderr.log"
+        continue
+    fi
     if [ $rc = 84 ] && tail -n +"$((n0 + 1))" "$out/stderr.log" | grep -q '^\[restart\] exit 0x52455354' && [ $run -lt 20 ]; then
         continue
     fi

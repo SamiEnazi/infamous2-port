@@ -850,6 +850,9 @@ static void fp_ownpx_init(void)
     while (__atomic_load_n(&s_opx_init, __ATOMIC_ACQUIRE) != 1) { }
 }
 
+/* (track C) the host GPU's vendor id as rsx_fp_set_host_vendor got it (0 = not known yet) */
+u32 rsx_fp_host_vendor(void) { return __atomic_load_n(&s_opx_vendor, __ATOMIC_ACQUIRE); }
+
 int rsx_fp_set_host_vendor(u32 vendor_id)
 {
     const int late = __atomic_load_n(&s_opx_init, __ATOMIC_ACQUIRE) != 0;
@@ -2198,6 +2201,180 @@ int rsx_fp_apply_alpha_test_buffered(
     if (prefix + (size_t)n + 1 > out_size)
         return -1;
     memcpy(marker, suffix, (size_t)n + 1);
+    return 1;
+}
+
+/* ---- [aa] thin alpha-tested things (see rsx_fp_decompiler.h) --------------
+ * Both rewrites work on the text rsx_fp_apply_alpha_test_buffered leaves:
+ *     <T> _rsx_out = <expr>;
+ *     const float _rsx_alpha_ref = fp_alpha.x;
+ *     if (!(<alpha> <op> _rsx_alpha_ref)) discard;
+ *     return _rsx_out;
+ * }
+ * and keep its last two lines, which the depth-export rewrite looks for. */
+static int s_aa_mip, s_aa_cov;
+void rsx_fp_alpha_aa_set(int mip, int cov) { s_aa_mip = mip != 0; s_aa_cov = cov != 0; }
+int  rsx_fp_alpha_aa_mip(void) { return s_aa_mip; }
+int  rsx_fp_alpha_aa_cov(void) { return s_aa_cov; }
+
+/* Insert `text` at `at` (inside hlsl), if it fits. */
+static int fp_aa_insert(char* hlsl, u32 out_size, char* at, const char* text)
+{
+    const size_t len = strlen(hlsl), tl = strlen(text);
+    if (len + tl + 1 > out_size) return -1;
+    memmove(at + tl, at, len + 1 - (size_t)(at - hlsl));
+    memcpy(at, text, tl);
+    return 0;
+}
+
+/* Where declarations go: before the entry point (or the struct it returns). */
+static char* fp_aa_decl_point(char* hlsl)
+{
+    static const char* const marks[] = { "struct PSOutput {\n", "struct _RsxDepthOut ", "float4 main(PSInput input" };
+    char* best = NULL;
+    for (u32 i = 0; i < 3; i++) {
+        char* p = strstr(hlsl, marks[i]);
+        if (p && (!best || p < best)) best = p;
+    }
+    return best;
+}
+
+int rsx_fp_apply_alpha_aa(char* hlsl, u32 out_size, u32 func, int no_cov)
+{
+    if (!hlsl || !out_size || (!s_aa_mip && !s_aa_cov)) return 0;
+    const u32 cmp = func >= 0x0200u && func <= 0x0207u ? func - 0x0200u : 7u;
+    /* 1 LESS, 3 LEQUAL: the alpha must stay under the reference; 4 GREATER,
+     * 6 GEQUAL: over it (the usual cut-out) */
+    const int above = cmp == 4u || cmp == 6u, below = cmp == 1u || cmp == 3u;
+    const int mip = s_aa_mip && above;
+    const int cov = s_aa_cov && !no_cov && (above || below);
+    if (!mip && !cov) return 0;
+    static const char ref_line[] = "    const float _rsx_alpha_ref = fp_alpha.x;\n    if (!(";
+    static const char tail[] = ")) discard;\n    return _rsx_out;\n}\n";
+    char* at = NULL;
+    for (char* p = strstr(hlsl, ref_line); p; p = strstr(p + 1, ref_line)) at = p;
+    if (!at) return -1;
+    const size_t len = strlen(hlsl), tl = sizeof tail - 1;
+    if (len < tl || strcmp(hlsl + len - tl, tail)) return -1;
+    if (strstr(hlsl, "_rsx_ta ")) return 0;   /* applied already */
+    const int mrt = fp_returns_struct(hlsl);
+    static const char* const op[8] = { NULL, "<", "==", "<=", ">", "!=", ">=", NULL };
+    char body[1600];
+    int n = snprintf(body, sizeof body,
+        "    const float _rsx_alpha_ref = fp_alpha.x;\n"
+        "    float _rsx_ta = %s%s;\n",
+        mrt ? "_rsx_out.t0.a" : "_rsx_out.a",
+        mip ? " * (1.0 + max(_rsx_alod, 0.0) * 0.25)" : "");
+    if (n < 0 || (size_t)n >= sizeof body) return -1;
+    if (cov) {
+        const char* cv = mrt ? "_rsx_out._rsx_cov" : "_rsx_cov";
+        const int m = snprintf(body + n, sizeof body - (size_t)n,
+            "    if (_rsx_msn > 1u) {\n"
+            "        float _rsx_c = saturate((%s) / max(fwidth(_rsx_ta), 0.0001) + 0.5);\n"
+            "        uint _rsx_k = (uint)(_rsx_c * (float)_rsx_msn + 0.5);\n"
+            "        if (_rsx_k == 0u) discard;\n"
+            "        uint _rsx_full = (1u << _rsx_msn) - 1u;\n"
+            "        uint _rsx_m = _rsx_k >= _rsx_msn ? _rsx_full : (1u << _rsx_k) - 1u;\n"
+            "        uint _rsx_r = ((uint)input.position.x + 2u * (uint)input.position.y) %% _rsx_msn;\n"
+            "        %s = ((_rsx_m << _rsx_r) | (_rsx_m >> (_rsx_msn - _rsx_r))) & _rsx_full;\n"
+            "    } else {\n"
+            "        if (!(_rsx_ta %s _rsx_alpha_ref)) discard;\n"
+            "        %s = 0xFFFFFFFFu;\n"
+            "    }\n"
+            "    return _rsx_out;\n}\n",
+            above ? "_rsx_ta - _rsx_alpha_ref" : "_rsx_alpha_ref - _rsx_ta",
+            cv, op[cmp], cv);
+        if (m < 0 || (size_t)m >= sizeof body - (size_t)n) return -1;
+        n += m;
+    } else {
+        const int m = snprintf(body + n, sizeof body - (size_t)n,
+            "    if (!(_rsx_ta %s _rsx_alpha_ref)) discard;\n"
+            "    return _rsx_out;\n}\n", op[cmp]);
+        if (m < 0 || (size_t)m >= sizeof body - (size_t)n) return -1;
+        n += m;
+    }
+    /* All or nothing: the rewritten text is built aside first. */
+    const size_t head = (size_t)(at - hlsl);
+    char* tmp = (char*)malloc(head + (size_t)n + 512);
+    if (!tmp) return -1;
+    memcpy(tmp, hlsl, head);
+    memcpy(tmp + head, body, (size_t)n + 1);
+    if (cov) {
+        static const char single_sig[] = "float4 main(PSInput input) : SV_TARGET {\n";
+        static const char single_new[] = "float4 main(PSInput input, out uint _rsx_cov : SV_Coverage) : SV_TARGET {\n";
+        static const char mrt_struct[] = "struct PSOutput {\n";
+        static const char mrt_member[] = "    uint _rsx_cov : SV_Coverage;\n";
+        static const char spec[] = "[[vk::constant_id(200)]] const uint _rsx_msn = 1u;\n";
+        const size_t cap = head + (size_t)n + 512;
+        char* sig = strstr(tmp, mrt ? mrt_struct : single_sig);
+        if (!sig) { free(tmp); return -1; }
+        if (mrt) {
+            if (fp_aa_insert(tmp, (u32)cap, sig + sizeof mrt_struct - 1, mrt_member)) { free(tmp); return -1; }
+        } else {
+            const size_t tl2 = strlen(tmp);
+            if (tl2 + sizeof single_new - sizeof single_sig + 1 > cap) { free(tmp); return -1; }
+            memmove(sig + sizeof single_new - 1, sig + sizeof single_sig - 1,
+                    tl2 + 1 - (size_t)(sig - tmp) - (sizeof single_sig - 1));
+            memcpy(sig, single_new, sizeof single_new - 1);
+        }
+        char* dp = fp_aa_decl_point(tmp);
+        if (!dp || fp_aa_insert(tmp, (u32)cap, dp, spec)) { free(tmp); return -1; }
+    }
+    const size_t total = strlen(tmp);
+    if (total + 1 > out_size) { free(tmp); return -1; }
+    memcpy(hlsl, tmp, total + 1);
+    free(tmp);
+    return 1;
+}
+
+int rsx_fp_alpha_aa_lod(char* hlsl, u32 out_size)
+{
+    if (!hlsl || !strstr(hlsl, "_rsx_alod") || strstr(hlsl, "static float _rsx_alod")) return 0;
+    const int arr = strstr(hlsl, "Texture2D    rsx_tex[16] : register(t0);\n") != NULL;
+    const size_t len0 = strlen(hlsl);
+    /* the result is built aside: helpers + every 2D Sample through them */
+    char decl[16 * 300 + 64];
+    size_t dn = 0;
+    dn += (size_t)snprintf(decl + dn, sizeof decl - dn, "static float _rsx_alod = 0.0;\n");
+    u32 units = 0;
+    for (u32 u = 0; u < 16; u++) {
+        char d[64], call[48];
+        if (!arr) {
+            snprintf(d, sizeof d, "Texture2D   rsx_tex%u : register(t%u);\n", u, u);
+            if (!strstr(hlsl, d)) continue;               /* a cube or a volume: its own coordinates */
+        }
+        snprintf(call, sizeof call, arr ? "rsx_tex[%u].Sample(rsx_samp[%u], " : "rsx_tex%u.Sample(rsx_samp[%u], ", u, u);
+        if (!strstr(hlsl, call)) continue;
+        char tex[24];
+        snprintf(tex, sizeof tex, arr ? "rsx_tex[%u]" : "rsx_tex%u", u);
+        dn += (size_t)snprintf(decl + dn, sizeof decl - dn,
+            "float4 _rsx_ls%u(float2 _rsx_uv) { _rsx_alod = max(_rsx_alod, %s.CalculateLevelOfDetail(rsx_samp[%u], _rsx_uv)); "
+            "return %s.Sample(rsx_samp[%u], _rsx_uv); }\n", u, tex, u, tex, u);
+        units |= 1u << u;
+    }
+    char* out = (char*)malloc(len0 + dn + 1);
+    if (!out) return -1;
+    char* dp = fp_aa_decl_point(hlsl);
+    if (!dp) { free(out); return -1; }
+    size_t o = 0;
+    for (const char* q = hlsl; *q; ) {
+        if (q == dp) { memcpy(out + o, decl, dn); o += dn; }
+        int hit = 0;
+        for (u32 u = 0; u < 16 && !hit && units; u++) {
+            if (!((units >> u) & 1u)) continue;
+            char call[48];
+            const int cl = snprintf(call, sizeof call, arr ? "rsx_tex[%u].Sample(rsx_samp[%u], " : "rsx_tex%u.Sample(rsx_samp[%u], ", u, u);
+            if (strncmp(q, call, (size_t)cl)) continue;
+            /* not inside a helper being defined: the definitions are only in decl */
+            const int rl = snprintf(out + o, 16, "_rsx_ls%u(", u);   /* shorter than the call */
+            o += (size_t)rl; q += cl; hit = 1;
+        }
+        if (!hit) out[o++] = *q++;
+    }
+    out[o] = 0;
+    if (o + 1 > out_size) { free(out); return -1; }
+    memcpy(hlsl, out, o + 1);
+    free(out);
     return 1;
 }
 

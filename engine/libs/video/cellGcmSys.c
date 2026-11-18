@@ -23,6 +23,7 @@
 #include "gcm_fifo_decode.h"                   /* JUMP forms */
 #include "../../runtime/platform/host_place.h" /* PS3_CPU_PLACE: the draining thread's cores */
 #include "rsx_split.h"                         /* (rsx-par) PS3RECOMP_RSX_SPLIT */
+#include "rsx_tc.h"                            /* (track C) PS3_RSX_* switches, counters */
 
 /* Guest EA of the GCM context (begin/end/current/callback) the title writes its
  * command stream into; recorded by cellGcmSetupContext, drained by the RSX. */
@@ -167,7 +168,7 @@ static CellGcmControl s_control;
  * 0xFFFF means "not mapped", as it does in the host tables. */
 /* Default home for the HLE-visible GCM window; a port overrides it before
  * running guest code when its title claims this address range. */
-uint32_t ppu_hle_inject_base = 0x20000000u;
+PS3_MV_DEF(uint32_t, ppu_hle_inject_base, , = 0x20000000u)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 
 static u16 s_io_address_table[65536];
 static u16 s_ea_address_table[65536];
@@ -1924,6 +1925,23 @@ static void gcm_fifo_dump_around(u32 getoff)
 }
 
 
+/* PS3_GCM_REF_LIVE (track A, 2026-11-16): the ref word as plain guest memory the RSX side keeps
+ * current. A PPU_LEAN_MEM lift loads it like any other word (no poll-word compare on the fast path),
+ * so the read-driven publication (cellGcm_ref_on_poll from the out-of-line vm_read32) no longer
+ * runs for the game's own polls. Instead:
+ *   - the walker publishes a fence the moment it drains it, when the pacing allows (the previous
+ *     value has been up for the pacing gap, ~200 us: every value stays observable to an equality
+ *     waiter, as before), else leaves it queued;
+ *   - a queued fence is published by the walker's idle wait (cellGcm_fifo_kick_wait, which then
+ *     sleeps no longer than the gap), by the end of every drain pass (as before), and by the guest's
+ *     own sleeps (cellGcm_ref_on_sleep, from lv2_syscall: usleep / sleep / yield -- the ref waiter
+ *     0x13ACE8 sleeps 5 us between reads);
+ *   - those sleeps also kick the walker when it has work (put moved, a flip, a semaphore's label,
+ *     a patched park): the doorbell the poll's "dry" kick was.
+ * Set by the engine for a lean lift (cellGcm_ref_live_set); PS3_GCM_REF_LIVE=0/1 overrides. */
+static int s_ref_live = 0;
+static void gcm_ref_live_publish(void);
+
 static void gcm_ref_push_at(u32 v, u32 getoff)
 {
     { static int _d = -1; if (_d < 0) _d = getenv("GCM_REFLOG") ? 1 : 0;
@@ -1940,6 +1958,7 @@ static void gcm_ref_push_at(u32 v, u32 getoff)
     s_ref_qtail = t + 1;
     { const u32 d = s_ref_qtail - s_ref_qhead;   /* (rsx5) PS3RECOMP_LIMITS */
       if (d > g_rsx_lim[RSX_LIM_GCM_REFQ].peak) { rsx_lim_cap(RSX_LIM_GCM_REFQ, GCM_REF_QLEN); rsx_lim_use(RSX_LIM_GCM_REFQ, d); } }
+    if (s_ref_live) gcm_ref_live_publish();   /* reached: up now, unless the pacing holds it */
 }
 
 /* Global fence-publication counter: lets the lwmutex convoy trace correlate a
@@ -2050,6 +2069,7 @@ void cellGcm_fifo_kick_wait(unsigned ms)
         spin_us = v;
         if (v) fprintf(stderr, "[cellGcmSys] PS3RECOMP_GCM_SPIN_US=%d: the frame clock spins up to %d us for new FIFO work before it sleeps\n", v, v);
     }
+    if (s_ref_live) gcm_ref_live_publish();   /* (PS3_GCM_REF_LIVE) a fence the pacing held, if its turn came */
     if (spin_us && s_gcm_initialized) {
         if (gcm_kw_ready()) return;
         LARGE_INTEGER t0, now; QueryPerformanceCounter(&t0);
@@ -2057,6 +2077,7 @@ void cellGcm_fifo_kick_wait(unsigned ms)
         do {
             for (int i = 0; i < 16; i++) YieldProcessor();
             if (gcm_kw_ready()) return;
+            if (s_ref_live && (n & 15u) == 0u) gcm_ref_live_publish();
             if (ev && (++n & 15u) == 0u && WaitForSingleObject(ev, 0) == WAIT_OBJECT_0) return;
             QueryPerformanceCounter(&now);
         } while (now.QuadPart - t0.QuadPart < spin_ticks);
@@ -2094,13 +2115,35 @@ static void gcm_sema_kick_if(u32 ea, u32 size)
  * order). TryAcquire: a contended poll just reads the current ref. */
 static SRWLOCK s_ref_pub_lock = SRWLOCK_INIT;
 
+/* The pacing state, shared by the poll below and the live publication (PS3_GCM_REF_LIVE). */
+static LARGE_INTEGER s_freq;
+static volatile LONGLONG s_last_pub;
+
+static void gcm_ref_live_publish(void)
+{
+    if (s_ref_qhead == s_ref_qtail) return;
+    if (!s_freq.QuadPart) QueryPerformanceFrequency(&s_freq);
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    if (now.QuadPart - s_last_pub < s_freq.QuadPart / 5000) return;   /* paced: a later chance publishes it */
+    if (!TryAcquireSRWLockExclusive(&s_ref_pub_lock)) return;
+    if (s_ref_qhead != s_ref_qtail) { gcm_ref_publish_one(); s_last_pub = now.QuadPart; }
+    ReleaseSRWLockExclusive(&s_ref_pub_lock);
+}
+
+void cellGcm_ref_live_set(int on)
+{
+    const char* e = getenv("PS3_GCM_REF_LIVE");
+    if (e && *e) on = *e != '0';
+    s_ref_live = on;
+    if (on) fprintf(stderr, "[cellGcmSys] PS3_GCM_REF_LIVE: the ref word is published as the walker drains "
+                            "fences (paced), the guest's sleeps kick the walker\n");
+}
+
 void cellGcm_ref_on_poll(void)
 {
     /* Pace: leave each published value observable for >= ~200us of spins
      * (equality-waiters at any poll rate see every value; still ~5000/s so
      * loading's fence storms clear in seconds, not minutes). */
-    static LARGE_INTEGER s_freq;
-    static volatile LONGLONG s_last_pub;
     /* GCM_REF_SOLO=1 (default off -- GCM_REF_STATS in the city: > 99.9% of the
      * reads find nothing queued, the RSX thread has not reached the fence, so
      * the pacing is not what the main thread waits for): while ONE thread is the
@@ -2218,6 +2261,17 @@ void cellGcm_ref_on_poll(void)
     }
 }
 
+/* PS3_GCM_REF_LIVE: a guest thread is about to sleep or yield (lv2_syscall 141 / 142 / 43). What
+ * its ref poll did before: publish a fence the pacing held back, if its turn came; and if the
+ * walker has work (gcm_kw_ready: put moved, a flip, a semaphore's label, a patched park), kick it
+ * -- the guest may be waiting for exactly that. Never blocks; the kick is the frame clock's event. */
+void cellGcm_ref_on_sleep(void)
+{
+    if (!s_ref_live) return;
+    gcm_ref_live_publish();
+    if (s_gcm_kick_ev && s_gcm_initialized && gcm_kw_ready()) SetEvent(s_gcm_kick_ev);
+}
+
 /* Hitch attribution (PS3RECOMP_PLAYLOG, perf 2026-11-09): time the RSX thread
  * spent inside FIFO drains (walking, drawing, uploading, waiting on the GPU in
  * a flush) and time the walker stood on a semaphore acquire (the SPU light
@@ -2236,6 +2290,9 @@ void cellGcm_hattr_take(unsigned long long* drain_ns, unsigned long long* sema_n
     *drain_ns = d; *sema_ns = s; *gaveup = s_ha_sema_gaveup;
     s_ha_drain_ns = s_ha_sema_ns = s_ha_sema_gaveup = 0;
 }
+
+/* (track C) rsx_split.c: the label window's guest address */
+u32 gcm_label_base(void) { return GCM_LABEL_GUEST_BASE; }
 
 void cellGcm_rsx_process_fifo(void)
 {
@@ -2492,6 +2549,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
         const char* t = getenv("TCONST_FIFO"); fast_tc = t ? atoi(t) : 0;
         const char* b = getenv("GCM_FIFO_BURST"); fast_burst = !(b && *b == '0');
         fprintf(stderr, "[cellGcmSys] FIFO fast loop: %s (GCM_FIFO_FAST)\n", fast_sw ? "on" : "off");
+        rsx_tc_banner();   /* (track C) the switches of the RSX thread work, once */
     }
     if (fast_live < 0) fast_live = rsx_live_draw_enabled();
     if (fast_eng < 0) fast_eng = rsx_draw_engine_enabled();
@@ -2711,12 +2769,14 @@ walk_more:
             { u32 tgt = w & 0x1FFFFFFCu;
               if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("CALL", tgt, w); gcm_fifo_dump_around(s_fifo_getoff); /* (critic2) the step trace, as for a JUMP */ gcm_fifo_resync_why("unmapped-CALL", &s_fifo_getoff, put); break; }
               s_fifo_calloff = s_fifo_getoff + 4;
+              g_rsx_tc_src = 0x100u | (gcm_io2ea(tgt) >> 24);   /* (track C) PS3_RSX_STATS: draws by source */
               s_fifo_getoff  = tgt; }
             continue;
         }
         if (w == 0x00020000u) {                /* RET */
             s_fifo_getoff = s_fifo_calloff;
             s_fifo_calloff = 0;
+            g_rsx_tc_src = 0;
             continue;
         }
         if (type == 0 || type == 2) {          /* method (incrementing / NI) */
@@ -2766,7 +2826,7 @@ walk_more:
                     u32 la = GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu);
                     /* (rsx-par) an acquire reads the label only once every queued
                      * action that may write one (the release it may wait for) ran */
-                    if (split && m == 0x68u) rsx_split_wait_labels();
+                    if (split && m == 0x68u) rsx_split_wait_label(la);   /* (track C) PS3_RSX_LBLWAIT */
                     /* GCM_SEMA_TRACE=<n>: the first n NV406E semaphore methods with
                      * the label's current value, to read a title's RSX<->SPU/PPU
                      * sync protocol (GCM_RECDBG alone shows 12). */
@@ -3027,10 +3087,77 @@ walk_more:
      * publication, the ring recycle) and before the caller presents. */
     if (split) {
         if (s_fifo_getoff == put && budget > 0 && !strcmp(why, "caught-up") &&
+            !((rsx_tc(TC_WALKON) || rsx_tc(TC_FLIPFIRST)) && s_flip_pending) &&   /* (track C) not past a pending flip (see below) */
             ps3_ms_now() - s_drain_in_ms < 4) {
             const u32 np = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
             atomic_thread_fence(memory_order_acquire);
-            if (np != put) { put = np; goto walk_more; }
+            /* [fix07] PS3_RSX_FLIPFIRST: new words AND a flip request by now = the next frame's words */
+            if (np != put && !(rsx_tc(TC_FLIPFIRST) && s_flip_pending)) { put = np; goto walk_more; }
+        }
+        /* (track C) PS3_RSX_WALKON: the walker has caught up with the title, sits on a
+         * park or on a semaphore acquire, while the exec thread still has draws queued.
+         * Syncing now (as before) leaves the exec thread idle from the moment it
+         * finishes until this thread has ended the drain, gone round the frame clock
+         * and walked the next draw -- once per catch-up, many times a frame. Instead
+         * poll for what would end the stop (put moved, the park patched, the label
+         * written) while the exec thread works, and walk on at once; end the drain
+         * (sync, now free) when the exec thread has run everything, at the latest
+         * 8 ms into the drain. Timing only: the same words, in the same order. */
+        /* ...never while a flip is pending: inFAMOUS 2 flips through the import
+         * (cellGcmSetFlipCommand from the PPU), and the frame clock presents a
+         * pending flip only between drains -- walking on would delay the present
+         * (up to the 8 ms bound: the dock's p99) and could run into the next
+         * frame's words before it. */
+        if (rsx_tc(TC_WALKON) && budget > 0 && strcmp(why, "flip") != 0 && !s_flip_pending && !rsx_split_idle()) {
+            const int parked = !strcmp(why, "parked") && s_park_off == s_fifo_getoff;
+            const int caught = s_fifo_getoff == put && !strcmp(why, "caught-up");
+            const int sema = s_sema_live != 0;
+            if (parked || caught || sema) {
+                rsx_split_publish();
+                const unsigned long long t0 = ps3_qpc_us();
+                int go = 0;
+                const int ff = rsx_tc(TC_FLIPFIRST);
+                for (unsigned n = 0; !go; n++) {
+                    /* [fix07] PS3_RSX_FLIPFIRST: the flip first, and again once new words or the patched park
+                     * were seen (rsx_tc.h): this thread can lose the CPU between two looks, and the title has
+                     * then asked for the flip AND started the next frame; walking on merged two frames into
+                     * one drain (the present a frame late) */
+                    if (ff && s_flip_pending) break;
+                    if (caught) {
+                        const u32 np = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
+                        if (np != put) {
+                            atomic_thread_fence(memory_order_seq_cst);
+                            if (ff && s_flip_pending) break;
+                            put = np; go = 1; break;
+                        }
+                    }
+                    if (parked) {
+                        const u32 ea = gcm_io2ea(s_fifo_getoff);
+                        if (ea && vm_read32(ea) != s_kw_park_word) {
+                            atomic_thread_fence(memory_order_seq_cst);
+                            if (ff && s_flip_pending) break;
+                            go = 1; break;
+                        }
+                    }
+                    if (sema && vm_read32(GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu)) == s_sema_wait_val) {
+                        atomic_thread_fence(memory_order_acquire);
+                        s_sema_live = 0; s_sema_blocked_pass = 0;   /* the acquire re-runs and passes */
+                        go = 1; break;
+                    }
+                    if (s_flip_pending) break;   /* a flip request arrived: end the drain, the frame clock presents */
+                    if ((n & 7u) == 0u && (rsx_split_idle() || ps3_ms_now() - s_drain_in_ms >= 8)) break;
+                    for (int i = 0; i < 8; i++) YieldProcessor();
+                }
+                rsx_tc_count(TCC_WALKON_US, ps3_qpc_us() - t0);
+                if (go) {
+                    const u32 np = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);   /* the newest put for the walk */
+                    atomic_thread_fence(memory_order_acquire);
+                    put = np;
+                    rsx_tc_count(TCC_WALKON, 1);
+                    why = "caught-up";
+                    goto walk_more;
+                }
+            }
         }
         rsx_split_sync();
     }

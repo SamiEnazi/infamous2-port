@@ -136,6 +136,9 @@ static void emit_store(Out* b, const char* dst_fmt, u32 idx, const char* m)
 
 static u32 s_vp_branch_base = 0;   /* VP slot the program being decompiled starts at */
 void rsx_vp_set_branch_base(u32 start_slot) { s_vp_branch_base = start_slot; }
+static int s_vp_precise;            /* [aa] PS3RECOMP_VP_PRECISE, see rsx_vp_decompiler.h */
+void rsx_vp_set_precise(int on) { s_vp_precise = on != 0; }
+int  rsx_vp_precise(void) { return s_vp_precise; }
 
 /* BRA BRI CAL CLI RET BRB CLB (scalar opcodes). */
 static int vp_is_flow(u32 sca_op)
@@ -640,11 +643,21 @@ static int rsx_vp_decompile_impl(
          * text came out NaN, which the FP's NaN guard turned into black. */
         /* Scalar logic per component: glslang's HLSL front end (the Metal
          * path) does not take || on vectors. */
+        );
+    if (!s_vp_precise)
+        emit(&o,
         "float vp_mul1(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }\n"
         "float4 vp_mul(float4 a, float4 b) { return float4(vp_mul1(a.x, b.x), vp_mul1(a.y, b.y),"
         " vp_mul1(a.z, b.z), vp_mul1(a.w, b.w)); }\n"
         "float vp_dot3(float4 a, float4 b) { float4 m = vp_mul(a, b); return m.x + m.y + m.z; }\n"
         "float vp_dot4(float4 a, float4 b) { float4 m = vp_mul(a, b); return m.x + m.y + m.z + m.w; }\n");
+    else   /* [aa] the same helpers, every product and sum NoContraction */
+        emit(&o,
+        "float vp_mul1(float a, float b) { precise float r = (a == 0.0 || b == 0.0) ? 0.0 : a * b; return r; }\n"
+        "float4 vp_mul(float4 a, float4 b) { return float4(vp_mul1(a.x, b.x), vp_mul1(a.y, b.y),"
+        " vp_mul1(a.z, b.z), vp_mul1(a.w, b.w)); }\n"
+        "float vp_dot3(float4 a, float4 b) { float4 m = vp_mul(a, b); precise float s = m.x + m.y + m.z; return s; }\n"
+        "float vp_dot4(float4 a, float4 b) { float4 m = vp_mul(a, b); precise float s = m.x + m.y + m.z + m.w; return s; }\n");
 
     for (u32 vtu = 0; vtu < 4; vtu++) {
         if (!((vtex_mask >> vtu) & 1u)) continue;
@@ -676,8 +689,9 @@ static int rsx_vp_decompile_impl(
             emit(&o, assignment);
         }
     }
+    emit(&o, s_vp_precise ? "    precise float4 r[32]; precise float4 o[16];\n"   /* [aa] */
+                          : "    float4 r[32]; float4 o[16];\n");
     emit(&o,
-        "    float4 r[32]; float4 o[16];\n"
         "    [unroll] for (int _i=0;_i<32;_i++) r[_i]=(float4)0;\n"
         "    [unroll] for (int _j=0;_j<16;_j++) o[_j]=float4(0,0,0,1);\n"
         "    int4 a0 = (int4)0; int4 a1 = (int4)0;\n"
@@ -693,10 +707,15 @@ static int rsx_vp_decompile_impl(
      * viewport transform, o1/o2 = colors, o5.x = fog, o7..o14 = TEX0..7,
      * o15 = TEX8, o6 = TEX9 (RPCS3's reg_table: TEX9 shares the point-size
      * register). */
+    emit(&o, s_vp_precise   /* [aa] the viewport transform NoContraction too */
+        ? "    VSOutput Out;\n"
+          "    float4 _p = o[0];\n"
+          "    precise float4 _pp = float4(_p.xyz * vp_posscale.xyz + _p.w * vp_posoffset.xyz, _p.w);\n"
+          "    Out.pos = _pp;\n"
+        : "    VSOutput Out;\n"
+          "    float4 _p = o[0];\n"
+          "    Out.pos = float4(_p.xyz * vp_posscale.xyz + _p.w * vp_posoffset.xyz, _p.w);\n");
     emit(&o,
-        "    VSOutput Out;\n"
-        "    float4 _p = o[0];\n"
-        "    Out.pos = float4(_p.xyz * vp_posscale.xyz + _p.w * vp_posoffset.xyz, _p.w);\n"
         "    Out.col0 = o[1]; Out.col1 = o[2]; Out.fog = o[5].xxxx;\n"
         "    Out.t0=o[7];  Out.t1=o[8];  Out.t2=o[9];  Out.t3=o[10];\n"
         "    Out.t4=o[11]; Out.t5=o[12]; Out.t6=o[13]; Out.t7=o[14];\n"

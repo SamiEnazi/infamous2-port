@@ -11,4 +11,4 @@
  * a self-healing cache (miss -> one VirtualQuery -> remember), so a port that
  * never seeds it is correct, just slower on first touch per page. */
 
-unsigned char g_vm_page_bitmap[65536 / 8];
+PS3_MV_DEF(unsigned char, g_vm_page_bitmap, [65536 / 8], )   /* (slim split) the game module's copy once bound: ps3_module_vars.h */

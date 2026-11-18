@@ -400,8 +400,10 @@ static const char kVkLfxBlurVFS[] = VK_SSAO_GLSL_COMMON VK_LFX_BLUR
  * eng_present_fs), ported to a pass that writes the frame instead of the
  * display-surface blit (vk_lfx_tone). Same arithmetic; the clarity taps are
  * texel fetches at rounded offsets (Metal: bilinear samples). Binding 0:
- * c = (shadows, midtones, highlights, clarity) in -1..1, sz = (w, h, 0, 0);
- * binding 1 the game's finished frame. RGBA8 out, alpha kept. */
+ * c = (shadows, midtones, highlights, clarity) in -1..1, sz = (w, h, split, 0);
+ * binding 1 the game's finished frame. RGBA8 out, alpha kept. [menu-e] split: the
+ * F2 menu's compare line in pixels (0 = off): left of it the frame is copied as
+ * it came (the PS3 look). */
 static const char kVkToneFS[] =
 "#version 450\n"
 "layout(std140, set = 0, binding = 0) uniform ToneP { vec4 c; vec4 sz; } p;\n"
@@ -412,6 +414,7 @@ static const char kVkToneFS[] =
 "void main() {\n"
 "    ivec2 P = ivec2(gl_FragCoord.xy);\n"
 "    vec4 c = texelFetch(src, P, 0);\n"
+"    if (gl_FragCoord.x < p.sz.z) { o = c; return; }\n"
 "    if (p.c.w != 0.0) {\n"
 "        float l0 = dot(clamp(c.rgb, 0.0, 1.0), W), acc = l0 * 0.5, wsum = 0.5;\n"
 "        float r = 0.011 * p.sz.y;\n"

@@ -6,11 +6,11 @@
 # file or firmware (refused if one is found), nor the development repository's own files (PLAN.md,
 # research\, patches\toolkit\: make the zip from the public repository's commit). Attach it to the GitHub
 # release next to Setup.exe.
-#   tools\make_release_zip.ps1 -Version 0.5.0 -SetupExe <Setup.exe built from the same commit> [-RequireSigned]
+#   tools\make_release_zip.ps1 -Version 0.6.0 -SetupExe <Setup.exe built from the same commit> [-RequireSigned]
 #       [-Repo <a clone of SamiEnazi/infamous2-port>] [-Commit HEAD] [-Out <folder>]
-# Setup.exe: the signed one from the release, which .github/workflows/setup-exe.yml built and SignPath signed
-# (gh release download v0.5.0 -R SamiEnazi/infamous2-port -p Setup.exe -D work\release\signed). An unsigned
-# one gets a warning (-RequireSigned: refused); a broken or untrusted signature (SignPath's test-signing) is refused.
+# Setup.exe is not code-signed: an unsigned exe is what a release carries, and it is taken as it is (one line
+# says so). -RequireSigned refuses an unsigned one, for the day the releases are signed. A signature Windows
+# does not accept is always refused.
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$SetupExe,
@@ -44,7 +44,7 @@ function Unpack([string]$Dir, [string]$Rev, [string]$Dst, [string]$What) {
 }
 
 $script:sha = (GitOut $Repo @("rev-parse", "$Commit^{commit}")).Trim()
-foreach ($f in "recomplauncher.json", "tools/setup_common.ps1", "tools/setup_checks.ps1", "tools/setup_build.ps1", "tools/play.ps1",
+foreach ($f in "recomplauncher.json", "supporters.json", "tools/setup_common.ps1", "tools/setup_checks.ps1", "tools/setup_build.ps1", "tools/play.ps1",
                "engine/CMakeLists.txt", "engine/LICENSE", "base/LICENSE", "base/infamous2-lle/CMakeLists.txt") {
     # Windows PowerShell turns a native program's stderr into an error under "Stop"
     $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
@@ -58,13 +58,12 @@ if ([System.Text.Encoding]::Unicode.GetString($exeBytes).IndexOf("--prepare") -l
 # its version information (Explorer > Properties > Details) should name this release
 $fv = (Get-Item -LiteralPath (Resolve-Path $SetupExe).Path).VersionInfo.FileVersion
 if ($fv -ne "$Version.0" -and $fv -ne $Version) { Write-Warning "Setup.exe says version $fv, not $($Version): set AssemblyVersion/FileVersion/InformationalVersion at the top of tools\setup_exe\SetupWizard.cs (and setup.manifest) and build it again" }
-# the zip carries the same Setup.exe as the release: the signed one
+# the zip carries the same Setup.exe as the release (not code-signed)
 $sig = Get-AuthenticodeSignature -LiteralPath (Resolve-Path $SetupExe).Path
 if ($sig.Status -eq "Valid") { $signedBy = "  Setup.exe signed by $($sig.SignerCertificate.Subject)" }
 elseif ($sig.Status -eq "NotSigned") {
-    $m = "$SetupExe is not signed: take the release's signed one (gh release download v$Version -R SamiEnazi/infamous2-port -p Setup.exe -D work\release\signed)"
-    if ($RequireSigned) { throw $m }
-    Write-Warning $m; $signedBy = "  Setup.exe NOT signed"
+    if ($RequireSigned) { throw "$SetupExe is not signed (-RequireSigned)" }
+    $signedBy = "  Setup.exe: not code-signed (as every release so far)"
 }
 else { throw "$SetupExe has a signature Windows does not accept ($($sig.Status): $($sig.StatusMessage)): not for a release" }
 

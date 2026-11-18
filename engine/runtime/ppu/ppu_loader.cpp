@@ -56,6 +56,7 @@ static uint32_t loader_vscr_default(void)
     return nj ? 0x00010000u : 0u;
 }
 #include "../memory/vm.h"   /* vm_commit -- sys_mmapper_search_and_map maps for real */
+#include "../memory/vm_guard.h"   /* PPU_LEAN_MEM: the null page and raw-SPU windows as guard pages */
 #include "../platform/win32_compat.h"      /* Win32 types, interlocked ops, Sleep/QPC on POSIX */
 #include "../platform/win32_backtrace.h"   /* RtlCaptureStackBackTrace / GetModuleHandleA on POSIX */
 #include "../platform/host_place.h"        /* PS3_CPU_PLACE: the main PPU thread's cores */
@@ -1468,7 +1469,7 @@ extern "C" void ppu_guard_page(uint32_t guest_ea)
  * turns a stray pointer in lifted code into a logged bad-access returning 0
  * instead of a host segfault -- so a first-boot run reveals the next wall
  * rather than dying. */
-extern "C" uint32_t ppu_vm_size = 0;
+extern "C" { PS3_MV_DEF(uint32_t, ppu_vm_size, , = 0) }   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 
 /* PT_TLS template (captured by ppu_load_elf) + the main thread's TLS image.
  * PPC64 ELF TLS: r13 (thread pointer) = image_base + 0x7000. The image sits in
@@ -1670,7 +1671,7 @@ static inline int vm_null_store(uint32_t a, uint32_t v, int width, void* ra)
  * screen. None of them does anything unless its variable is set, so decide
  * once and give the accessors a fast path that skips the lot. PPU_HOTREAD=1
  * re-enables the spin detectors on their own. */
-extern "C" int vm_inline_ok = 0;
+extern "C" { PS3_MV_DEF(int, vm_inline_ok, , = 0) }   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 /* Writes into guest memory that the host kernel makes (ReadFile under fread,
  * recv) instead of user-mode code: called (ea, len, 0) before and (ea, len, 1)
  * after, when set (libs/video/rsx_wtrack.c sets it: a page it write-protects
@@ -1902,7 +1903,13 @@ static inline void vm_gcm_refpoll(uint32_t a)
         if(_rp<0){ const char* e=getenv("GCM_REFPOLL"); _rp=(e&&*e=='0')?0:1; }
         if(_rp){ extern void cellGcm_ref_on_poll(void); cellGcm_ref_on_poll(); } }
 }
+static int s_raw_guarded_rd = 0;   /* = s_raw_guarded (below), read by vm_read32 */
+int spu_raw_guard_load(uint32_t ea, unsigned n, uint64_t* val);   /* runtime/spu/spu_raw.c */
+int spu_raw_guard_store(uint32_t ea, unsigned n, uint64_t val);
 uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0;
+    /* PPU_LEAN_MEM: a guarded raw-SPU register page is the guard's (its memory sits beside it) */
+    if (__builtin_expect(s_raw_guarded_rd, 0) && spu_raw_is_reg((uint32_t)a)) {
+        uint64_t _gv = 0; spu_raw_guard_load((uint32_t)a, 4, &_gv); return (uint32_t)_gv; }
     if (__builtin_expect(!vm_diag(), 1)) {
         if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 4, __builtin_return_address(0));
         if (spu_raw_is_reg((uint32_t)a)) { uint32_t _rv;
@@ -2056,7 +2063,7 @@ uint64_t vm_read64(uint64_t a) { if (vm_oob((uint32_t)a,8)) return 0;
  * The barrier probe in the lifted code sets g_barrier_sync_watch = sync base;
  * any PPU store into [base+0x40, base+0xC0) is then logged with its guest
  * function, catching whoever bumps the per-SPU lane counters. */
-extern "C" uint32_t g_barrier_sync_watch = 0;
+extern "C" { PS3_MV_DEF(uint32_t, g_barrier_sync_watch, , = 0) }   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 
 /* Window for the INLINE write-watch in ppu_memory.h (libs/ stores). Same PPU_WWATCH
  * setting as below; kept as a pair so the inline check is two compares against
@@ -2238,7 +2245,8 @@ extern "C" void ppu_store_pm_recheck(uint32_t ea, uint32_t n)
  * accessors, the store-conditionals and the natives -- so a folded load either ran before
  * that store or reads memory. PS3_TOC_FOLD=0 at run time: every entry stays 0. */
 #define PPU_TOC_MAX_ENTRIES 16384u                 /* a 64 KB TOC window */
-extern "C" { unsigned char g_ppu_toc_ok[PPU_TOC_MAX_ENTRIES]; }
+static_assert(PPU_TOC_MAX_ENTRIES == PS3_MODULE_TOC_MAX, "ps3emu/ps3_module.h");
+extern "C" { PS3_MV_DEF(unsigned char, g_ppu_toc_ok, [PPU_TOC_MAX_ENTRIES], ) }   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 static uint32_t s_toc_lo = 0, s_toc_n = 0;         /* registered range, bytes */
 static const unsigned char* s_toc_img = nullptr;
 static uint64_t s_toc_base = 0;
@@ -2269,6 +2277,109 @@ extern "C" void ppu_toc_write_hit(uint32_t ea, uint32_t n)
 static inline void ppu_toc_note_write(uint32_t ea, uint32_t n)
 {
     if (__builtin_expect(ea - (s_toc_lo - n + 1u) < s_toc_n + n - 1u, 0)) ppu_toc_write_hit(ea, n);
+}
+
+/* PPU_LEAN_MEM / PPU_DRAIN_NONE / PPU_ICALL_INLINE (track A, 2026-11-16; tools/ppu_fastpath.py).
+ *
+ * A lean lift's guest load is one host load at vm_base + ea and nothing else: no range test, no
+ * gcm poll-word compare (the whole 4 GB window is reserved, so any 32-bit ea is a valid host
+ * address, and an access crossing 4 GB runs into the 64 KB guard behind it). What the tests used
+ * to route out of line is handled off the fast path:
+ *  - the null page and the raw-SPU register windows: guard pages (runtime/memory/vm_guard.c), armed
+ *    in ppu_lean_init below, before any guest code;
+ *  - the gcm ref word: a plain word the RSX side publishes into on its own (cellGcm_ref_live_set,
+ *    libs/video/cellGcmSys.c), the old read-driven publication and walker kick moved to the guest's
+ *    sleeps (lv2_syscall);
+ *  - memory diagnostics (vm_inline_ok 0) no longer see lifted loads: the lift says so at start.
+ * A store keeps its one page-map test (PPU_ST_PMAP: the SPU reservation protocol needs it); a
+ * store the page map does not clear calls ppu_lean_st* (below) -- the careful path the inline
+ * store carried before, out of line.
+ * The lift registers what it was built with (ppu_lean_mem_register, a constructor of its last
+ * chunk): 1 = lean memory, 2 = no trampoline drains after calls (ps3_hle_call drains on its way
+ * out instead; ppu_hle.cpp), 4 = indirect calls inline through g_ppu_icall_tbl. */
+static int s_lean_flags = 0;
+static int s_raw_guarded = 0;    /* vm_write32 / vm_read32: the raw-SPU registers are the guard's */
+static int s_icall_mod_on = 0;   /* ps3_indirect_call fills the lift's inline table */
+extern "C" int spu_raw_guard_prepare(void);
+extern "C" void spu_raw_guard_abandon(void);
+extern "C" int spu_raw_guard_load(uint32_t ea, unsigned n, uint64_t* val);
+extern "C" int spu_raw_guard_store(uint32_t ea, unsigned n, uint64_t val);
+extern "C" void cellGcm_ref_live_set(int on);
+extern "C" void cellGcm_ref_on_sleep(void);
+extern "C" int ppu_lean_mem_register(int flags)
+{
+    __atomic_fetch_or(&s_lean_flags, flags, __ATOMIC_SEQ_CST);
+    /* the inline table's empty slot: a key no call has (an indirect call to 0 must not hit) */
+    if (flags & 4)
+        for (uint32_t i = 0; i < (uint32_t)(sizeof g_ppu_icall_tbl / sizeof g_ppu_icall_tbl[0]); i++)
+            __atomic_store_n(&g_ppu_icall_tbl[i], ~0ull, __ATOMIC_RELAXED);
+    return flags;
+}
+extern "C" int ppu_lean_flags(void) { return __atomic_load_n(&s_lean_flags, __ATOMIC_ACQUIRE); }
+
+/* The careful store, out of line: what a PPU_MM store did when the page map did not clear it. */
+extern "C" unsigned char* const g_spu_coh_bitmap;
+extern "C++" {   /* (inside the accessors' extern "C" block) */
+template <typename T> static inline void ppu_lean_st(uint32_t ea, T v, void (*full)(uint64_t, T))
+{
+    ppu_toc_note_write(ea, (uint32_t)sizeof(T));
+    const uint32_t hi = (ppu_vm_size != 0 && ppu_vm_size < 0xE0000000u) ? ppu_vm_size : 0xE0000000u;
+    if (__builtin_expect(__atomic_load_n(&vm_inline_ok, __ATOMIC_RELAXED) != 0, 1) && ea >= 0x10000u &&
+        (uint64_t)ea + sizeof(T) <= hi) {
+        const uint32_t line = ea >> 7;
+        if (!((__atomic_load_n(&g_spu_coh_bitmap[line >> 3], __ATOMIC_RELAXED) >> (line & 7)) & 1u)) {
+            typedef T __attribute__((aligned(1))) T1;
+            T raw = v;
+            if (sizeof(T) == 2) raw = (T)__builtin_bswap16((uint16_t)v);
+            else if (sizeof(T) == 4) raw = (T)__builtin_bswap32((uint32_t)v);
+            else if (sizeof(T) == 8) raw = (T)__builtin_bswap64((uint64_t)v);
+            *(volatile T1*)(vm_base + ea) = raw;
+            __atomic_signal_fence(__ATOMIC_SEQ_CST);   /* store, then re-check: see spu_coh_reserve */
+            if (__builtin_expect((__atomic_load_n(&g_spu_coh_bitmap[line >> 3], __ATOMIC_RELAXED) >> (line & 7)) & 1u, 0))
+                ppu_store_coh_notify(ea, (uint32_t)sizeof(T));
+            return;
+        }
+    }
+    full(ea, v);
+}
+}   /* extern "C++" */
+extern "C" void ppu_lean_st8(uint32_t ea, uint8_t v)   { ppu_lean_st<uint8_t>(ea, v, vm_write8); }
+extern "C" void ppu_lean_st16(uint32_t ea, uint16_t v) { ppu_lean_st<uint16_t>(ea, v, vm_write16); }
+extern "C" void ppu_lean_st32(uint32_t ea, uint32_t v) { ppu_lean_st<uint32_t>(ea, v, vm_write32); }
+extern "C" void ppu_lean_st64(uint32_t ea, uint64_t v) { ppu_lean_st<uint64_t>(ea, v, vm_write64); }
+
+/* ppu_mem_fast_init's last step: what a lean lift needs before its first instruction. */
+static void ppu_lean_init(void)
+{
+    const int f = ppu_lean_flags();
+    if (!f) return;
+    if (f & 1) {
+        unsigned want = VMG_NULL_PAGE;
+        const char* r = getenv("PS3_GUARD_RAW_SPU");   /* =0: the raw-SPU windows are plain memory */
+        const int raw = !(r && r[0] == '0');
+        if (raw && spu_raw_guard_prepare()) want |= VMG_RAW_SPU;
+        if (vm_guard_install(vm_base, want, spu_raw_guard_load, spu_raw_guard_store) != 0 ||
+            !(vm_guard_armed() & VMG_RAW_SPU)) {
+            if (want & VMG_RAW_SPU) spu_raw_guard_abandon();
+        }
+        s_raw_guarded = (vm_guard_armed() & VMG_RAW_SPU) != 0;
+        s_raw_guarded_rd = s_raw_guarded;
+        cellGcm_ref_live_set(1);
+        fprintf(stderr, "[lean-mem] lean guest memory: the null page %s, the raw-SPU register windows %s, "
+                        "the gcm ref word live%s\n",
+                (vm_guard_armed() & VMG_NULL_PAGE) ? "read-only (stores dropped)" : "plain",
+                s_raw_guarded ? "guarded" : "plain memory",
+                vm_inline_ok ? "" : "; NOTE a memory diagnostic is armed and sees only out-of-line accesses "
+                                    "(lifted loads are inline in this build)");
+    }
+    if (f & 4) {
+        /* ps3_indirect_call fills the table only on its own fast path (no dispatch diagnostic,
+         * PS3_ICALL_FAST unset) and with the target cache on: else every inline lookup misses */
+        const char* e = getenv("PS3_ICALL_CACHE");
+        s_icall_mod_on = !(e && e[0] == '0');
+        fprintf(stderr, "[lean-mem] indirect calls inline%s\n", s_icall_mod_on ? "" : ": off (PS3_ICALL_CACHE=0)");
+    }
+    if (f & 2) fprintf(stderr, "[lean-mem] no trampoline drains after calls (the runtime drains on its way out)\n");
 }
 
 /* Both, before any guest code runs (ppu_run). */
@@ -2312,6 +2423,7 @@ static void ppu_mem_fast_init(void)
         fprintf(stderr, "[ppu-mem] store page map off (PS3_ST_PMAP=0): every store takes the careful path\n");
     else if (vm_inline_ok)
         spu_coh_pmap_init(0x10000u, hi, tn ? tlo : 0u, tn ? tlo + tn : 0u);
+    ppu_lean_init();
 }
 
 /* The guest address space reservation, with the hot parts in large pages (PS3_LARGE_PAGES;
@@ -2454,6 +2566,9 @@ void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, _
 void vm_write16(uint64_t a, uint16_t v) { barrier_watch_hit((uint32_t)a, v, 2, __builtin_return_address(0)); if (vm_oob((uint32_t)a,2) || vm_null_store((uint32_t)a, v, 2, __builtin_return_address(0))) return;
     v = __builtin_bswap16(v); VM_WRITE_COH(a, &v, 2); }
 void vm_write32(uint64_t a, uint32_t v) { barrier_watch_hit((uint32_t)a, v, 4, __builtin_return_address(0)); if (vm_oob((uint32_t)a,4) || vm_null_store((uint32_t)a, v, 4, __builtin_return_address(0))) return;
+    /* PPU_LEAN_MEM: a guarded raw-SPU register is the guard's: the memory beside the window and
+     * the side effects, once (the plain store below would fault into the guard and run them too) */
+    if (__builtin_expect(s_raw_guarded, 0) && spu_raw_is_reg((uint32_t)a)) { spu_raw_guard_store((uint32_t)a, 4, v); return; }
 #ifdef _WIN32
     /* PT restore: a full-word store of a valid pointer (high byte set) to a
      * previously-truncated slot clears the record (that truncation was transient). */
@@ -2505,14 +2620,10 @@ void flow_lookup_alloc(unsigned int p) {
     else      fprintf(stderr, "[alloc-tag] garbage obj 0x%08X is in NO live alloc -> use-after-free or pool/untracked\n", p);
 }
 
-/* Cross-fragment trampoline pointer (matches the lifted header's TLS decl). constinit: a
- * lift with PPU_TLS_CONSTINIT declares it so, which spares each access clang-cl's TLS
- * init guard; the definition says the same (it is, and always was, constant-initialised). */
-#if defined(__cpp_constinit)
-extern "C" constinit PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*) = nullptr;
-#else
-extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*) = nullptr;
-#endif
+/* Cross-fragment trampoline pointer (the lifted header's TLS decl): a thread-local of the game
+ * module since the split (runtime/game_module/ps3_module_data.c; TLS cannot cross a module
+ * boundary). g_trampoline_fn here is ps3_module_vars.h's (*ps3_tramp_slot()): the calling
+ * thread's slot in the module, cached per thread. */
 
 /* Per-thread active guest context, for the crash handler to report the guest PC
  * (ctx->pc, updated by lifted code at block boundaries) of a host AV. */
@@ -2607,13 +2718,44 @@ static uint64_t g_icache[1u << PPU_ICACHE_BITS];
 static uint32_t g_icache_gen = 0;
 static int g_icache_on = -1;
 static ppu_fn ppu_lookup_slow(uint32_t a);
-static inline const char* ppu_icache_anchor(void) { return (const char*)(void*)&ppu_lookup_slow; }
+/* The offsets are from an anchor INSIDE the game module (slim split, 2026-11-14): its function
+ * table, set by ppu_recomp_register before the first lookup. The lifted functions live in the
+ * module, gigabytes away from the engine's code, so offsets from an engine function (as before)
+ * never fit 32 bits and every virtual call missed this cache: the city ran 8-10% slower. A
+ * function outside +-2 GB of the anchor (an engine override) is simply not cached. */
+static const char* g_icache_anchor_at = (const char*)(void*)&ppu_lookup_slow;   /* (no module: the old anchor) */
+static inline const char* ppu_icache_anchor(void) { return g_icache_anchor_at; }
+/* PPU_ICALL_INLINE (track A, 2026-11-16): the lift's own copy for its inline dispatch
+ * (ppu_icall_inl, tools/ppu_fastpath.py), in the module (one RIP-relative load at a call site).
+ * Same entry format as g_icache, but the empty slot is ~0 (no call has that key: a call to 0 must
+ * miss) and only EBOOT functions (below 0x30000000) are entered: a lifted firmware function can
+ * return with a trampoline pending, which the inline dispatch (no drain) would leave behind.
+ * ps3_indirect_call fills it on its own fast path; whatever empties g_icache empties it too. */
+extern "C" { PS3_MV_DEF(__attribute__((aligned(64))) uint64_t, g_ppu_icall_tbl, [1u << PPU_ICACHE_BITS], ) }
+static void ppu_icall_mod_clear(void)
+{
+    for (uint32_t i = 0; i < (1u << PPU_ICACHE_BITS); i++) __atomic_store_n(&g_ppu_icall_tbl[i], ~0ull, __ATOMIC_RELAXED);
+}
 static void ppu_icache_invalidate(void)
 {
     __atomic_add_fetch(&g_icache_gen, 1, __ATOMIC_SEQ_CST);
     for (uint32_t i = 0; i < (1u << PPU_ICACHE_BITS); i++) __atomic_store_n(&g_icache[i], 0, __ATOMIC_RELAXED);
+    if (s_icall_mod_on) ppu_icall_mod_clear();
 }
-static inline ppu_fn ppu_lookup(uint32_t a)
+static void ppu_icall_mod_fill(uint32_t a, ppu_fn fn)
+{
+    const intptr_t off = (intptr_t)(void*)fn - (intptr_t)ppu_icache_anchor();
+    if (!a || a >= 0x30000000u || off != (intptr_t)(int32_t)off) return;
+    const uint32_t g = __atomic_load_n(&g_icache_gen, __ATOMIC_ACQUIRE);
+    uint64_t* slot = &g_ppu_icall_tbl[(a >> 2) & ((1u << PPU_ICACHE_BITS) - 1)];
+    uint64_t ne = ((uint64_t)a << 32) | (uint32_t)(int32_t)off;
+    __atomic_store_n(slot, ne, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&g_icache_gen, __ATOMIC_SEQ_CST) != g)
+        __atomic_compare_exchange_n(slot, &ne, ~0ull, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
+}
+/* always_inline: the anchor load made clang keep it out of line, an extra call per guest
+ * virtual call (it was inlined into ps3_indirect_call before the split) */
+static inline __attribute__((always_inline)) ppu_fn ppu_lookup(uint32_t a)
 {
     int on = __atomic_load_n(&g_icache_on, __ATOMIC_RELAXED);
     if (__builtin_expect(on < 0, 0)) {
@@ -2772,14 +2914,17 @@ extern "C" int ppu_native_memset(ppu_context* ctx)
  * alternatives picked by g_ppu_patch[slot] (0 = the original) and registers the slots it
  * uses (tools/ppu_fastpath.py). Neither file = nothing registers and these do nothing. */
 #include "../../include/ps3emu/ppu_hooks.h"
-extern "C" { volatile uint8_t g_ppu_patch[256]; }
+extern "C" { PS3_MV_DEF(volatile uint8_t, g_ppu_patch, [256], ) }   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 enum { PPU_HOOK_MAX = 64 };
 static struct { uint32_t addr; ppu_hook_fn volatile* slot; } s_ppu_hooks[PPU_HOOK_MAX];
 static int s_ppu_hook_n;
 static uint8_t s_ppu_patch_lifted[256];
 /* A hook set during static initialisation, before its chunk registered the slot
- * (the order of the TUs' initialisers is the linker's): kept until it does. */
-static struct { uint32_t addr; ppu_hook_fn fn; } s_ppu_hook_pending[16];
+ * (the order of the TUs' initialisers is the linker's): kept until it does. Room for every
+ * hook: with the game module (slim split) the lifted chunks register only when the engine binds
+ * it, after ALL of the engine's initialisers, so every early set waits here (cheats.cpp sets
+ * ~24; the old 16 dropped the [workers] hook, the sixth SPU job worker: city light views -8%). */
+static struct { uint32_t addr; ppu_hook_fn fn; } s_ppu_hook_pending[PPU_HOOK_MAX];
 static int s_ppu_hook_npend;
 /* Static initialisation of the lifted chunks (one thread): no lock. */
 extern "C" int ppu_hook_register(uint32_t addr, ppu_hook_fn volatile* slot)
@@ -2807,10 +2952,12 @@ extern "C" int ppu_hook_set(uint32_t addr, ppu_hook_fn fn)
         if (s_ppu_hooks[i].addr == addr) { __atomic_store_n(s_ppu_hooks[i].slot, fn, __ATOMIC_RELEASE); return 1; }
     int i = 0;                         /* not (yet) registered: remembered for ppu_hook_register */
     while (i < s_ppu_hook_npend && s_ppu_hook_pending[i].addr != addr) i++;
-    if (i < 16) {
+    if (i < PPU_HOOK_MAX) {
         s_ppu_hook_pending[i].addr = addr;
         s_ppu_hook_pending[i].fn = fn;
         if (i == s_ppu_hook_npend) s_ppu_hook_npend++;
+    } else {
+        fprintf(stderr, "[hook] more than %d hooks set before their slots exist: 0x%08X is lost\n", PPU_HOOK_MAX, addr);
     }
     return 0;
 }
@@ -2834,10 +2981,18 @@ extern "C" void ppu_hook_call(ppu_context* ctx, ppu_hook_body body)
 
 /* Bridge the lifter-emitted function_table[] (declared in ppu_recomp.h) into the
  * address->function hash map. The host boot harness calls this once at startup. */
+extern "C" void inf2_dlogic_install(void);   /* libs/game/inf2_dlogic.c */
 extern "C" void ppu_recomp_register(void)
 {
+    if (function_table_count) {   /* the indirect-call cache's anchor: in the module, by its functions */
+        g_icache_anchor_at = (const char*)(void*)function_table;
+        ppu_icache_invalidate();
+    }
     for (uint64_t i = 0; i < function_table_count; i++)
         ppu_register_function(function_table[i].addr, function_table[i].func);
+    /* Track D (libs/game/inf2_dlogic.c): the title's main-thread logic redone natively, through the lift's
+     * hook slots (PS3_D=0: none set). Also keeps that file in the link (the engine is a static library). */
+    inf2_dlogic_install();
     /* Override the mis-lifted optimized memmove with a correct native one. */
     if (getenv("YDKJ_MEMFIX")) {
         ppu_register_function(0x0036FA74u, ydkj_memmove_0036FA74);
@@ -3203,6 +3358,7 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
         const uint32_t addr = g_icall_target_set ? g_icall_target : (uint32_t)ctx->ctr;
         ppu_fn fn;
         if (addr != 0 && g_icall_depth <= 4000 && (fn = ppu_lookup(addr)) != nullptr) {
+            if (s_icall_mod_on && !g_icall_target_set) ppu_icall_mod_fill(addr, fn);   /* the lift's inline table */
             g_active_ctx = ctx;
             g_icall_target_set = 0;
             g_icall_depth++;
@@ -3888,6 +4044,11 @@ extern "C" void lv2_syscall(ppu_context* ctx)
      * sys_timer_usleep only; it used to be rescued by another thread's HLE
      * call, and hung once that thread had nothing left to poll. */
     if ((num == 141 || num == 142) && PPU_GCM_PUMP_LINKED) ppu_gcm_pump();
+    /* PPU_LEAN_MEM (track A): a lean lift's loads of the gcm ref word no longer reach the
+     * out-of-line vm_read32, whose poll (cellGcm_ref_on_poll) published a fence the pacing held back
+     * and woke the FIFO walker. A guest waiting on the ref sleeps between its reads (0x13ACE8:
+     * usleep(5)), so the sleeps and yields do both now (cellGcmSys.c cellGcm_ref_on_sleep). */
+    if ((num == 141 || num == 142 || num == 43) && (s_lean_flags & 1)) cellGcm_ref_on_sleep();
     /* Milestone: which lv2 calls this title makes, in first-occurrence order.
      * Formatting the key each time is noise next to the profiler stamp below,
      * which resolves a host return address to a guest function. */

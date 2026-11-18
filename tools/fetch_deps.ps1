@@ -22,11 +22,11 @@ function Get-RepoZip([string]$Repo, [string]$Tag, [string]$Dir) {
     $zip = Join-Path $deps "$(Split-Path $Dir -Leaf)-$Tag.zip"
     Save-Url "https://codeload.github.com/$Repo/zip/refs/tags/$Tag" $zip "$Repo $Tag"
     $tmp = "$Dir.unpack"
-    foreach ($d in $tmp, $Dir) { if (Test-Path -LiteralPath $d) { cmd /c rd /s /q "$d" | Out-Null } }
+    foreach ($d in $tmp, $Dir) { Remove-Tree $d }
     [IO.Compression.ZipFile]::ExtractToDirectory($zip, $tmp)
     $top = Get-ChildItem -LiteralPath $tmp -Directory | Select-Object -First 1
     Move-Item -LiteralPath $top.FullName $Dir
-    cmd /c rd /s /q "$tmp" | Out-Null
+    Remove-Tree $tmp
     Remove-Item -LiteralPath $zip
     Set-Content -LiteralPath $marker -Value "$Repo $Tag"
     "  $(Split-Path $Dir -Leaf): $Repo $Tag"
@@ -47,7 +47,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $sdl "cmake"))) {
     if ($h -ne "A9ADAB9A570A72D2E4F1565DCF0275B7D9EF7B487E05BA0CF7A7A0F35C79C5E7") {
         Remove-Item -LiteralPath $zip; throw "SDL2 download has the wrong SHA-256 ($h): deleted, run again"
     }
-    if (Test-Path -LiteralPath $sdl) { cmd /c rd /s /q "$sdl" | Out-Null }      # a half-unpacked earlier try
+    Remove-Tree $sdl      # a half-unpacked earlier try
     [IO.Compression.ZipFile]::ExtractToDirectory($zip, $deps)
 } else { "  SDL2-2.30.10: already there" }
 $inc = Join-Path $deps "sdl2-inc\SDL2"

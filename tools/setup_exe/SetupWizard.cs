@@ -1,31 +1,34 @@
-// SetupWizard.cs -- Setup.exe of the inFAMOUS 2 Windows port: one big Install button.
+// SetupWizard.cs -- Setup.exe of the inFAMOUS 2 Windows port (v0.6.0, the slim Setup): one pick, one Install button.
 //
-// Install does everything, asking only what it truly cannot find out:
-//   1. Setup.exe downloaded on its own: the port as one ZIP file from GitHub (no git) into a folder
-//      next to Setup.exe (else %LOCALAPPDATA%\inFAMOUS2-port), then Setup.exe copies itself there.
-//   2. RPCS3 and the game: found on this PC (RPCS3's own game list for the game); a small "Where
-//      is ...?" dialog only when one is not found.
-//   3. The checks of tools\setup_common.ps1; a one-line reason only for what the player must fix
-//      (the PS3 firmware or the 1.04 update missing in RPCS3, a PC that can't run the port).
-//   4. tools\setup_build.ps1 -AcceptMsvcLicense -Cleanup [-Pgo]: it downloads its own build tools into
-//      tools-cache\ (portable: nothing is installed, no admin), builds, and deletes the tools again.
-//      Its lines "== [n/10] <step>" (12 steps with -Pgo), "  progress: <n>% <what>", "== FAILED: <why>"
-//      drive the bar; "  compile log: <file>" names the log whose ninja lines to follow, "  player-note:
-//      <text>" is shown under the bar for that step, "  pgo: used (...)" / "  pgo: not used: <why>" end
-//      the Done line. -Pgo = the "Optimise for this PC" box (on by default, remembered per folder in
-//      work\setup-no-pgo): a training build plays the game by itself for a few minutes (tools\pgo_train.ps1),
-//      then the game is compiled with what it learned; it never makes Setup fail.
-//   5. A big Play button.
-// Pressing Install accepts Microsoft's license for the C++ files (the line under the button says so).
+// The first screen asks for ONE thing: the player's game, as its folder, a disc image (.iso) or a PSN package (.pkg),
+// chosen with a button or dropped on the window (an earlier install's game, or RPCS3's game list, is picked by
+// itself). Setup tells which game it is (version, region, disc or PSN). Install then does everything:
+//   1. Setup.exe downloaded on its own: the port as one ZIP file from GitHub (no git) into a folder next to Setup.exe
+//      (else %LOCALAPPDATA%\inFAMOUS2-port), then Setup.exe copies itself there.
+//   2. The checks of tools\setup_common.ps1; a one-line reason only for what the player must fix. Asked only when
+//      needed: an encrypted disc image's disc key (.dkey), a PSN copy's license (.rap). Their files are only passed
+//      on, by path, to tools\ps3tool.py (a black box).
+//   3. tools\setup_build.ps1 -Source <the pick> -Cleanup [-Pgo]: it downloads the port's own tools (the prebuilt
+//      engine, clang + lld, an embeddable Python: about 48 MB, tools\slim_assets.json), copies or extracts the game
+//      INTO the port's folder (the folder can then be moved or copied anywhere), gets the game's update and the
+//      firmware files from Sony's servers (or RPCS3's copies when it has them: RPCS3 is not needed), builds.
+//      Its lines "== [n/10] <step>" (12 steps with -Pgo), "  progress: <n>% <what>", "== FAILED: <why>",
+//      "  needs: disc-key" / "  needs: rap <id>" drive the bar; "  compile log: <file>" names the log whose
+//      "[k/N]" lines to follow, "  player-note: <text>" is shown under the bar for that step, "  pgo: used (...)" /
+//      "  pgo: not used: <why>" end the Done line. -Pgo = the "Optimise for this PC" box (on by default,
+//      remembered per folder in work\setup-no-pgo); it never makes Setup fail.
+//   4. A big Play button.
+// Nothing is installed on Windows; nothing of Microsoft's is downloaded any more (the engine comes prebuilt).
 //
 // build.cmd compiles it with the C# compiler that ships with Windows (.NET Framework 4.5+, C# 5):
 // no $"", no => members, no ?., no nameof, no out var. Non-ASCII text is written as \u escapes.
 // The port's scripts run as "powershell -ExecutionPolicy RemoteSigned -File <script>" (Util.PowerShellFile).
 //
-// Test switches (README.md): --test-build, --rpcs3 <folder>, --disc <folder> (or --game), --folder <folder>,
-// --no-shortcut, --no-cleanup, --only-cache, --no-pgo, --exit-when-done, --page done|ask; --pgo with --prepare
-// or --update --no-window (they do not train unless asked: the training opens the game's window).
-// The updater (tools\update_check.ps1, F2 > Update in the game): --update --folder <port folder> [--to v0.5.1]
+// Test switches (README.md): --test-build, --rpcs3 <folder>, --no-rpcs3, --disc <folder|.iso|.pkg> (or --game),
+// --disc-key <file>, --rap <file>, --folder <folder>, --no-shortcut, --no-cleanup, --no-pgo, --exit-when-done,
+// --page done|ask; --pgo with --prepare or --update --no-window (they do not train unless asked: the training opens
+// the game's window).
+// The updater (tools\update_check.ps1, F2 > Update in the game): --update --folder <port folder> [--to v0.6.1]
 // = "Update to the latest version" at once, in the window; with --no-window [--dry-run] without one (class Headless).
 
 using System;
@@ -51,9 +54,9 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("inFAMOUS 2 Native PC Port (unofficial fan project)")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Sami Enazi. MIT license.")]
 [assembly: AssemblyTrademark("inFAMOUS is a trademark of Sony Interactive Entertainment LLC. Not affiliated with Sony or Sucker Punch.")]
-[assembly: AssemblyVersion("0.5.7.0")]
-[assembly: AssemblyFileVersion("0.5.7.0")]
-[assembly: AssemblyInformationalVersion("0.5.7")]
+[assembly: AssemblyVersion("0.6.1.0")]
+[assembly: AssemblyFileVersion("0.6.1.0")]
+[assembly: AssemblyInformationalVersion("0.6.1")]
 
 namespace Inf2Setup
 {
@@ -131,7 +134,9 @@ namespace Inf2Setup
         public bool Prepare, Play, DryRun;
         public List<string> PlayArgs = new List<string>();   // after --play: play.ps1's own options
         public string Page, Disc, Rpcs3, Folder;
+        public string DiscKey, Rap;      // --disc-key <file> (an encrypted .iso), --rap <file> (a PSN copy's license)
         public bool TestBuild, NoShortcut, ExitWhenDone, NoCleanup, OnlyCache, TestFailBuild;
+        public bool NoRpcs3;             // --no-rpcs3 (or PORT_SETUP_NO_RPCS3=1): RPCS3 is not looked for, nor used
         public bool NoPgo, Pgo;          // the window's "Optimise for this PC" box off; --prepare / --no-window with it
         public bool Update, NoWindow;    // --update [--no-window]: the newest port over --folder (the updater)
         public string To;                // --to v0.5.1: the version the update brings (only shown)
@@ -139,6 +144,7 @@ namespace Inf2Setup
         public static Opts Parse(string[] a)
         {
             Opts o = new Opts();
+            o.NoRpcs3 = Environment.GetEnvironmentVariable("PORT_SETUP_NO_RPCS3") == "1";
             for (int i = 0; i < a.Length; i++)
             {
                 string k = a[i].ToLowerInvariant();
@@ -159,6 +165,9 @@ namespace Inf2Setup
                     case "--disc":
                     case "--game": o.Disc = v; i++; break;   // --game: the name launchers and the Recomp Standards use
                     case "--rpcs3": o.Rpcs3 = v; i++; break;
+                    case "--disc-key": o.DiscKey = v; i++; break;
+                    case "--rap": o.Rap = v; i++; break;
+                    case "--no-rpcs3": o.NoRpcs3 = true; break;
                     case "--folder": o.Folder = v; i++; break;
                     case "--test-build": o.TestBuild = true; break;
                     case "--no-shortcut": o.NoShortcut = true; break;
@@ -440,7 +449,10 @@ namespace Inf2Setup
         // One command-line argument, quoted the way Windows splits them again.
         public static string Arg(string s)
         {
-            if (s.Length > 0 && s.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) return s;
+            bool plain = s.Length > 0;
+            foreach (char ch in s)
+                if (!(ch < 128 && (char.IsLetterOrDigit(ch) || "\\/:._-".IndexOf(ch) >= 0))) { plain = false; break; }
+            if (plain) return s;
             StringBuilder b = new StringBuilder("\"");
             int bs = 0;
             foreach (char c in s)
@@ -471,6 +483,21 @@ namespace Inf2Setup
 
         // The port with its engine and port base, folders of the one repository since v0.5.0 (a finished
         // download or a git clone).
+        // Directory.Move, tried again for up to 30 s: a virus scanner (or Windows Search) still reading a file that
+        // was just unpacked makes the move fail with "Access to the path is denied" for a moment.
+        public static void MoveDir(string src, string dst)
+        {
+            for (int i = 0; ; i++)
+            {
+                try { Directory.Move(src, dst); return; }
+                catch (Exception ex)
+                {
+                    if (!(ex is IOException || ex is UnauthorizedAccessException) || i >= 60 || Directory.Exists(dst)) throw;
+                    Thread.Sleep(500);
+                }
+            }
+        }
+
         public static bool PortComplete(string dir)
         {
             try
@@ -490,7 +517,7 @@ namespace Inf2Setup
             string sys = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
             if (string.IsNullOrEmpty(sys)) sys = "C:\\";
             foreach (string c in new string[] { Path.Combine(exeDir, "inFAMOUS2-port"), Path.Combine(local, "inFAMOUS2-port"), Path.Combine(sys, "inFAMOUS2-port") })
-                if (HasPort(c) && CanLink(c)) return c;   // one on a drive that cannot link never finished
+                if (HasPort(c) && CanInstall(c)) return c;
             return null;
         }
 
@@ -644,13 +671,11 @@ namespace Inf2Setup
             catch (Exception) { return false; }
         }
 
-        // The drive of `path` can hold the junction Setup makes (game\disc -> the player's game folder):
-        // a local NTFS or ReFS drive. FAT32/exFAT (USB sticks, many external disks) and network drives
-        // cannot, and Windows then fails with "Incorrect function" at the start of the build (GitHub
-        // issue #2: Setup.exe on such a drive stopped at 23%).
-        public static bool CanLink(string path)
+        // A drive the port can be installed on (v0.6.0: the port's folder holds its own copy of the game, no link out,
+        // so any local drive; a network drive is too slow for the build).
+        public static bool CanInstall(string path)
         {
-            return DriveProblem(path) == null;
+            return DriveProblem(path) != "a network drive";
         }
         // null when the drive is fine, else what it is ("exFAT", "FAT32", "a network drive", ...).
         public static string DriveProblem(string path)
@@ -674,7 +699,7 @@ namespace Inf2Setup
         {
             string p = DriveProblem(exeDir);
             if (p == null || string.Equals(Path.GetFullPath(target), Path.GetFullPath(Path.Combine(exeDir, "inFAMOUS2-port")), StringComparison.OrdinalIgnoreCase)) return null;
-            return "Setup.exe is on " + p + ", which cannot hold the link to your game folder (that needs a local NTFS drive): installing into " + target + " instead.";
+            return "Setup.exe is on " + p + ": installing into " + target + " instead.";
         }
 
         // Where a downloaded-alone Setup.exe puts the game: next to itself, else in the user's local
@@ -687,16 +712,16 @@ namespace Inf2Setup
             string sys = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
             if (string.IsNullOrEmpty(sys)) sys = "C:\\";
             string[] cands = { Path.Combine(exeDir, "inFAMOUS2-port"), Path.Combine(local, "inFAMOUS2-port"), Path.Combine(sys, "inFAMOUS2-port") };
-            foreach (string c in cands) if (HasPort(c) && CanLink(c)) return c;
+            foreach (string c in cands) if (HasPort(c) && CanInstall(c)) return c;
             foreach (string c in cands)
             {
                 try
                 {
                     if (!IsAscii(c)) continue;
-                    if (!CanLink(c)) continue;
+                    if (!CanInstall(c)) continue;
                     if (Directory.Exists(c) && !EmptyDir(c)) continue;
                     DriveInfo di = new DriveInfo(Path.GetPathRoot(c));
-                    if (!di.IsReady || di.AvailableFreeSpace < (15L << 30)) continue;
+                    if (!di.IsReady || di.AvailableFreeSpace < (20L << 30)) continue;   // the game's copy (~9 GB) and the build
                     string parent = Path.GetDirectoryName(c);
                     Directory.CreateDirectory(parent);
                     string probe = Path.Combine(parent, ".inf2-setup-probe");
@@ -787,9 +812,112 @@ namespace Inf2Setup
             return null;
         }
 
+        // A game folder: a disc copy (PS3_GAME\PARAM.SFO) or a digital (PSN) one, which has no PS3_GAME: its title folder
+        // (NPUA80638, NPEA00318) holds PARAM.SFO and USRDIR\EBOOT.BIN, in RPCS3's dev_hdd0\game or wherever the player
+        // copied it (GitHub #40: Setup only took the disc layout).
         public static bool IsDisc(string d)
         {
-            try { return !string.IsNullOrEmpty(d) && File.Exists(Path.Combine(d, "PS3_GAME\\PARAM.SFO")); } catch (Exception) { return false; }
+            try { return !string.IsNullOrEmpty(d) && (File.Exists(Path.Combine(d, "PS3_GAME\\PARAM.SFO")) || IsDigital(d)); } catch (Exception) { return false; }
+        }
+
+        public static bool IsDigital(string d)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(d) || !File.Exists(Path.Combine(d, "USRDIR\\EBOOT.BIN"))) return false;
+                string id = SfoTitleId(Path.Combine(d, "PARAM.SFO"));
+                return id != null && id.StartsWith("NP", StringComparison.Ordinal);
+            }
+            catch (Exception) { return false; }
+        }
+
+        // Why a folder is not a game, for a message: a PSN title folder (it has USRDIR\EBOOT.BIN) whose PARAM.SFO is
+        // missing, empty or another game's gets its own sentence, anything else the general one.
+        public static string NotGameWhy(string d)
+        {
+            string gen = "no PS3_GAME folder in it, and not a PSN game folder (PARAM.SFO + USRDIR\\EBOOT.BIN)";
+            try
+            {
+                if (string.IsNullOrEmpty(d) || !File.Exists(Path.Combine(d, "USRDIR\\EBOOT.BIN"))) return gen;
+                string id = SfoTitleId(Path.Combine(d, "PARAM.SFO"));
+                if (id == null) return "it looks like a PSN game folder (it has USRDIR\\EBOOT.BIN) but its PARAM.SFO is missing or not readable: copy the whole folder from RPCS3's dev_hdd0\\game again";
+                return "its PARAM.SFO is for " + id + ", not for the PSN version of inFAMOUS 2 (NPUA80638 / NPEA00318)";
+            }
+            catch (Exception) { return gen; }
+        }
+
+        // PARAM.SFO's TITLE_ID, or null (the format: tools\setup_common.ps1 Read-Sfo)
+        public static string SfoTitleId(string sfo)
+        {
+            try
+            {
+                if (!File.Exists(sfo)) return null;
+                byte[] b = File.ReadAllBytes(sfo);
+                if (b.Length < 20 || b[1] != 0x50 || b[2] != 0x53 || b[3] != 0x46) return null;
+                int keys = BitConverter.ToInt32(b, 8), data = BitConverter.ToInt32(b, 12), n = BitConverter.ToInt32(b, 16);
+                for (int i = 0; i < n && 20 + 16 * i + 16 <= b.Length; i++)
+                {
+                    int e = 20 + 16 * i, k = keys + BitConverter.ToUInt16(b, e), end = k;
+                    while (end < b.Length && b[end] != 0) end++;
+                    if (Encoding.ASCII.GetString(b, k, end - k) != "TITLE_ID") continue;
+                    int len = BitConverter.ToInt32(b, e + 4), off = data + BitConverter.ToInt32(b, e + 12);
+                    if (off < 0 || off + len > b.Length) return null;
+                    return Encoding.UTF8.GetString(b, off, len).TrimEnd('\0');
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        // One of RPCS3's PS3 folders (dev_hdd0, dev_flash): where config\vfs.yml puts it (RPCS3 lets the player
+        // move them), else <RPCS3>\<name>. null when rpcs3 is not RPCS3's folder.
+        public static string Rpcs3Dir(string rpcs3, string name)
+        {
+            if (!IsRpcs3(rpcs3)) return null;
+            string dir = Path.Combine(rpcs3, name);
+            try
+            {
+                foreach (string y in new string[] { Path.Combine(rpcs3, "config\\vfs.yml"), Path.Combine(rpcs3, "vfs.yml") })
+                {
+                    if (!File.Exists(y)) continue;
+                    string emu = "", val = null;
+                    foreach (string raw in File.ReadAllLines(y))
+                    {
+                        int c = raw.IndexOf(": ", StringComparison.Ordinal);
+                        if (c <= 0) continue;
+                        string k = raw.Substring(0, c).Trim().Trim('"'), v = raw.Substring(c + 2).Trim().Trim('"');
+                        if (k == "$(EmulatorDir)") emu = v;
+                        else if (k.Trim('/') == name) val = v;
+                    }
+                    if (!string.IsNullOrEmpty(val))
+                    {
+                        string v = val.Replace("$(EmulatorDir)", emu.Length > 0 ? emu : rpcs3 + "\\").Replace('/', '\\').TrimEnd('\\');
+                        if (!Path.IsPathRooted(v)) v = Path.Combine(rpcs3, v);
+                        if (Directory.Exists(v)) dir = v;
+                    }
+                    break;
+                }
+            }
+            catch (Exception) { }
+            return dir;
+        }
+
+        // RPCS3's folder when the game folder is in one (...\dev_hdd0\game\<ID>): for a PSN copy, that RPCS3 has its
+        // license, so Setup uses it to unlock the game's code. Else null.
+        public static string Rpcs3OfGame(string disc)
+        {
+            try
+            {
+                string d = Path.GetFullPath(disc).TrimEnd('\\'), g = Path.GetDirectoryName(d), h = Path.GetDirectoryName(g);
+                if (string.Equals(Path.GetFileName(g), "game", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(Path.GetFileName(h), "dev_hdd0", StringComparison.OrdinalIgnoreCase))
+                {
+                    string r = Path.GetDirectoryName(h);
+                    if (IsRpcs3(r)) return r;
+                }
+            }
+            catch (Exception) { }
+            return null;
         }
 
         // The disc folder from RPCS3's game list: config\games.yml, lines like "BCES01143: <folder>/".
@@ -799,9 +927,8 @@ namespace Inf2Setup
             {
                 if (string.IsNullOrEmpty(rpcs3)) return null;
                 string yml = Path.Combine(rpcs3, "config\\games.yml");
-                if (!File.Exists(yml)) return null;
                 Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (string raw in File.ReadAllLines(yml))
+                foreach (string raw in File.Exists(yml) ? File.ReadAllLines(yml) : new string[0])
                 {
                     int c = raw.IndexOf(':');
                     if (c <= 0) continue;
@@ -820,10 +947,19 @@ namespace Inf2Setup
                 }
             }
             catch (Exception) { }
+            try
+            {
+                string hdd = Rpcs3Dir(rpcs3, "dev_hdd0");
+                if (hdd != null)
+                    foreach (string id in Titles)
+                        if (id.StartsWith("NP", StringComparison.Ordinal) && IsDigital(Path.Combine(hdd, "game\\" + id))) return Path.Combine(hdd, "game\\" + id);
+            }
+            catch (Exception) { }
             return null;
         }
 
-        // Forgiving game-folder pick: the PS3_GAME folder itself, or the folder one level above the disc.
+        // Forgiving game-folder pick: the PS3_GAME folder itself, the folder one level above the disc or the PSN title
+        // folder (e.g. RPCS3's dev_hdd0\game), or RPCS3's own folder.
         public static string NormalizeDisc(string p)
         {
             if (string.IsNullOrEmpty(p)) return p;
@@ -834,11 +970,28 @@ namespace Inf2Setup
                 if (IsDisc(p)) return p;
                 foreach (string id in Titles)
                     if (IsDisc(Path.Combine(p, id))) return Path.Combine(p, id);
+                string hdd = Rpcs3Dir(p, "dev_hdd0");
+                if (hdd != null)
+                    foreach (string id in Titles)
+                        if (IsDigital(Path.Combine(hdd, "game\\" + id))) return Path.Combine(hdd, "game\\" + id);
                 foreach (string d in Directory.GetDirectories(p))
                     if (IsDisc(d)) return d;
             }
             catch (Exception) { }
             return p;
+        }
+
+        // The one pick: a game folder (IsDisc), or a disc image / PSN package file
+        public static bool IsSource(string p)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(p)) return false;
+                if (Directory.Exists(p)) return IsDisc(p);
+                string x = Path.GetExtension(p).ToLowerInvariant();
+                return File.Exists(p) && (x == ".iso" || x == ".pkg");
+            }
+            catch (Exception) { return false; }
         }
 
         public static bool IsAscii(string s)
@@ -936,6 +1089,184 @@ namespace Inf2Setup
         }
     }
 
+    // ------------------------------------------------------------------ the one pick
+
+    // What the player picked, told in one line before anything is downloaded: a game folder (disc or PSN), a disc
+    // image (.iso: its PARAM.SFO read with a small ISO 9660 reader, the same as tools\game_source.py's), a PSN
+    // package (.pkg: the content id in its header). Setup's scripts check it again, properly.
+    sealed class Pick
+    {
+        public string Path, Kind = "", Title = "", Text = "";
+        public bool Ok, Encrypted;
+    }
+
+    static class GameSniff
+    {
+        static string Where(string id)
+        {
+            switch (id)
+            {
+                case "BCES01143": case "BCES01144": return "Europe disc";
+                case "BCES01229": return "Turkey disc";
+                case "BCUS98125": return "USA disc";
+                case "NPUA80638": return "USA, PSN";
+                case "NPEA00318": return "Europe, PSN";
+            }
+            return null;
+        }
+
+        // a PARAM.SFO value, or null
+        public static string Sfo(byte[] b, string key)
+        {
+            try
+            {
+                if (b == null || b.Length < 20 || b[1] != 0x50 || b[2] != 0x53 || b[3] != 0x46) return null;
+                int keys = BitConverter.ToInt32(b, 8), data = BitConverter.ToInt32(b, 12), n = BitConverter.ToInt32(b, 16);
+                for (int i = 0; i < n && 20 + 16 * i + 16 <= b.Length; i++)
+                {
+                    int e = 20 + 16 * i, k = keys + BitConverter.ToUInt16(b, e), end = k;
+                    while (end < b.Length && b[end] != 0) end++;
+                    if (Encoding.ASCII.GetString(b, k, end - k) != key) continue;
+                    int len = BitConverter.ToInt32(b, e + 4), off = data + BitConverter.ToInt32(b, e + 12);
+                    if (off < 0 || off + len > b.Length) return null;
+                    return Encoding.UTF8.GetString(b, off, len).TrimEnd('\0');
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        static byte[] Read(FileStream f, long off, int n)
+        {
+            byte[] b = new byte[n];
+            f.Seek(off, SeekOrigin.Begin);
+            int got = 0, r;
+            while (got < n && (r = f.Read(b, got, n - got)) > 0) got += r;
+            if (got == n) return b;
+            byte[] c = new byte[got];
+            Array.Copy(b, c, got);
+            return c;
+        }
+
+        // the first bytes of rel ("PS3_GAME/PARAM.SFO") in an ISO 9660 image (its Joliet names when it has them), or null
+        public static byte[] IsoHead(string iso, string rel, int max)
+        {
+            using (FileStream f = new FileStream(iso, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                long lba = -1, size = 0;
+                bool joliet = false;
+                for (int s = 16; s < 64; s++)
+                {
+                    byte[] d = Read(f, s * 2048L, 2048);
+                    if (d.Length < 2048 || Encoding.ASCII.GetString(d, 1, 5) != "CD001" || d[0] == 255) break;
+                    if (d[0] == 1 && lba < 0) { lba = BitConverter.ToUInt32(d, 158); size = BitConverter.ToUInt32(d, 166); }
+                    else if (d[0] == 2 && d[88] == 0x25 && d[89] == 0x2F && (d[90] == 0x40 || d[90] == 0x43 || d[90] == 0x45))
+                    { lba = BitConverter.ToUInt32(d, 158); size = BitConverter.ToUInt32(d, 166); joliet = true; }
+                }
+                if (lba < 0) return null;
+                string[] parts = rel.Split('/');
+                bool dir = true;
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    if (!dir) return null;
+                    byte[] data = Read(f, lba * 2048L, (int)Math.Min(size, 4 << 20));
+                    int pos = 0;
+                    bool hit = false;
+                    while (pos < data.Length)
+                    {
+                        int ln = data[pos];
+                        if (ln == 0) { pos = (pos / 2048 + 1) * 2048; continue; }
+                        if (pos + 33 > data.Length) break;
+                        int nl = data[pos + 32];
+                        string name = joliet ? Encoding.BigEndianUnicode.GetString(data, pos + 33, nl) : Encoding.ASCII.GetString(data, pos + 33, nl);
+                        int sc = name.IndexOf(';');
+                        if (sc >= 0) name = name.Substring(0, sc);
+                        name = name.TrimEnd('.');
+                        if (string.Equals(name, parts[i], StringComparison.OrdinalIgnoreCase))
+                        {
+                            lba = BitConverter.ToUInt32(data, pos + 2); size = BitConverter.ToUInt32(data, pos + 10);
+                            dir = (data[pos + 25] & 2) != 0;
+                            hit = true;
+                            break;
+                        }
+                        pos += ln;
+                    }
+                    if (!hit) return null;
+                }
+                if (dir) return null;
+                return Read(f, lba * 2048L, (int)Math.Min(size, max));
+            }
+        }
+
+        static Pick Told(Pick p, byte[] sfo, string kind)
+        {
+            p.Title = Sfo(sfo, "TITLE_ID") ?? "";
+            string where = Where(p.Title), name = Sfo(sfo, "TITLE") ?? "", ver = Sfo(sfo, "APP_VER") ?? "";
+            if (where == null) { p.Text = "That is " + (name.Length > 0 ? name : "another game") + " [" + p.Title + "], not inFAMOUS 2."; return p; }
+            p.Ok = true;
+            p.Text = (name.Length > 0 ? name : "inFAMOUS 2") + " \u00b7 " + where + " " + p.Title + (ver.Length > 0 ? " " + ver : "") + " \u00b7 " + kind;
+            return p;
+        }
+
+        public static Pick Look(string path)
+        {
+            Pick p = new Pick();
+            p.Path = path;
+            try
+            {
+                if (string.IsNullOrEmpty(path)) { p.Text = ""; return p; }
+                if (Directory.Exists(path))
+                {
+                    string d = Util.NormalizeDisc(path);
+                    p.Path = d; p.Kind = "folder";
+                    if (!Util.IsDisc(d))
+                    {
+                        string iso = null;
+                        try
+                        {
+                            foreach (string f in Directory.GetFiles(path))
+                            {
+                                string x = System.IO.Path.GetExtension(f).ToLowerInvariant();
+                                if (x == ".iso" || x == ".pkg") { iso = f; break; }
+                            }
+                        }
+                        catch (Exception) { }
+                        if (iso != null) return Look(iso);
+                        p.Text = "No game in that folder: " + Util.NotGameWhy(d) + ".";
+                        return p;
+                    }
+                    bool psn = Util.IsDigital(d);
+                    string sfo = File.Exists(System.IO.Path.Combine(d, "PS3_GAME\\PARAM.SFO")) ? System.IO.Path.Combine(d, "PS3_GAME\\PARAM.SFO") : System.IO.Path.Combine(d, "PARAM.SFO");
+                    return Told(p, File.ReadAllBytes(sfo), psn ? "the PSN version's folder" : "a game folder");
+                }
+                if (!File.Exists(path)) { p.Text = "That file or folder is not there."; return p; }
+                byte[] h = new byte[0x60];
+                using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) f.Read(h, 0, h.Length);
+                if (h[0] == 0x7F && h[1] == (byte)'P' && h[2] == (byte)'K' && h[3] == (byte)'G')
+                {
+                    p.Kind = "pkg"; p.Encrypted = true;
+                    string cid = Encoding.ASCII.GetString(h, 0x30, 0x24).TrimEnd('\0');
+                    p.Title = cid.Length >= 16 ? cid.Substring(7, 9) : "";
+                    string where = Where(p.Title);
+                    if (where == null) { p.Text = "That package is " + cid + ", not inFAMOUS 2."; return p; }
+                    if (p.Title.StartsWith("BC", StringComparison.Ordinal)) { p.Text = "That is an update or DLC package of the disc version, not the game. Choose your game instead: Setup gets the updates by itself, and takes DLC from RPCS3 (install the package there) or from the port's dlc folder."; return p; }
+                    p.Ok = true;
+                    p.Text = "inFAMOUS 2 \u00b7 " + where + " " + p.Title + " \u00b7 a .pkg package (your license, the .rap file, is asked for if it is not beside it)";
+                    return p;
+                }
+                p.Kind = "iso";
+                byte[] s = IsoHead(path, "PS3_GAME/PARAM.SFO", 65536);
+                if (s == null) { p.Text = "That is not a PS3 game disc image (no PS3_GAME\\PARAM.SFO in it)."; return p; }
+                byte[] core = IsoHead(path, "PS3_GAME/USRDIR/cache/psarc/core.psarc", 4);
+                p.Encrypted = Sfo(s, "TITLE_ID") == null || (core != null && Encoding.ASCII.GetString(core) != "PSAR");
+                if (Sfo(s, "TITLE_ID") == null) { p.Ok = true; p.Text = "An encrypted disc image: its disc key (a .dkey or .ird file) is asked for if it is not beside the image"; return p; }
+                Told(p, s, p.Encrypted ? "an encrypted disc image (its disc key, a .dkey or .ird file, is asked for if it is not beside the image)" : "a disc image");
+            }
+            catch (Exception ex) { p.Text = "Setup can't read that: " + ex.Message; }
+            return p;
+        }
+    }
+
     // ------------------------------------------------------------------ the checks
 
     sealed class Row
@@ -954,18 +1285,20 @@ namespace Inf2Setup
 
         // Get-SetupChecks of tools\setup_common.ps1, as JSON (tools\setup_checks.ps1), in a hidden PowerShell.
         // Scripts refused for the "downloaded" mark: the port folder is unblocked and the checks run once more.
-        public static List<Row> Run(string repo, string disc, string rpcs3, out string error)
+        public static List<Row> Run(string repo, string disc, string rpcs3, out string error) { return Run(repo, disc, rpcs3, null, null, out error); }
+
+        public static List<Row> Run(string repo, string disc, string rpcs3, string discKey, string rap, out string error)
         {
-            List<Row> rows = RunOnce(repo, disc, rpcs3, out error);
+            List<Row> rows = RunOnce(repo, disc, rpcs3, discKey, rap, out error);
             if (Blocked)
             {
                 int n = Util.UnblockTree(repo);
-                if (n > 0) { Unblocked += n; rows = RunOnce(repo, disc, rpcs3, out error); }
+                if (n > 0) { Unblocked += n; rows = RunOnce(repo, disc, rpcs3, discKey, rap, out error); }
             }
             return rows;
         }
 
-        static List<Row> RunOnce(string repo, string disc, string rpcs3, out string error)
+        static List<Row> RunOnce(string repo, string disc, string rpcs3, string discKey, string rap, out string error)
         {
             error = null;
             Blocked = false;
@@ -975,8 +1308,11 @@ namespace Inf2Setup
                 string checks = Path.Combine(repo, "tools\\setup_checks.ps1");
                 if (!File.Exists(checks)) { error = "tools\\setup_checks.ps1 is missing in " + repo; return rows; }
                 string so, se;
+                // no -Rpcs3 without one: Windows PowerShell 5.1 drops an empty argument after -File ("Missing an argument")
                 int code = Util.Capture(Util.PowerShellExe(), Util.PowerShellFile(checks, false) + " -Disc " + Util.Arg(disc ?? "") +
-                                        " -Rpcs3 " + Util.Arg(rpcs3 ?? ""), repo, 180000, out so, out se);
+                                        (string.IsNullOrEmpty(rpcs3) ? "" : " -Rpcs3 " + Util.Arg(rpcs3)) +
+                                        (string.IsNullOrEmpty(discKey) ? "" : " -DiscKey " + Util.Arg(discKey)) +
+                                        (string.IsNullOrEmpty(rap) ? "" : " -Rap " + Util.Arg(rap)), repo, 180000, out so, out se);
                 int a = so.IndexOf('['), b = so.IndexOf('{');
                 int start = a >= 0 && (b < 0 || a < b) ? a : b;
                 if (start < 0)
@@ -1221,7 +1557,7 @@ namespace Inf2Setup
                         else
                         {
                             if (Directory.Exists(have)) Directory.Delete(have);
-                            Directory.Move(fresh, have);
+                            Util.MoveDir(fresh, have);
                         }
                         Say("  " + s + "\\: replaced whole");
                     }
@@ -1234,7 +1570,7 @@ namespace Inf2Setup
             }
             if (Directory.Exists(dest)) Directory.Delete(dest);             // empty
             Directory.CreateDirectory(Path.GetDirectoryName(dest.TrimEnd('\\')));
-            Directory.Move(tmp, dest);
+            Util.MoveDir(tmp, dest);
             File.Delete(zip);
             Say("  " + what + ": " + repo + " " + sha.Substring(0, 7));
         }
@@ -1283,8 +1619,8 @@ namespace Inf2Setup
             Retime(tmp, dest);
             string old = dest.TrimEnd('\\') + ".old";
             Util.DeleteTree(old);
-            Directory.Move(dest, old);
-            Directory.Move(tmp, dest);
+            Util.MoveDir(dest, old);
+            Util.MoveDir(tmp, dest);
             try { Util.DeleteTree(old); } catch (Exception ex) { Say("  could not delete " + old + ": " + ex.Message); }
         }
 
@@ -1428,9 +1764,9 @@ namespace Inf2Setup
         }
     }
 
-    // Before Setup builds over an existing install: the player's saves, input.toml, config.local.json and
-    // the game as it is now (exe + SDL2.dll), copied to %LOCALAPPDATA%\inFAMOUS2-port\save-backups\<time>
-    // (not %TEMP%, which Windows may clean). The newest 3 backups are kept. Afterwards, built or not, the
+    // Before Setup builds over an existing install: the player's saves, input.toml, config.local.json, settings.ini
+    // and the game as it is now (the engine + SDL2.dll + the game module), copied to saves-backup\setup-<time> in the
+    // port's own folder (v0.6.0: nothing outside it). The newest 3 of these are kept. Afterwards, built or not, the
     // saves are copied back, and the old game too if the new one was not built.
     sealed class SaveBackup
     {
@@ -1438,26 +1774,26 @@ namespace Inf2Setup
         public readonly int Files;
         readonly string repo;
         readonly DateTime takenUtc;
-        static readonly string[] GameFiles = { "Infamous2Recomp.exe", "SDL2.dll" };
+        static readonly string[] GameFiles = { "Infamous2Recomp.exe", "SDL2.dll", "Infamous2Game.dll" };
 
         static string SaveDir(string repo) { return Path.Combine(repo, "game\\gamedata\\dev_hdd0\\home\\00000001\\savedata"); }
         static string BuildDir(string repo) { return Path.Combine(repo, "work\\port\\build"); }
 
-        public static string Root()
+        public static string Root(string repo)
         {
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "inFAMOUS2-port\\save-backups");
+            return Path.Combine(repo, "saves-backup");
         }
 
         public SaveBackup(string repo)
         {
             this.repo = repo;
             takenUtc = DateTime.UtcNow;
-            string root = Root(), name = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            string root = Root(repo), name = "setup-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
             Dir = Path.Combine(root, name);
             for (int i = 2; Directory.Exists(Dir); i++) Dir = Path.Combine(root, name + "-" + i);
             Directory.CreateDirectory(Dir);
             Files = Util.CopyTree(SaveDir(repo), Path.Combine(Dir, "savedata"));
-            foreach (string f in new string[] { "input.toml", "config.local.json" })
+            foreach (string f in new string[] { "input.toml", "config.local.json", "settings.ini", "mods.ini", "spots.ini" })
             {
                 string p = Path.Combine(repo, f);
                 if (File.Exists(p)) { File.Copy(p, Path.Combine(Dir, f), true); Files++; }
@@ -1469,8 +1805,8 @@ namespace Inf2Setup
                 Directory.CreateDirectory(Path.Combine(Dir, "game"));
                 File.Copy(p, Path.Combine(Dir, "game\\" + f), true);
             }
-            // the newest 3 backups stay
-            List<string> all = new List<string>(Directory.GetDirectories(root));
+            // the newest 3 of Setup's backups stay (play.ps1's own, saves-backup\<time>, are its business)
+            List<string> all = new List<string>(Directory.GetDirectories(root, "setup-*"));
             all.Sort(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < all.Count - 3; i++) { try { Util.DeleteTree(all[i]); } catch (Exception) { } }
         }
@@ -1517,7 +1853,7 @@ namespace Inf2Setup
                     if (ti.Exists) back++; else added++;
                 }
             }
-            foreach (string f in new string[] { "input.toml", "config.local.json" })
+            foreach (string f in new string[] { "input.toml", "config.local.json", "settings.ini", "mods.ini", "spots.ini" })
             {
                 string b = Path.Combine(Dir, f), live = Path.Combine(repo, f);
                 if (File.Exists(b) && !File.Exists(live)) { File.Copy(b, live); added++; }
@@ -1535,7 +1871,7 @@ namespace Inf2Setup
     //     is the shortcut), without "Optimise for this PC" (its training run opens the game's window, and each
     //     launcher install is a new folder, so there is no earlier training to reuse): --pgo adds -Pgo
     //     (12 steps; the same exit codes and progress lines, "Training the build on your PC" while it plays).
-    //     RPCS3 is found the way Install finds it. No window: "progress <0..1> <text>" lines on stdout, the
+    //     RPCS3 is optional, found the way Install finds it (--no-rpcs3: not used). No window: "progress <0..1> <text>" lines on stdout, the
     //     whole log in play\setup.log. --dry-run stops before the build (nothing is written but the log).
     //   Setup.exe --play [play.ps1's options]
     //     Play: tools\play.ps1 without a console window (-Fullscreen added in Big Picture mode). Its lines go
@@ -1546,7 +1882,7 @@ namespace Inf2Setup
     {
         public const int Busy = 69, NoPort = 70, NotGameFolder = 71, NotThisGame = 72, NoRpcs3 = 73, NoFirmware = 74,
                          NoUpdate = 75, Rpcs3Open = 76, PcCannot = 77, BadDrive = 78, BuildFailed = 79,
-                         NotBuilt = 80, PlayFailed = 82, ScriptsBlocked = 83;
+                         NotBuilt = 80, PlayFailed = 82, ScriptsBlocked = 83, NeedsDiscKey = 84, NeedsLicense = 85;
 
         static StreamWriter stdout, stderr, log;
         static double lastFrac;
@@ -1633,24 +1969,33 @@ namespace Inf2Setup
             {
                 if (!first) return Stop(Busy, "Setup is already running in " + dir);
                 if (!Util.PortComplete(dir)) return Stop(NoPort, "the port's files are not next to Setup.exe in " + dir);
-                string disc = Util.NormalizeDisc(opt.Disc);
-                if (!Util.IsDisc(disc)) return Stop(NotGameFolder, "no PS3_GAME\\PARAM.SFO in " + (opt.Disc ?? "(no --disc given)"));
-                string rpcs3 = string.IsNullOrEmpty(opt.Rpcs3) ? Util.FindRpcs3(dir, dir) : opt.Rpcs3;
-                if (rpcs3 == null || !File.Exists(Path.Combine(rpcs3, "rpcs3.exe"))) return Stop(NoRpcs3, "RPCS3 was not found on this PC");
-                Log("RPCS3: " + rpcs3);
+                // the one pick: a game folder, a disc image (.iso) or a PSN package (.pkg)
+                string disc = !string.IsNullOrEmpty(opt.Disc) && File.Exists(opt.Disc) ? Path.GetFullPath(opt.Disc) : Util.NormalizeDisc(opt.Disc);
+                if (!Util.IsSource(disc)) return Stop(NotGameFolder, "no game in " + (opt.Disc ?? "(no --game given)") + ": " + Util.NotGameWhy(disc) + " (or give an .iso or a .pkg file)");
+                // RPCS3 is optional: its update and firmware files are copied when it has them, else Sony's servers. A PSN
+                // copy inside an RPCS3 folder: that RPCS3 holds its license (GitHub #40)
+                string rpcs3 = opt.NoRpcs3 ? null : string.IsNullOrEmpty(opt.Rpcs3) ? (Util.Rpcs3OfGame(disc) ?? Util.FindRpcs3(dir, dir)) : opt.Rpcs3;
+                if (rpcs3 != null && !File.Exists(Path.Combine(rpcs3, "rpcs3.exe"))) rpcs3 = null;
+                Log("RPCS3: " + (rpcs3 ?? "not used (the game's update and the firmware files come from Sony's servers)"));
                 Log("game: " + disc);
                 string err;
                 int before = Checker.Unblocked;
-                List<Row> rows = Checker.Run(dir, disc, rpcs3, out err);
+                List<Row> rows = Checker.Run(dir, disc, rpcs3, opt.DiscKey, opt.Rap, out err);
                 if (Checker.Unblocked > before) Log("unblocked " + (Checker.Unblocked - before) + " files Windows had marked as downloaded");
                 if (err != null) return Stop(Checker.Blocked ? ScriptsBlocked : BuildFailed, "the checks could not run: " + err);
                 foreach (Row r in rows) Log(string.Format("  {0,-5} {1}: {2}", r.Ok == true ? "ok" : r.Ok == false ? "MISS" : "note", r.Name, r.Detail));
                 foreach (Row r in rows)
-                    if (r.Ok == false) return Stop(CheckCode(r.Name), r.Name + ": " + r.Detail);
-                if (Process.GetProcessesByName("rpcs3").Length > 0) return Stop(Rpcs3Open, "RPCS3 is open: close it (Setup uses it to unlock your game)");
+                {
+                    if (r.Ok != false) continue;
+                    if (r.Name == "Disc key") return Stop(NeedsDiscKey, r.Detail + ": give it with --disc-key <file>");
+                    if (r.Name == "License (.rap)") return Stop(NeedsLicense, r.Detail + ": give it with --rap <file>");
+                    return Stop(CheckCode(r.Name), r.Name + ": " + r.Detail);
+                }
                 string cmd = Util.PowerShellFile(Path.Combine(dir, "tools\\setup_build.ps1"), false) +
-                             " -Disc " + Util.Arg(disc) + " -Rpcs3 " + Util.Arg(rpcs3) + " -AcceptMsvcLicense -NoShortcut -Cleanup" +
-                             (opt.Pgo ? " -Pgo" : "");
+                             " -Source " + Util.Arg(disc) + (rpcs3 != null ? " -Rpcs3 " + Util.Arg(rpcs3) : "") +
+                             (string.IsNullOrEmpty(opt.DiscKey) ? "" : " -DiscKey " + Util.Arg(opt.DiscKey)) +
+                             (string.IsNullOrEmpty(opt.Rap) ? "" : " -Rap " + Util.Arg(opt.Rap)) +
+                             " -NoShortcut -NoAsk -Cleanup" + (opt.Pgo ? " -Pgo" : "");
                 Log("optimise for this PC: " + (opt.Pgo ? "yes (--pgo)" : "no"));
                 if (opt.DryRun)
                 {
@@ -1666,12 +2011,14 @@ namespace Inf2Setup
         static int CheckCode(string n)
         {
             if (n == "64-bit Windows" || n == "CPU with AVX2" || n == "Vulkan graphics driver") return PcCannot;
-            if (n == "Game disc folder") return NotGameFolder;
+            if (n == "Game disc folder" || n == "Game (digital)" || n == "Game folder" || n == "Game disc image" || n == "Game package (PSN)" || n == "Game files") return NotGameFolder;
             if (n.StartsWith("Game disc", StringComparison.Ordinal)) return NotThisGame;
             if (n == "Port folder's drive" || n == "Game folder's drive") return BadDrive;
             if (n.StartsWith("RPCS3", StringComparison.Ordinal)) return NoRpcs3;
             if (n == "PS3 firmware in RPCS3") return NoFirmware;
-            if (n.StartsWith("Game update", StringComparison.Ordinal) || n.StartsWith("Digital game", StringComparison.Ordinal)) return NoUpdate;
+            if (n.StartsWith("Game update", StringComparison.Ordinal) || n.StartsWith("Digital game", StringComparison.Ordinal) || n == "License in RPCS3") return NoUpdate;
+            if (n == "Disc key") return NeedsDiscKey;
+            if (n == "License (.rap)") return NeedsLicense;
             return BuildFailed;
         }
 
@@ -1738,19 +2085,20 @@ namespace Inf2Setup
         // (MainForm.StepWeight / StepWeightPgo, SubNames, SubWeight): 10 steps, or 12 with -Pgo (--pgo).
         sealed class BuildProgress
         {
-            static readonly double[] StepWeight = { 0, 1, 22, 4, 2, 3, 10, 1, 52, 1, 4 };
-            static readonly double[] StepWeightPgo = { 0, 1, 14, 3, 1, 2, 6, 1, 34, 19, 15, 1, 3 };
-            static readonly string[] StepText = { "", "Checking your PC and your game", "Downloading the build tools",
-                "Copying the update and the firmware files from RPCS3", "Unlocking your game with RPCS3", "Setting up the build tools",
-                "Getting SDL2, the Vulkan headers and glslang", "Making the game's icon from your copy",
-                "Translating and compiling the game (15-40 minutes)", "Almost done", "Cleaning up" };
-            static readonly string[] StepTextPgo = { "", "Checking your PC and your game", "Downloading the build tools",
-                "Copying the update and the firmware files from RPCS3", "Unlocking your game with RPCS3", "Setting up the build tools",
-                "Getting SDL2, the Vulkan headers and glslang", "Making the game's icon from your copy",
+            // (v0.6.0) step 2 = the port's tools (48 MB), step 3 = the game copied in + Sony's update and firmware (433 MB)
+            static readonly double[] StepWeight = { 0, 1, 4, 25, 1, 0, 0, 1, 66, 1, 1 };
+            static readonly double[] StepWeightPgo = { 0, 1, 3, 17, 1, 0, 0, 1, 30, 25, 20, 1, 1 };
+            static readonly string[] StepText = { "", "Checking your PC and your game", "Downloading the port's tools",
+                "Copying your game in; getting its update and the firmware files", "Unlocking your game", "Getting ready",
+                "Getting ready", "Making the shortcut's icon from your copy",
+                "Translating and compiling the game (about 10 minutes)", "Almost done", "Cleaning up" };
+            static readonly string[] StepTextPgo = { "", "Checking your PC and your game", "Downloading the port's tools",
+                "Copying your game in; getting its update and the firmware files", "Unlocking your game", "Getting ready",
+                "Getting ready", "Making the shortcut's icon from your copy",
                 "Translating the game and compiling a training build", "Training the build on your PC (the game plays by itself, sound off)",
                 "Compiling the game, optimised for this PC", "Almost done", "Cleaning up" };
             static readonly string[] SubNames = { "inputs", "port", "firmware", "ppu", "spu", "jobs", "compile" };
-            static readonly double[] SubWeight = { 2, 3, 10, 22, 4, 9, 50 };
+            static readonly double[] SubWeight = { 1, 1, 8, 46, 1, 11, 32 };
             static readonly string[] SubText = { "reading your game", "the port's code", "the firmware modules",
                 "translating the game's code", "the SPU programs", "the SPU jobs", "compiling" };
             const int CompileStep = 8, PgoSteps = 12, FinalCompileStep = 10;
@@ -1831,10 +2179,12 @@ namespace Inf2Setup
                         for (int i = 0; i <= last; i++)
                         {
                             if (buf[i] != '\n') continue;
-                            if (buf[start] == '[' && i - start > 4)
+                            int s0 = start;
+                            while (s0 < i && buf[s0] == ' ') s0++;   // (build_module.py's "  [k/N] <file>" lines)
+                            if (buf[s0] == '[' && i - s0 > 4)
                             {
                                 int k, n;
-                                if (Util.Ninja(Encoding.ASCII.GetString(buf, start, Math.Min(32, i - start)), out k, out n)) { ninjaDone = k; ninjaTotal = n; }
+                                if (Util.Ninja(Encoding.ASCII.GetString(buf, s0, Math.Min(32, i - s0)), out k, out n)) { ninjaDone = k; ninjaTotal = n; }
                             }
                             start = i + 1;
                         }
@@ -2290,12 +2640,12 @@ namespace Inf2Setup
             {
                 using (FolderBrowserDialog d = new FolderBrowserDialog())
                 {
-                    d.Description = "Choose your inFAMOUS 2 game folder: the one that holds PS3_GAME.";
+                    d.Description = "Choose your inFAMOUS 2 game folder: the one that holds PS3_GAME, or for the PSN version its NPUA80638 / NPEA00318 folder.";
                     d.ShowNewFolderButton = false;
                     if (d.ShowDialog(this) == DialogResult.OK) pick = Util.NormalizeDisc(d.SelectedPath);
                 }
                 if (pick == null) return;
-                if (!Util.IsDisc(pick)) { msg.Text = "That folder has no PS3_GAME folder in it."; return; }
+                if (!Util.IsDisc(pick)) { msg.Text = "No game there: " + Util.NotGameWhy(pick) + "."; return; }
             }
             Result = pick;
             DialogResult = DialogResult.OK;
@@ -2308,10 +2658,9 @@ namespace Inf2Setup
     sealed class MainForm : Form
     {
         public const string Title = "inFAMOUS 2 PC port - Setup";
-        public const int BaseW = 640, BaseH = 500, LogH = 240;
+        public const int BaseW = 640, BaseH = 590, LogH = 240;
         const string IssuesUrl = "https://github.com/SamiEnazi/infamous2-port/issues/new";
-        const string MsvcLicense = "https://go.microsoft.com/fwlink/?LinkId=2179911";
-        const string Intro = "Downloads the build tools it needs, builds the game from your copy, then cleans up.";
+        const string Intro = "Builds the game from your copy in about 15 minutes. Nothing is installed on Windows.";
 
         enum State { Start, Working, Failed, Done }
         enum JobKind { None, Download, Build }
@@ -2319,6 +2668,9 @@ namespace Inf2Setup
         readonly Opts opt;
         readonly string exeDir;
         string repo, target, rpcs3, disc;
+        string discKey, rap;             // asked for only when needed: an encrypted .iso's disc key, a PSN copy's license
+        Pick pick;                       // the one pick (a game folder, an .iso, a .pkg)
+        string needFile, progWhat;       // the build's "  needs: ..." line; what its last "progress:" line was about
         SaveBackup backup;               // set while Setup builds over an existing install
         bool updating, gitClone;
         string setupLog;
@@ -2328,7 +2680,8 @@ namespace Inf2Setup
 
         readonly FlatBtn big;
         readonly Bar bar;
-        readonly Label status, line;
+        readonly Label status, line, pickHead, pickLine;
+        readonly LinkLabel pickFolder, pickFile;
         readonly LinkLabel license, details, copyLog, again;
         readonly CheckBox pgoBox;        // "Optimise for this PC": setup_build.ps1 -Pgo
         readonly Label pgoNote;
@@ -2359,7 +2712,10 @@ namespace Inf2Setup
             repo = Util.HasPort(dir) ? dir : Util.ExistingInstall(dir);
             // --update --folder <port>: that folder (play.ps1 starts a Setup.exe it built in work\update\setup)
             if (o.Update && !string.IsNullOrEmpty(o.Folder) && Util.HasPort(o.Folder)) repo = Path.GetFullPath(o.Folder).TrimEnd('\\');
+            // --folder <folder> names the install: it wins over a port folder Setup.exe happens to sit in
+            else if (!string.IsNullOrEmpty(o.Folder)) repo = Util.HasPort(o.Folder) ? Path.GetFullPath(o.Folder).TrimEnd('\\') : null;
             ExitCode = o.TestBuild ? 2 : 0;
+            discKey = o.DiscKey; rap = o.Rap;
 
             Text = Title;
             Icon = Res.WindowIcon(dir);
@@ -2372,26 +2728,37 @@ namespace Inf2Setup
             int cw = ClientSize.Width;
 
             Logo logo = new Logo(Res.Logo(dir));
-            logo.Size = new Size(S(92), S(92));
-            logo.Location = new Point((cw - logo.Width) / 2, S(34));
-            Label title = Center("inFAMOUS 2", Theme.H1, Theme.Text, S(132), S(50));
-            Label sub = Center("PC port", Theme.Body, Theme.Accent, S(182), S(24));
+            logo.Size = new Size(S(80), S(80));
+            logo.Location = new Point((cw - logo.Width) / 2, S(22));
+            Label title = Center("inFAMOUS 2", Theme.H1, Theme.Text, S(106), S(50));
+            Label sub = Center("PC port", Theme.Body, Theme.Accent, S(154), S(24));
+
+            // the one pick: the game's folder, a disc image or a PSN package; a button each, or dropped on the window
+            pickHead = Center("Your game", Theme.Bold, Theme.Text, S(192), S(24));
+            pickLine = Center("Drop its folder, its .iso or its .pkg file on this window, or choose it:", Theme.Body, Theme.Dim, S(216), S(46));
+            pickFolder = Theme.Link("Choose a folder", Theme.Body);
+            pickFile = Theme.Link("Choose an .iso or .pkg file", Theme.Body);
+            int lw = pickFolder.PreferredWidth + S(30) + pickFile.PreferredWidth, lx = (cw - lw) / 2;
+            pickFolder.Location = new Point(lx, S(264));
+            pickFile.Location = new Point(lx + pickFolder.PreferredWidth + S(30), S(264));
+            pickFolder.LinkClicked += delegate { ChooseFolder(); };
+            pickFile.LinkClicked += delegate { ChooseFile(); };
 
             big = new FlatBtn("Install", Kind.Primary, Theme.BtnHuge);
             big.Size = new Size(S(330), S(76));
-            big.Location = new Point((cw - big.Width) / 2, S(232));
+            big.Location = new Point((cw - big.Width) / 2, S(302));
             big.Name = "install";
             big.Click += delegate { OnBig(); };
             bar = new Bar();
             bar.Size = new Size(S(460), S(18));
-            bar.Location = new Point((cw - bar.Width) / 2, S(252));
+            bar.Location = new Point((cw - bar.Width) / 2, S(322));
             bar.Visible = false;
-            status = Center("", Theme.Bold, Theme.Text, S(282), S(28));
-            line = Center(Intro, Theme.Body, Theme.Dim, S(322), S(70));
-            license = Theme.Link("By installing you accept Microsoft's build tools license", Theme.Small);
-            license.LinkArea = new LinkArea(license.Text.IndexOf("Microsoft"), license.Text.Length - license.Text.IndexOf("Microsoft"));
-            license.LinkClicked += delegate { Util.OpenUrl(MsvcLicense); };
-            license.Location = new Point((cw - license.PreferredWidth) / 2, S(434));
+            status = Center("", Theme.Bold, Theme.Text, S(352), S(28));
+            line = Center(Intro, Theme.Body, Theme.Dim, S(392), S(70));
+            // (no license to accept any more: nothing of Microsoft's is downloaded)
+            license = Theme.Link("Downloads about 48 MB of the port's tools from GitHub, and your game's update from Sony", Theme.Small);
+            license.LinkArea = new LinkArea(0, 0);
+            license.Location = new Point((cw - license.PreferredWidth) / 2, S(520));
 
             // "Optimise for this PC" (profile-guided optimisation trained here): on unless it was turned
             // off for this folder before (work\setup-no-pgo) or --no-pgo
@@ -2407,10 +2774,10 @@ namespace Inf2Setup
             pgoBox.Checked = !o.NoPgo && !(repo != null && File.Exists(NoPgoMark(repo)));
             pgoNote = new Label();
             pgoNote.AutoSize = true; pgoNote.UseMnemonic = false; pgoNote.Font = Theme.Small; pgoNote.ForeColor = Theme.Dim;
-            pgoNote.Text = "a faster game; adds 10–25 min: Setup plays it by itself once";
+            pgoNote.Text = "a faster game; adds about 10 min: Setup plays it by itself once";
             int pw = pgoBox.PreferredSize.Width, nw = pgoNote.PreferredWidth, px = Math.Max(S(14), (cw - pw - S(6) - nw) / 2);
-            pgoBox.Location = new Point(px, S(400));
-            pgoNote.Location = new Point(px + pw + S(6), S(400) + (pgoBox.PreferredSize.Height - pgoNote.PreferredHeight) / 2);
+            pgoBox.Location = new Point(px, S(476));
+            pgoNote.Location = new Point(px + pw + S(6), S(476) + (pgoBox.PreferredSize.Height - pgoNote.PreferredHeight) / 2);
             pgoNote.Click += delegate { pgoBox.Checked = !pgoBox.Checked; };
 
             details = Theme.Link("Details", Theme.Small);
@@ -2432,8 +2799,16 @@ namespace Inf2Setup
             logBox.Location = new Point(S(14), S(BaseH));
             logBox.Size = new Size(cw - S(28), S(LogH) - S(14));
 
-            Controls.AddRange(new Control[] { logo, title, sub, big, bar, status, line, pgoBox, pgoNote, license, details, copyLog, again, logBox });
+            Controls.AddRange(new Control[] { logo, title, sub, pickHead, pickLine, pickFolder, pickFile, big, bar, status, line, pgoBox, pgoNote, license, details, copyLog, again, logBox });
             AcceptButton = big;
+            // dropped anywhere on the window (each control takes it, not only the bare form)
+            AllowDrop = true;
+            DragEnter += OnDragEnter; DragDrop += OnDragDrop;
+            foreach (Control c in Controls)
+            {
+                if (c == logBox) continue;
+                c.AllowDrop = true; c.DragEnter += OnDragEnter; c.DragDrop += OnDragDrop;
+            }
 
             pump = new System.Windows.Forms.Timer();
             pump.Interval = 200;
@@ -2467,13 +2842,23 @@ namespace Inf2Setup
             if (opt.Page == "done" || (built && !opt.TestBuild)) SetState(State.Done);
             else SetState(State.Start);
             if (opt.Page == "done") return;
-            if (opt.Page == "ask") { Ask(true, "Setup could not find RPCS3 on this PC. Show it where rpcs3.exe is."); return; }
-            // look for RPCS3 now, so Install can start right away
-            if (opt.Rpcs3 == null)
+            if (opt.Page == "ask") { Ask(false, "Show Setup your inFAMOUS 2 game folder: the one that holds PS3_GAME."); return; }
+            // the pick: given (--disc), an install's own game (game\\disc), else RPCS3's game list when it finds one
+            string pre = opt.Disc;
+            if (pre == null && repo != null && Util.IsDisc(Path.Combine(repo, "game\\disc"))) pre = Path.Combine(repo, "game\\disc");
+            if (pre != null) SetPick(pre);
+            // look for RPCS3 now (optional: its game list finds the game, and its files save a download)
+            if (opt.Rpcs3 == null && !opt.NoRpcs3)
             {
                 searching = true;
                 string d = exeDir, r = repo;
-                ThreadPool.QueueUserWorkItem(delegate { foundRpcs3 = Util.FindRpcs3(d, r); searching = false; });
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    foundRpcs3 = Util.FindRpcs3(d, r);
+                    string g = foundRpcs3 != null ? Util.DetectDisc(foundRpcs3) : null;
+                    searching = false;
+                    if (g != null) Post(delegate { if (pick == null && state == State.Start) SetPick(g); });
+                });
             }
             if (opt.TestBuild) Install();
             // --update (F2 > Update in the game): "Update to the latest version", at once
@@ -2502,6 +2887,8 @@ namespace Inf2Setup
             }
             license.Visible = s == State.Start || s == State.Failed;
             pgoBox.Visible = pgoNote.Visible = s == State.Start || s == State.Failed;
+            pickHead.Visible = pickLine.Visible = s != State.Done;
+            pickFolder.Visible = pickFile.Visible = s == State.Start || s == State.Failed;
             copyLog.Visible = s == State.Failed;
             again.Visible = s == State.Done && !opt.TestBuild;
             Text = Title;
@@ -2509,6 +2896,78 @@ namespace Inf2Setup
         }
 
         void Status(string s) { status.Text = s; }
+
+        // ---------------------------------------------------------- the one pick
+
+        void SetPick(string path)
+        {
+            if (state == State.Working) return;
+            Pick p = GameSniff.Look(path);
+            if (pick == null || !Util.SamePath(pick.Path, p.Path)) { discKey = opt.DiscKey; rap = opt.Rap; }   // another game: asked again
+            pick = p;
+            pickLine.Text = p.Text.Length > 0 ? p.Text : "Drop its folder, its .iso or its .pkg file on this window, or choose it:";
+            pickLine.ForeColor = p.Ok ? Theme.Text : Theme.Bad;
+            disc = p.Ok ? p.Path : null;
+            if (p.Ok && state == State.Failed && failReason == null) SetState(State.Start);
+        }
+
+        void ChooseFolder()
+        {
+            using (FolderBrowserDialog d = new FolderBrowserDialog())
+            {
+                d.Description = "Choose your inFAMOUS 2 game folder: the one that holds PS3_GAME, or for the PSN version its NPUA80638 / NPEA00318 folder.";
+                d.ShowNewFolderButton = false;
+                if (d.ShowDialog(this) == DialogResult.OK) SetPick(d.SelectedPath);
+            }
+        }
+
+        void ChooseFile()
+        {
+            using (OpenFileDialog d = new OpenFileDialog())
+            {
+                d.Title = "Choose your inFAMOUS 2 disc image or PSN package";
+                d.Filter = "Disc image or PSN package (*.iso;*.pkg)|*.iso;*.pkg|All files (*.*)|*.*";
+                if (d.ShowDialog(this) == DialogResult.OK) SetPick(d.FileName);
+            }
+        }
+
+        void OnDragEnter(object sender, DragEventArgs e)
+        {
+            e.Effect = state != State.Working && e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+        }
+
+        void OnDragDrop(object sender, DragEventArgs e)
+        {
+            string[] f = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (f != null && f.Length > 0) SetPick(f[0]);
+        }
+
+        // A file Setup needs only now: the disc key of an encrypted image, a PSN copy's license. Its path goes to
+        // ps3tool; Setup never reads it.
+        string AskFile(string title, string filter)
+        {
+            using (OpenFileDialog d = new OpenFileDialog())
+            {
+                d.Title = title;
+                d.Filter = filter;
+                return d.ShowDialog(this) == DialogResult.OK ? d.FileName : null;
+            }
+        }
+
+        bool AskKey(string what)
+        {
+            if (what == "disc-key")
+            {
+                string f = AskFile("Your disc image is encrypted: choose its disc key (.dkey or .ird)", "Disc key (*.dkey;*.key;*.ird;*.txt)|*.dkey;*.key;*.ird;*.txt|All files (*.*)|*.*");
+                if (f == null) return false;
+                discKey = f;
+                return true;
+            }
+            string r = AskFile("Your PSN copy is unlocked with its license: choose your .rap file", "License (*.rap)|*.rap|All files (*.*)|*.*");
+            if (r == null) return false;
+            rap = r;
+            return true;
+        }
 
         // The one plain line when "Optimise for this PC" was on but could not be used (setup_build.ps1's
         // "  pgo: not used: <why>"): the game is the normal build, Setup did not fail.
@@ -2547,6 +3006,8 @@ namespace Inf2Setup
             line.ForeColor = Theme.Bad;
             AddLog("== stopped: " + reason);
             ExitCode = 1;
+            // the window's whole log, also where it can be found after the window is gone (%TEMP%)
+            try { File.WriteAllLines(Path.Combine(Path.GetTempPath(), "inFAMOUS2-port-setup-failed.log"), log.ToArray()); } catch (Exception) { }
             if (opt.ExitWhenDone) CloseSoon();
         }
 
@@ -2570,6 +3031,15 @@ namespace Inf2Setup
         void Install()
         {
             if (job != null) return;
+            bool installed = repo != null && Util.IsDisc(Path.Combine(repo, "game\\disc"));
+            if (!(pick != null && pick.Ok) && !installed && !(opt.Disc != null && Util.IsSource(opt.Disc)) && !searching)
+            {
+                line.Text = pick != null && pick.Text.Length > 0 ? pick.Text + " Choose your game: its folder, its .iso or its .pkg file (or drop it on this window)."
+                                                                : "Choose your game first: its folder, its .iso or its .pkg file (or drop it on this window).";
+                line.ForeColor = Theme.Bad;
+                line.Visible = true;
+                return;
+            }
             failReason = null;
             SetState(State.Working);
             bar.Value = 0;
@@ -2665,30 +3135,33 @@ namespace Inf2Setup
             FindThenCheck();
         }
 
-        // RPCS3 and the game: found, or asked for in one small dialog; then the checks.
+        // The game: given, the one linked before (game\disc), in RPCS3's game list, or asked for in one small dialog;
+        // then the checks. RPCS3 is optional: when it is here, its update and firmware files save a download.
         void FindThenCheck()
         {
-            Status("Looking for RPCS3 and your game\u2026");
+            Status("Looking for your game\u2026");
             bar.Value = 0;
             if (searching) { After(300, FindThenCheck); return; }
-            string rp = opt.Rpcs3 ?? (rpcs3 != null && File.Exists(Path.Combine(rpcs3, "rpcs3.exe")) ? rpcs3 : null) ?? foundRpcs3;
-            if (rp == null || !File.Exists(Path.Combine(rp, "rpcs3.exe")))
-                rp = Ask(true, "Setup could not find RPCS3 on this PC. Show it where rpcs3.exe is.");
-            if (rp == null) { Fail("Setup needs RPCS3 with your game in it. Press Try again when it is ready."); return; }
+            string rp = opt.NoRpcs3 ? null : opt.Rpcs3 ?? (rpcs3 != null && File.Exists(Path.Combine(rpcs3, "rpcs3.exe")) ? rpcs3 : null) ?? foundRpcs3;
+            if (rp != null && !File.Exists(Path.Combine(rp, "rpcs3.exe"))) rp = null;
             rpcs3 = rp;
-            string dc = opt.Disc ?? (Util.IsDisc(disc) ? disc : null) ?? Util.DetectDisc(rp);
-            if (!Util.IsDisc(dc)) dc = Ask(false, "Setup could not find the game in RPCS3's game list. Show it the folder that holds PS3_GAME.");
-            if (dc == null) { Fail("Setup needs your inFAMOUS 2 game folder (the one with PS3_GAME). Press Try again."); return; }
+            string linked = repo != null ? Path.Combine(repo, "game\\disc") : null;
+            string dc = (pick != null && pick.Ok ? pick.Path : null) ?? (Util.IsSource(opt.Disc) ? opt.Disc : null) ?? (Util.IsDisc(linked) ? linked : null) ??
+                        (rp != null ? Util.DetectDisc(rp) : null);
+            if (!Util.IsSource(dc)) { Fail("Setup needs your game: choose its folder, its .iso or its .pkg file (or drop it on this window), then press Try again."); return; }
             disc = dc;
-            AddLog("RPCS3: " + rpcs3);
+            // a PSN copy inside an RPCS3 folder: that RPCS3 holds its license (GitHub #40)
+            string owner = Util.Rpcs3OfGame(disc);
+            if (owner != null && !opt.NoRpcs3 && opt.Rpcs3 == null && (rpcs3 == null || !Util.SamePath(owner, rpcs3))) rpcs3 = owner;
+            AddLog("RPCS3: " + (rpcs3 ?? "not used (the game's update and the firmware files come from Sony's servers)"));
             AddLog("game: " + disc);
             Status("Checking your PC and your game\u2026");
-            string root = repo, d1 = disc, r1 = rpcs3;
+            string root = repo, d1 = disc, r1 = rpcs3, k1 = discKey, p1 = rap;
             ThreadPool.QueueUserWorkItem(delegate
             {
                 string err;
                 int before = Checker.Unblocked;
-                List<Row> rows = Checker.Run(root, d1, r1, out err);
+                List<Row> rows = Checker.Run(root, d1, r1, k1, p1, out err);
                 int unblocked = Checker.Unblocked - before;
                 Post(delegate
                 {
@@ -2714,27 +3187,31 @@ namespace Inf2Setup
                 if (r.Ok != false) continue;
                 string n = r.Name;
                 if (n == "64-bit Windows" || n == "CPU with AVX2" || n == "Vulkan graphics driver") { Fail("This PC can't run the game: " + r.Detail + "."); return; }
-                if (n.StartsWith("Game disc", StringComparison.Ordinal))
+                if (n == "Disc key" || n == "License (.rap)")
                 {
-                    disc = Ask(false, "That folder is not inFAMOUS 2 (" + r.Detail + "). Show Setup the right game folder.");
-                    if (disc == null) { Fail("Setup needs your inFAMOUS 2 game folder. Press Try again."); return; }
-                    FindThenCheck();
+                    if (AskKey(n == "Disc key" ? "disc-key" : "rap")) { FindThenCheck(); return; }
+                    Fail(n == "Disc key" ? "An encrypted disc image needs its disc key (a .dkey or .ird file). Press Try again to choose it, or choose your game's decrypted folder instead."
+                                         : "The PSN version needs your license for it (a .rap file). Press Try again to choose it.");
+                    return;
+                }
+                if (n.StartsWith("Game disc", StringComparison.Ordinal) || n == "Game (digital)" || n == "Game folder" || n == "Game package (PSN)" || n == "Game files" || n == "Digital game")
+                {
+                    Fail(char.ToUpper(r.Detail[0]) + r.Detail.Substring(1).TrimEnd('.') + ". Choose your game (or drop it on this window), then press Try again.");
                     return;
                 }
                 if (n.StartsWith("RPCS3", StringComparison.Ordinal))
                 {
-                    rpcs3 = Ask(true, "RPCS3 is not where Setup thought. Show it where rpcs3.exe is.");
-                    if (rpcs3 == null) { Fail("Setup needs RPCS3 with your game in it. Press Try again when it is ready."); return; }
+                    // (no check asks for RPCS3 any more: it is optional. One that does is answered by going on without it)
+                    rpcs3 = Ask(true, "RPCS3 is not where Setup thought. It is optional: show where rpcs3.exe is, or cancel to go on without it.");
+                    if (rpcs3 == null) opt.NoRpcs3 = true;
                     FindThenCheck();
                     return;
                 }
-                if (n == "PS3 firmware in RPCS3") { Fail("RPCS3 has no PS3 firmware yet. In RPCS3: File > Install Firmware, then press Try again."); return; }
                 if (n == "Port folder's drive" || n == "Game folder's drive") { Fail(char.ToUpper(r.Detail[0]) + r.Detail.Substring(1) + "."); return; }   // GitHub issue #2
-                if (n.StartsWith("Game update", StringComparison.Ordinal)) { Fail("The game's 1.04 update is not in RPCS3 yet. In RPCS3: File > Install Packages, then press Try again."); return; }
+                if (n == "License in RPCS3" || n == "Digital game") { Fail(char.ToUpper(r.Detail[0]) + r.Detail.Substring(1) + "."); return; }   // GitHub #40
                 Fail(n + ": " + r.Detail);
                 return;
             }
-            if (Process.GetProcessesByName("rpcs3").Length > 0) { Fail("Close RPCS3 (Setup uses it to unlock your game), then press Try again."); return; }
             StartBuild();
         }
 
@@ -2753,17 +3230,24 @@ namespace Inf2Setup
             // pressing Install accepts Microsoft's license (the line under the button says so)
             bool pgo = pgoBox.Checked;
             RememberPgo(pgo);
-            string cmd = Util.PowerShellFile(script, false) + " -Disc " + Util.Arg(disc) + " -Rpcs3 " + Util.Arg(rpcs3) +
-                         (opt.TestFailBuild ? "" : " -AcceptMsvcLicense") + (opt.NoShortcut ? " -NoShortcut" : "") + (opt.NoCleanup ? "" : " -Cleanup") +
-                         (pgo ? " -Pgo" : "");
+            string cmd = Util.PowerShellFile(script, false) + " -Source " + Util.Arg(disc) + (rpcs3 != null ? " -Rpcs3 " + Util.Arg(rpcs3) : "") +
+                         (discKey != null ? " -DiscKey " + Util.Arg(discKey) : "") + (rap != null ? " -Rap " + Util.Arg(rap) : "") +
+                         (opt.NoShortcut ? " -NoShortcut" : "") + (opt.NoCleanup ? "" : " -Cleanup") + (pgo ? " -Pgo" : "");
+            if (opt.TestFailBuild)
+            {
+                // test: the port's tools can't be downloaded (an address nothing answers), so the build stops at step 2
+                if (env == null) env = new Dictionary<string, string>();
+                env["PORT_SETUP_RELEASES"] = "http://127.0.0.1:9";
+                env["PORT_SLIM_ASSETS"] = "";
+            }
             ResetProgress();
             compileLog = Path.Combine(repo, "work\\logs\\compile.log");
             Status("Getting ready\u2026");
             setupLog = Path.Combine(repo, "work\\setup.log");
             BeginLog(setupLog);
-            if (opt.TestFailBuild) AddLog("(test: the build fails on purpose at step 2, without the license flag)");
-            AddLog("RPCS3: " + rpcs3);
-            AddLog("game: " + disc);
+            if (opt.TestFailBuild) AddLog("(test: the build fails on purpose at step 2: the port's tools can't be downloaded)");
+            AddLog("RPCS3: " + (rpcs3 ?? "not used"));
+            AddLog("game: " + disc + (pick != null && pick.Ok ? " (" + pick.Text + ")" : ""));
             AddLog("optimise for this PC: " + (pgo ? "yes (-Pgo)" : "no"));
             jobKind = JobKind.Build;
             AddLog("> setup_build.ps1" + (opt.OnlyCache ? " (PORT_ONLY_CACHE=1, Windows-only PATH)" : ""));
@@ -2776,14 +3260,21 @@ namespace Inf2Setup
         // ---------------------------------------------------------- progress
 
         // How much of the whole build each step of setup_build.ps1 is (percent, on the test PC).
-        static readonly double[] StepWeight = { 0, 1, 22, 4, 2, 3, 10, 1, 52, 1, 4 };
+        // (v0.6.0) step 2 = the port's tools (48 MB), step 3 = the game copied in + Sony's update and firmware (433 MB)
+        static readonly double[] StepWeight = { 0, 1, 3, 30, 1, 0, 0, 1, 62, 1, 1 };
         // With "Optimise for this PC" (-Pgo, 12 steps): 8 = translate + the training build, 9 = the training
         // (the game plays by itself), 10 = the final compile.
-        static readonly double[] StepWeightPgo = { 0, 1, 14, 3, 1, 2, 6, 1, 34, 19, 15, 1, 3 };
+        static readonly double[] StepWeightPgo = { 0, 1, 3, 17, 1, 0, 0, 1, 30, 25, 20, 1, 1 };
         static readonly double[] DownloadWeight = { 0, 3, 10, 72, 15 };
         // tools\rebuild_win.py's own steps inside step 8 ("[ppu]", ...), and their share of it.
         static readonly string[] SubNames = { "inputs", "port", "firmware", "ppu", "spu", "jobs", "compile" };
-        static readonly double[] SubWeight = { 2, 3, 10, 22, 4, 9, 50 };
+        static readonly double[] SubWeight = { 0.5, 0.5, 5, 55, 1, 7, 31 };
+        // What moves while a long step runs (tools/rebuild_win.py): "  step: <plain words> (about N minutes)" when one of
+        // its steps starts, then every 5 seconds "  progress: <n>% <plain words>: <k of N ...>, <m:ss> so far".
+        string stepText, subDetail;      // the running step in plain words; its last heartbeat's detail
+        double subFrac;                  // how far that step is (its heartbeat's percentage)
+        DateTime buildStart = DateTime.UtcNow;
+        const string Dots = "\u2026";
         const int ToolsStep = 2, CompileStep = 8, PgoSteps = 12, TrainStep = 9, FinalCompileStep = 10;
 
         bool PgoFlow() { return jSteps == PgoSteps; }
@@ -2793,7 +3284,8 @@ namespace Inf2Setup
         void ResetProgress()
         {
             jStep = 0; jSteps = 1; jFrac = 0; bSub = -1; ninjaDone = ninjaTotal = 0; shownFrac = 0;
-            failReason = null; sawDone = false; compilePos = -1; playerNote = null; pgoUsed = false; pgoWhy = null;
+            stepText = subDetail = null; subFrac = 0; buildStart = DateTime.UtcNow;
+            failReason = null; sawDone = false; compilePos = -1; playerNote = null; pgoUsed = false; pgoWhy = null; needFile = null; progWhat = null;
         }
 
         void ShowPlayerNote(string note)
@@ -2813,14 +3305,29 @@ namespace Inf2Setup
             if (t.StartsWith("== [", StringComparison.Ordinal))
             {
                 int slash = t.IndexOf('/'), close = t.IndexOf(']');
-                if (slash > 4 && int.TryParse(t.Substring(4, slash - 4), out n)) { jStep = n; jFrac = 0; bSub = -1; ninjaTotal = 0; }
+                if (slash > 4 && int.TryParse(t.Substring(4, slash - 4), out n)) { jStep = n; jFrac = 0; bSub = -1; ninjaTotal = 0; stepText = subDetail = null; subFrac = 0; }
                 if (slash > 0 && close > slash && int.TryParse(t.Substring(slash + 1, close - slash - 1), out n)) jSteps = n;
                 if (playerNote != null) ShowPlayerNote(null);
             }
             else if (t.StartsWith("== FAILED:", StringComparison.Ordinal)) failReason = t.Substring(10).Trim();
             else if (t.StartsWith("== done", StringComparison.Ordinal)) sawDone = true;
             else if (t.StartsWith("error:", StringComparison.Ordinal)) failReason = t.Substring(6).Trim();
-            else if (t.StartsWith("progress:", StringComparison.Ordinal)) { int pct = Util.Percent(t); if (pct >= 0) jFrac = pct / 100.0; }
+            else if (t.StartsWith("progress:", StringComparison.Ordinal))
+            {
+                int pct = Util.Percent(t); if (pct >= 0) jFrac = pct / 100.0; progWhat = t.Substring(9);
+                if (jobKind == JobKind.Build && Compiling(jStep) && bSub >= 0 && pct >= 0)
+                {
+                    // a heartbeat of the running step: "<n>% <plain words>: <detail>, <m:ss> so far"
+                    subFrac = Math.Max(subFrac, pct / 100.0);
+                    int at = progWhat.IndexOf('%');
+                    string rest = at >= 0 ? progWhat.Substring(at + 1).Trim() : "";
+                    string name = StepName();
+                    if (name != null && rest.StartsWith(name, StringComparison.Ordinal)) rest = rest.Substring(name.Length).TrimStart(':', ',', ' ');
+                    subDetail = rest.Length > 0 ? rest : null;
+                }
+            }
+            else if (jobKind == JobKind.Build && t.StartsWith("step:", StringComparison.Ordinal)) { stepText = t.Substring(5).Trim(); subDetail = null; subFrac = 0; }
+            else if (jobKind == JobKind.Build && t.StartsWith("needs:", StringComparison.Ordinal)) needFile = t.Substring(6).Trim();
             else if (jobKind == JobKind.Build && t.StartsWith("compile log:", StringComparison.Ordinal))
             {
                 // setup_build.ps1 -Pgo: the training build logs to compile-build-train.log, the game to compile.log
@@ -2834,6 +3341,7 @@ namespace Inf2Setup
                      Array.IndexOf(SubNames, t.Substring(1, t.Length - 2)) >= 0)
             {
                 bSub = Array.IndexOf(SubNames, t.Substring(1, t.Length - 2));
+                stepText = subDetail = null; subFrac = 0;
                 if (bSub == SubNames.Length - 1)
                 {
                     // the compile writes to work\logs\compile.log: follow ninja's [k/N] there from here on
@@ -2863,10 +3371,12 @@ namespace Inf2Setup
                     for (int i = 0; i <= last; i++)
                     {
                         if (buf[i] != '\n') continue;
-                        if (buf[start] == '[' && i - start > 4)
+                        int s0 = start;
+                        while (s0 < i && buf[s0] == ' ') s0++;   // (build_module.py's "  [k/N] <file>" lines)
+                        if (buf[s0] == '[' && i - s0 > 4)
                         {
                             int k, n;
-                            if (Util.Ninja(Encoding.ASCII.GetString(buf, start, Math.Min(32, i - start)), out k, out n)) { ninjaDone = k; ninjaTotal = n; }
+                            if (Util.Ninja(Encoding.ASCII.GetString(buf, s0, Math.Min(32, i - s0)), out k, out n)) { ninjaDone = k; ninjaTotal = n; }
                         }
                         start = i + 1;
                     }
@@ -2876,16 +3386,22 @@ namespace Inf2Setup
             catch (Exception) { }
         }
 
-        double JobFraction()
+        double JobFraction() { return JobFraction(false); }
+
+        // end = true: where the bar will be when the running step (or rebuild_win.py step) is over
+        double JobFraction(bool end)
         {
             double[] w = jobKind == JobKind.Download ? DownloadWeight : PgoFlow() ? StepWeightPgo : StepWeight;
             if (jStep < 1 || jSteps + 1 != w.Length) return 0;
             int st = Math.Min(jStep, jSteps);
             double done = 0;
             for (int i = 1; i < st; i++) done += w[i];
-            double f = jFrac;
+            double f = end ? 1 : jFrac;
+            bool last = bSub == SubNames.Length - 1;
+            double sf = last && ninjaTotal > 0 ? Math.Max(subFrac, ninjaDone / (double)ninjaTotal) : subFrac;   // the heartbeat, or the compile log
+            if (end) sf = 1;
             if (jobKind == JobKind.Build && PgoFlow() && st == FinalCompileStep)
-                f = bSub == SubNames.Length - 1 && ninjaTotal > 0 ? ninjaDone / (double)ninjaTotal : 0;   // only "[compile]" here
+                f = last ? sf : 0;   // only "[compile]" here
             else if (jobKind == JobKind.Build && st == CompileStep)
             {
                 f = 0;
@@ -2893,11 +3409,32 @@ namespace Inf2Setup
                 {
                     double d = 0;
                     for (int j = 0; j < bSub; j++) d += SubWeight[j];
-                    if (bSub == SubNames.Length - 1 && ninjaTotal > 0) d += SubWeight[bSub] * ninjaDone / (double)ninjaTotal;
+                    d += SubWeight[bSub] * Math.Min(1, sf);
                     f = d / 100.0;
                 }
+                else if (end) f = SubWeight[0] / 100.0;
             }
             return (done + w[st] * Math.Min(1, f)) / 100.0;
+        }
+
+        // The running step in plain words, without its "(about N minutes)"
+        string StepName()
+        {
+            if (stepText == null) return null;
+            int par = stepText.LastIndexOf(" (", StringComparison.Ordinal);
+            return par > 0 ? stepText.Substring(0, par) : stepText;
+        }
+
+        // "about 6 minutes left": the time so far against how far the bar is, leaning on the test PC's time at the start
+        string TimeLeft(double v)
+        {
+            double el = (DateTime.UtcNow - buildStart).TotalSeconds;
+            double nominal = (PgoFlow() ? 22 : 12.5) * 60;
+            double k = Math.Max(0, Math.Min(1, v * 2.5));
+            double rem = (1 - v) * ((1 - k) * nominal + k * (v > 0.01 ? el / v : nominal));
+            if (rem < 50) return "less than a minute left";
+            int m = (int)Math.Ceiling(rem / 60.0);
+            return m == 1 ? "about a minute left" : "about " + m + " minutes left";
         }
 
         // One short line: "Downloading tools... 45%", "Building... 3 of 7", "Cleaning up...".
@@ -2905,8 +3442,16 @@ namespace Inf2Setup
         {
             if (jobKind == JobKind.Download) return (updating ? "Getting the newest version\u2026 " : "Downloading the game's build files\u2026 ") + (int)(JobFraction() * 100) + "%";
             if (jStep < ToolsStep) return "Getting ready\u2026";
-            if (jStep == ToolsStep) return "Downloading tools\u2026 " + (int)(jFrac * 100) + "%";
+            if (jStep == ToolsStep) return "Downloading the port's tools\u2026 " + (int)(jFrac * 100) + "%";
+            // step 3: the game copied or extracted in (tools\game_source.py), then Sony's update and firmware (tools\sony_files.py)
+            if (jStep == ToolsStep + 1 && jFrac > 0 && jFrac < 1 && progWhat != null)
+            {
+                if (progWhat.IndexOf("Sony", StringComparison.Ordinal) >= 0) return "Downloading your game's update from Sony\u2026 " + (int)(jFrac * 100) + "%";
+                if (progWhat.IndexOf("extracting", StringComparison.Ordinal) >= 0) return "Extracting your disc image\u2026 " + (int)(jFrac * 100) + "%";
+                if (progWhat.IndexOf("copying", StringComparison.Ordinal) >= 0) return "Copying your game into the port's folder\u2026 " + (int)(jFrac * 100) + "%";
+            }
             if (PgoFlow() && jStep == TrainStep && playerNote != null) return "Training the build on your PC\u2026 " + (int)(jFrac * 100) + "%";
+            if (Compiling(jStep) && StepName() != null) return StepName() + Dots;   // (tools/rebuild_win.py's "step:" line)
             // the last step cleans up (10 of 10, or 12 of 12 with -Pgo); 3 .. last-1 build
             if (jStep < jSteps) return string.Format("Building\u2026 {0} of {1}", jStep - ToolsStep, jSteps - ToolsStep - 1);
             return "Cleaning up\u2026";
@@ -2922,9 +3467,24 @@ namespace Inf2Setup
             if (jobKind == JobKind.Build) TailCompileLog();
             double v = JobFraction();
             // never backwards in a build (with -Pgo, step 8 may compile twice: with the last training, then a training build)
-            if (jobKind == JobKind.Build) { v = Math.Max(shownFrac, v); shownFrac = v; }
+            if (jobKind == JobKind.Build)
+            {
+                // The bar never stands still: it eases to the real value, and while no news comes it walks slowly towards
+                // the end of the running step without reaching it (and never goes backwards).
+                double end = JobFraction(true);
+                if (v > shownFrac) shownFrac += Math.Max(0.0005, (v - shownFrac) * 0.3);
+                else if (end > shownFrac) shownFrac += (end - shownFrac) * 0.0015;
+                v = shownFrac = Math.Min(shownFrac, Math.Max(v, end));
+            }
             bar.Value = v;
             status.Text = StatusText();
+            if (jobKind == JobKind.Build && state == State.Working && playerNote == null && jStep >= 1)
+            {
+                // under the bar: what the running step is at, and about how long the whole build still takes
+                line.Text = (subDetail != null && Compiling(jStep) ? subDetail + " " + (char)0x00b7 + " " : "") + TimeLeft(v);
+                line.ForeColor = Theme.Dim;
+                line.Visible = true;
+            }
             if (jobKind == JobKind.Build) Text = (int)(v * 100) + "% - " + Title;
             ShowLogTail();
             if (j.Exited && j.Lines.IsEmpty)
@@ -2951,6 +3511,11 @@ namespace Inf2Setup
                                             ". Your saves, settings, mods and controls are kept." + PgoLine();
                 if (opt.ExitWhenDone) CloseSoon();
                 return;
+            }
+            if (needFile != null && ((needFile.StartsWith("rap", StringComparison.Ordinal) && rap == null) || (needFile == "disc-key" && discKey == null)))
+            {
+                string what = needFile.StartsWith("rap", StringComparison.Ordinal) ? "rap" : "disc-key";
+                if (AskKey(what)) { Native.KeepAwake(true); SetState(State.Working); StartBuild(); return; }
             }
             Fail("The build stopped: " + (failReason ?? (code == 0 ? "it ended without finishing" : "exit code " + code)) +
                  ". Press Try again, or Copy log for a bug report.");

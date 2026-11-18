@@ -8,8 +8,10 @@
 #                      sharpening, texture filtering, upscaling, volume, language, controls,
 #                      HUD); Esc / Circle closes it, L1/R1 switch pages
 #   Alt+Enter or F11   fullscreen on/off
-# The menu saves to %APPDATA%\inFAMOUS2-port\settings.ini and the next start uses it (to settings.ini in the
-# project folder when a portable.txt is there: then mods.ini and spots.ini stay there too).
+# The menu saves to settings.ini in the port's folder and the next start uses it; mods.ini (F2 > Mods) and
+# spots.ini (saved spots) are there too, and the shader cache in work\shader_cache (v0.6.0: everything is in the
+# folder, so it can be moved or copied to another drive or PC and plays the same). The files an older version kept
+# in %APPDATA%\inFAMOUS2-port are copied in once (they stay where they were).
 # -Fps / -Volume / -Fullscreen given here win over the file for this session
 # (-Fps: frame cap, 72 = smooth on a 144 Hz screen, 0 = uncapped).
 #
@@ -66,9 +68,70 @@ if ($Attach -and -not $EnvFile) { throw "-Attach needs -EnvFile" }
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "port_paths.ps1")   # Get-PortPath rpcs3 (config.local.json, written by Setup.cmd)
+# The port's folder as the player sees it (the update and the disc link below), and the path the game is started
+# with: the same folder through a junction with a plain name when its own path has characters the game's C file
+# functions can't take (another alphabet, GitHub #34), the one Setup built through (tools\safe_paths.ps1)
+$realRoot = $root
+try { $root = Get-BuildRoot $realRoot -Create } catch { $root = $realRoot }
 if (-not $Exe) { $Exe = Join-Path $root "work\port\build\Infamous2Recomp.exe" }
 if (-not (Test-Path -LiteralPath $Exe)) { throw "not built yet: $Exe (python -I tools\rebuild_win.py)" }
 $game = Join-Path $root "game"
+
+# --- this PC (a copied folder may start on another one) ---------------------------------------
+# The game is built for CPUs with AVX2: on one without, a clear message instead of a crash. Checked once per PC.
+$cpuMark = Join-Path $root "work\cpu-ok.txt"
+$cpuName = try { [string](Get-ItemProperty -LiteralPath "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0" -ErrorAction Stop).ProcessorNameString } catch { "?" }
+$cpuKey = "$env:COMPUTERNAME|$($cpuName.Trim())"
+if (-not ((Test-Path -LiteralPath $cpuMark) -and ([IO.File]::ReadAllText($cpuMark).Trim() -eq $cpuKey))) {
+    $avx2 = $true
+    try {
+        if (-not ("PortPlay.Cpu" -as [type])) {
+            Add-Type -Namespace PortPlay -Name Cpu -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(uint f);'
+        }
+        $avx2 = [PortPlay.Cpu]::IsProcessorFeaturePresent(40)   # PF_AVX2_INSTRUCTIONS_AVAILABLE
+    } catch {}
+    if (-not $avx2) {
+        "This PC's CPU ($($cpuName.Trim())) has no AVX2, and the game is built for CPUs with it (Intel 4th gen / AMD Ryzen or newer)."
+        "It can't run on this PC."
+        exit 1
+    }
+    try { New-Item -ItemType Directory -Force (Split-Path -Parent $cpuMark) | Out-Null; [IO.File]::WriteAllText($cpuMark, $cpuKey) } catch {}
+}
+# The game program of v0.6.1 and older needs Microsoft's Visual C++ runtime, which is not part of Windows: on a PC
+# without it the game did not start (v0.6.2's has it built in). Said here instead: the DLL names the program asks
+# for are in its file as plain text; each must be beside it or in Windows' own folder.
+function Get-MissingRuntime([string]$exePath) {
+    $missing = @()
+    try {
+        $fi = Get-Item -LiteralPath $exePath -ErrorAction Stop
+        if ($fi.Length -gt 64MB) { return $missing }
+        $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($fi.FullName))
+        foreach ($dll in "MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll") {
+            if ($text.IndexOf($dll, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+            if (Test-Path -LiteralPath (Join-Path $fi.DirectoryName $dll)) { continue }
+            if (Test-Path -LiteralPath (Join-Path ([Environment]::SystemDirectory) $dll)) { continue }
+            $missing += $dll
+        }
+    } catch {}
+    return $missing
+}
+if (-not $Attach) {
+    $noRt = @(Get-MissingRuntime $Exe)
+    if ($noRt.Count) {
+        "This PC doesn't have Microsoft's Visual C++ runtime ($($noRt -join ', ')), and this version of the game needs it."
+        "Either update the port (run Setup.exe in this folder: v0.6.2 and newer do not need it),"
+        "or install the runtime from Microsoft: https://aka.ms/vs/17/release/vc_redist.x64.exe  Then start the game again."
+        exit 1
+    }
+}
+# The desktop shortcut again when the folder was moved or copied (tools\shortcut.ps1; only an install Setup made one for)
+. (Join-Path $PSScriptRoot "shortcut.ps1")
+Update-PortShortcut $realRoot
+if (-not (Test-Path -LiteralPath (Join-Path $game "disc"))) {
+    "Your game's files are not in this folder (game\disc is missing)."
+    "Run Setup.exe in this folder and press Install: it copies your game in again."
+    exit 1
+}
 
 # --- your game folder (GitHub issue #13) ------------------------------------------------
 # game\disc is a link to your game folder (the one that holds PS3_GAME), with that folder's full path.
@@ -81,7 +144,7 @@ if ($discItem -and $discItem.LinkType -eq "Junction" -and -not (Test-Path -Liter
     $old = ([string]@($discItem.Target)[0]).TrimEnd('\')
     $parts = @($old -split '\\' | Where-Object { $_ })
     $found = $null
-    foreach ($base in @($root, (Split-Path -Parent $root))) {      # the same folder under the port's (or its parent's) new place
+    foreach ($base in @($realRoot, (Split-Path -Parent $realRoot))) {      # the same folder under the port's (or its parent's) new place
         for ($i = 1; $i -lt $parts.Count -and -not $found; $i++) {
             $cand = Join-Path $base ($parts[$i..($parts.Count - 1)] -join '\')
             if ($cand -ne $old -and (Test-Path -LiteralPath (Join-Path $cand "PS3_GAME\PARAM.SFO"))) { $found = $cand }
@@ -89,8 +152,8 @@ if ($discItem -and $discItem.LinkType -eq "Junction" -and -not (Test-Path -Liter
         if ($found) { break }
     }
     if ($found) {
-        cmd /c rmdir "$discLink" | Out-Null                          # the link only, never your game
-        cmd /c mklink /J "$discLink" "$found" | Out-Null              # not New-Item: [ ] in -Target are a wildcard there
+        Remove-Junction $discLink                                    # the link only, never your game
+        New-Junction $discLink $found                                # not New-Item: [ ] in -Target are a wildcard there
         "Your game folder moved (it was $old): game\disc links to $found now."
     } else {
         "Your game folder is not where it was: game\disc still points to $old, and that folder is gone."
@@ -148,7 +211,7 @@ try {
     $now = @(Get-ChildItem -LiteralPath $saves -Recurse -File -ErrorAction SilentlyContinue)
     if ($now.Count) {
         $sig = ($now | Sort-Object FullName | ForEach-Object { "{0}|{1}|{2}" -f $_.FullName.Substring($saves.Length), $_.Length, $_.LastWriteTimeUtc.Ticks }) -join "`n"
-        $last = Get-ChildItem -LiteralPath $bk -Directory -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
+        $last = Get-ChildItem -LiteralPath $bk -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9]{8}-[0-9]{6}$' } | Sort-Object Name | Select-Object -Last 1
         $lastSig = if ($last -and (Test-Path -LiteralPath "$($last.FullName)\files.txt")) { [System.IO.File]::ReadAllText("$($last.FullName)\files.txt") } else { "" }
         if ($sig -ne $lastSig) {
             $dst = Join-Path $bk (Get-Date -Format "yyyyMMdd-HHmmss")
@@ -156,7 +219,7 @@ try {
             Get-ChildItem -LiteralPath $saves | Copy-Item -Destination $dst -Recurse -Force
             [System.IO.File]::WriteAllText("$dst\files.txt", $sig)
             "Saves backed up to $dst"
-            Get-ChildItem -LiteralPath $bk -Directory | Sort-Object Name -Descending | Select-Object -Skip 20 |
+            Get-ChildItem -LiteralPath $bk -Directory | Where-Object { $_.Name -match '^[0-9]{8}-[0-9]{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 20 |
                 ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
         }
     }
@@ -210,6 +273,22 @@ if (-not (Test-Path -LiteralPath $modsNote)) {
         """Use this one instead"" is used, else the first by folder name, and the other is left out.")
 }
 
+# DLC (GitHub #48, #56): the "dlc" folder. The game's unlock files (*.edat) put there, in it or in subfolders, are
+# copied to where the game opens them (game\dev_hdd0\game\<ID>\USRDIR\dlc\ulf, lower-case names), only when
+# missing or different (tools\port_paths.ps1). Setup copies RPCS3's the same way. Never stops the game.
+try {
+    $dlcDrop = New-DlcDropFolder $root
+    foreach ($td in @(Get-DlcTitleDirs $game)) {
+        $nNew = Copy-DlcDrop $dlcDrop (Join-Path $td.FullName "USRDIR\dlc\ulf")
+        $dlcHave = @(Get-DlcFiles (Join-Path $td.FullName "USRDIR\dlc"))
+        $dlcLic = Get-DlcNeedLicense $dlcHave
+        "DLC: $(if ($dlcHave.Count) { "$($dlcHave.Count) unlock file(s)" } else { 'none' }) in game\dev_hdd0\game\$($td.Name)\USRDIR\dlc" +
+            $(if ($nNew) { " ($nNew new from the dlc folder)" }) +
+            $(if (-not $dlcHave.Count) { " (optional: put your DLC's *.edat files in the dlc folder)" }) +
+            $(if ($dlcLic) { "; $dlcLic need their license (.rap): not supported yet" })
+    }
+} catch { "DLC: the dlc folder could not be read ($_): the game starts without it" }
+
 $vars = @{
     PS3_VFS_ROOT                = "$game\disc"
     PS3_HDD0_ROOT               = "$game\dev_hdd0"
@@ -249,14 +328,41 @@ $vars = @{
     SDL_GAMECONTROLLER_USE_BUTTON_LABELS = "0"
     PS3_INPUT_MAP               = $(if (Test-Path -LiteralPath $inputToml) { $inputToml } else { "" })
 }
-# portable.txt in the project folder (the sign RecompLauncher and other launchers know): the menu's settings.ini,
-# the mods.ini beside it and the saved spots stay in this folder, as the saves, input.toml and the session logs do.
-$settingsIni = Join-Path $env:APPDATA "inFAMOUS2-port\settings.ini"
-if (Test-Path -LiteralPath (Join-Path $root "portable.txt")) {
-    $settingsIni = Join-Path $root "settings.ini"
+# Everything in the port's folder (v0.6.0, always; portable.txt is not needed any more): the menu's settings.ini, the
+# mods.ini beside it, the saved spots and the shader cache, as the saves, input.toml and the session logs are.
+# Copied in once from where an older version kept them (%APPDATA%\inFAMOUS2-port, %LOCALAPPDATA%\ps3recomp\
+# shader_cache); those stay as they were. A test that sets its own PS3_OVERLAY_INI (native_run.ps1) keeps it.
+$settingsIni = Join-Path $root "settings.ini"
+$migrated = Join-Path $root "work\settings-moved-in.txt"
+if (-not (Test-Path -LiteralPath $migrated) -and -not $RecordRoute) {
+    $old = if ($env:APPDATA) { Join-Path $env:APPDATA "inFAMOUS2-port" } else { $null }
+    $took = @()
+    foreach ($f in "settings.ini", "mods.ini", "spots.ini") {
+        $src = if ($old) { Join-Path $old $f } else { $null }
+        $dst = Join-Path $root $f
+        if ($src -and (Test-Path -LiteralPath $src) -and -not (Test-Path -LiteralPath $dst)) {
+            try { Copy-Item -LiteralPath $src -Destination $dst; $took += $f } catch {}
+        }
+    }
+    $scOld = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "ps3recomp\shader_cache" } else { $null }
+    $scNew = Join-Path $root "work\shader_cache"
+    if ($scOld -and -not (Test-Path -LiteralPath $scNew)) {
+        $d = Get-ChildItem -LiteralPath $scOld -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "inFAMOUS*" } | Select-Object -First 1
+        if ($d) {
+            $sz = (Get-ChildItem -LiteralPath $d.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            if ($sz -lt 2GB) { try { Copy-Item -LiteralPath $d.FullName -Destination $scNew -Recurse; $took += "the shader cache" } catch {} }
+        }
+    }
+    if ($took.Count) { "Your settings are kept in this folder now: copied in $($took -join ', ') from $old (those files stay there too)." }
+    try { New-Item -ItemType Directory -Force (Split-Path -Parent $migrated) | Out-Null; Set-Content -LiteralPath $migrated -Value "$(Get-Date -Format s) $($took -join ', ')" } catch {}
+}
+if ($null -ne $env:PS3_OVERLAY_INI) { $settingsIni = $env:PS3_OVERLAY_INI }
+else {
     $vars["PS3_OVERLAY_INI"] = $settingsIni
     $vars["PS3_CHEATS_SPOTS"] = Join-Path $root "spots.ini"
+    $vars["PS3_GAME_MODS_STATE"] = Join-Path $root "mods.ini"
 }
+if ($null -eq $env:PS3RECOMP_VK_SHADER_CACHE) { $vars["PS3RECOMP_VK_SHADER_CACHE"] = Join-Path $root "work\shader_cache" }
 # Controller input in the background: on, unless settings.ini has its own SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS
 # line (RecompLauncher's "Controller in the background" setting writes one; the game exports the file's lines
 # before SDL starts). A variable set here would win over that line.
@@ -278,7 +384,10 @@ if (-not $NoLog) { $vars["PS3RECOMP_PLAYLOG"] = "$out\playlog.tsv" }
 # (below, after the game ended). Not for RecompLauncher (it updates from the releases itself, and
 # Setup.exe --play says so), a git clone, a folder without port-version.txt, or a -RecordRoute test.
 # PS3_UPDATE_CHECK=0 in the settings file (F2 > Update's checkbox): only "Check now" asks GitHub.
+# With each question it also fetches the supporters list of F2 > About (supporters.json, GitHub; off with
+# the same setting) into work\update; the copy that came with this folder is what shows until then.
 $updDir = Join-Path $root "work\update"
+if (Test-Path -LiteralPath (Join-Path $root "supporters.json")) { $vars["PS3_SUPPORTERS_FILE"] = Join-Path $root "supporters.json" }
 $updBy = if ($RecordRoute) { "test" }
          elseif ($env:PS3_PORT_LAUNCHER -or $env:RECOMPLAUNCHER_VERSION) { "recomplauncher" }
          elseif (Test-Path -LiteralPath (Join-Path $root ".git")) { "git" }
@@ -358,6 +467,13 @@ if ($RecordRoute) {
     if ($From -eq 'opening') { "RECORDING A TEST ROUTE '$RecordRoute' FROM THE OPENING: press START at the title, then do not touch the controller until a voice says 'Recording'. Quit with Alt+F4 when done." }
     else { "RECORDING A TEST ROUTE '$RecordRoute': wait, do not touch the controller until a voice says 'Recording'. Quit with Alt+F4 when done." }
 }
+# The game reads %APPDATA% (settings.ini, mods.ini) and %LOCALAPPDATA% (the shader cache) through its C runtime's
+# ANSI functions: a user folder named in another alphabet than the PC's language for non-Unicode programs reaches it
+# as "????". Then their short 8.3 names, the same folders (tools\safe_paths.ps1).
+foreach ($k in "APPDATA", "LOCALAPPDATA") {
+    $v = [Environment]::GetEnvironmentVariable($k)
+    if ($v -and -not (Test-AnsiPath $v)) { $a = Get-AnsiPath $v; if ($a) { $vars[$k] = $a } }
+}
 foreach ($k in $vars.Keys) { if ($vars[$k] -ne "") { $psi.EnvironmentVariables[$k] = $vars[$k] } }
 
 $given = @()
@@ -404,7 +520,7 @@ if ($vars["PS3_UPDATE_DIR"]) {
                     try { & $Script -Root $Root -Force | Out-Null } catch {}
                 }
             }
-        }).AddArgument((Join-Path $PSScriptRoot "update_check.ps1")).AddArgument($root).AddArgument($updDir).AddArgument($updAuto)
+        }).AddArgument((Join-Path $PSScriptRoot "update_check.ps1")).AddArgument($realRoot).AddArgument($updDir).AddArgument($updAuto)
         $updWatch = @{ PS = $ps; Async = $ps.BeginInvoke() }
     } catch { "The update check did not start ($_); the game starts the same." }
 }
@@ -477,7 +593,7 @@ Remove-Item -LiteralPath $myTicket -ErrorAction SilentlyContinue
 # Setup.exe --update installs the new version in its own window (the saves, settings, mods and
 # controls are kept) and offers Play when it is done.
 if ($p.ExitCode -eq 0x55504454 -and $vars["PS3_UPDATE_DIR"]) {
-    try { & (Join-Path $PSScriptRoot "update_check.ps1") -Root $root -StartUpdate } catch { "Could not start the update: $_ (run Setup.exe in $root)" }
+    try { & (Join-Path $PSScriptRoot "update_check.ps1") -Root $realRoot -StartUpdate } catch { "Could not start the update: $_ (run Setup.exe in $realRoot)" }
 }
 if (-not $NoLog -and (Test-Path -LiteralPath "$out\playlog.tsv")) {
     # the cap the session ended at: the menu can change it while playing

@@ -158,13 +158,17 @@ static const unsigned short prm_sdl_scan_mac[][2] = {
     {100, 0x0A}, {101, 0x6E},                                       /* ISO key left of Z, Menu */
     {104, 0x69}, {105, 0x6B}, {106, 0x71}, {107, 0x6A}, {108, 0x40}, {109, 0x4F}, {110, 0x50}, {111, 0x5A},   /* F13-F20 */
     {224, 0x3B}, {225, 0x38}, {228, 0x3E}, {229, 0x3C},             /* Ctrl, Shift (left, right) */
+    {226, 0x3A}, {230, 0x3D},                                       /* Alt (left, right): GitHub #68 */
 };
 
 enum { PRM_CAP_NONE, PRM_CAP_INPUT, PRM_CAP_CANCEL, PRM_CAP_RESERVED, PRM_CAP_UNKNOWN };
 
 /* A key pressed while the menu waits for one: PRM_CAP_INPUT (*out set),
  * _CANCEL (Esc), _RESERVED (*why says whose it is) or _UNKNOWN (the game
- * cannot read it). alt_held: Alt was down (Alt+<key> is the window's). */
+ * cannot read it). alt_held: Alt was down (Alt+<key> is the window's). Alt
+ * itself binds (GitHub #68; its own key-down has alt_held set): Alt+Enter,
+ * Alt+Tab and Alt+F4 stay the window's, and cellPad keeps Enter, Tab and F4
+ * from the game while a bound Alt is held. */
 static inline int prm_capture_key(int scancode, int alt_held, PrmInput* out, const char** why)
 {
     *why = NULL;
@@ -177,8 +181,8 @@ static inline int prm_capture_key(int scancode, int alt_held, PrmInput* out, con
     case 66:  *why = "F9 marks a moment in the play log."; return PRM_CAP_RESERVED;
     case 68:  *why = "F11 switches fullscreen."; return PRM_CAP_RESERVED;
     case 70:  *why = "Windows takes Print Screen for screenshots."; return PRM_CAP_RESERVED;
-    case 226: case 230:
-        *why = "Alt belongs to the window (Alt+Enter fullscreen, Alt+Tab, Alt+F4)."; return PRM_CAP_RESERVED;
+    case 226: out->kind = PRM_KEY; out->code = 0x3A; return PRM_CAP_INPUT;         /* left Alt */
+    case 230: out->kind = PRM_KEY; out->code = 0x3D; return PRM_CAP_INPUT;         /* right Alt */
     case 227: case 231: *why = "The Windows key belongs to Windows."; return PRM_CAP_RESERVED;
     default: break;
     }

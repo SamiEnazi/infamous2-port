@@ -39,6 +39,7 @@ file(GLOB_RECURSE HLE_SOURCES CONFIGURE_DEPENDS
     "libs/font/*.c"
     "libs/misc/*.c"
     "libs/hardware/*.c"
+    "libs/game/*.c"         # title logic redone natively (Track D: inf2_dlogic.c, hooks from cheats/hooks.txt)
     "runtime/diag/*.c"      # yz_frontier_trace, used by the live draw engine
 )
 # Exclude test harnesses (e.g. libs/video/tests/*): they define their own main().
@@ -48,6 +49,7 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
 # It loads libvulkan at run time, so building needs only the Vulkan headers --
 # no target-architecture libvulkan, which keeps cross-compiling simple.
 option(PS3RECOMP_RSX_VULKAN "Build the Vulkan RSX backend (Linux, Windows)" OFF)
+option(PS3RECOMP_REQUIRE_GUEST_PROGRAMS "Vulkan: fail the configure when glslang (the guest shader translator) is missing" OFF)
 list(FILTER HLE_SOURCES EXCLUDE REGEX "rsx_vulkan_backend\\.c$")
 if(PS3RECOMP_RSX_VULKAN)
     if(APPLE)
@@ -97,7 +99,10 @@ file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS
 #    *inside the game build* by clang so the tail call is guaranteed -- a plain
 #    call leaks one resolver frame per guest loop iteration. A port adds it to
 #    its own target; see templates/project/CMakeLists.txt.
-list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/tests/|/runtime/ppu/|/runtime/host/|/spu_dispatch_mt\.c$")
+#  - runtime/game_module/: the game module's own side of ps3emu/ps3_module.h (the shared state's
+#    storage, its C runtime bits, its import slots), compiled with the lifted code into the game
+#    module by tools/build_module.py, never into the engine (slim split, 2026-11-14).
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/tests/|/runtime/ppu/|/runtime/host/|/runtime/game_module/|/spu_dispatch_mt\.c$")
 
 # ---------------------------------------------------------------------------
 # Static library
@@ -110,6 +115,14 @@ add_library(ps3recomp_runtime STATIC
 target_include_directories(ps3recomp_runtime PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
+
+# The game module's shared state (ps3emu/ps3_module.h): every engine TU reaches the module's copy
+# through ps3_mv_* (runtime/module/ps3_module_vars.h, force-included; slim split, 2026-11-14).
+if(MSVC)
+    target_compile_options(ps3recomp_runtime PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/runtime/module/ps3_module_vars.h")
+else()
+    target_compile_options(ps3recomp_runtime PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/runtime/module/ps3_module_vars.h")
+endif()
 
 # HLE modules include their own headers
 target_include_directories(ps3recomp_runtime PRIVATE
@@ -378,6 +391,14 @@ if(PS3RECOMP_RSX_VULKAN)
                        "opt in with PS3RECOMP_VK_GUEST_PROGRAMS=1")
     else()
         message(STATUS "  Vulkan:       glslang not found; guest programs unavailable")
+        # A game built like this starts and plays its sound but draws one solid colour (GitHub #61, #69).
+        # A player's build asks for the configure to stop here instead, with CMake's own reason.
+        if(PS3RECOMP_REQUIRE_GUEST_PROGRAMS)
+            find_package(glslang CONFIG)   # not QUIET this time: says why it was not taken
+            message(FATAL_ERROR
+                "glslang was not found (glslang_DIR='${glslang_DIR}'), so the game would be built without its "
+                "shader translator: sound, but a blank picture. Nothing was built.")
+        endif()
     endif()
 endif()
 

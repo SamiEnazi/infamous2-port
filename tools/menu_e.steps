@@ -1,0 +1,142 @@
+# F2 menu, design E (menu-e, 2026-11-16): every page, the remap sub-page, a capture dialog, the
+# compare line, F3, the Quit question, and 720p / 1440p windows -- driven by the pad (PAD_FILE: the
+# menu takes scripted presses while it is open) and by keys posted to the window (the 'key' step).
+# Changes made on the way (checked in the run's settings.ini afterwards): Frame rate cap 60 -> 72
+# (pad Right), Sharpening +5 (key Right), Master volume 15 -> 10 (pad Left), Performance HUD on (Cross).
+# Run: tools\fast.ps1 -Tag menuA -Steps tools\menu_e.steps -NoPictureCheck
+#      -Extra "PS3RECOMP_VK_WINDOW_SIZE=1920x1080;PS3RECOMP_RENDER_SCALE=1.5;PS3RECOMP_VK_PRESENT_DARK=1"
+#! seconds 420
+#! savefrom work\saves\first-save\gamedata
+#! fastmovies 1
+wait v_02_city_intro 150
+sleep 2
+waitimg city_hud 40,20,340,130 15 150
+sleep 2
+anchor
+key F2
+sleep 1.5
+shot e_display
+press 0x0020 3
+sleep 0.8
+shot e_display_fps72
+press 0x0800 3
+sleep 1.2
+shot e_graphics
+press 0x0040 3
+sleep 1.0
+shot e_graphics_aa_split
+press 0x0040 3
+sleep 0.4
+press 0x0040 3
+sleep 0.6
+key Right
+sleep 0.8
+shot e_graphics_sharpen
+press 0x0800 3
+sleep 1.2
+shot e_audio
+press 0x0080 3
+sleep 0.8
+press 0x0040 3
+sleep 0.8
+shot e_audio_lang
+press 0x0800 3
+sleep 1.2
+shot e_controls
+press 0x0010 3
+sleep 0.5
+press 0x0010 3
+sleep 0.6
+shot e_controls_remaprow
+press 0x4000 3
+sleep 1.2
+shot e_remap
+press 0x0040 3
+sleep 0.3
+press 0x0040 3
+sleep 0.3
+press 0x0020 3
+sleep 0.5
+press 0x4000 3
+sleep 1.0
+shot e_remap_capture
+key Esc
+sleep 0.8
+press 0x2000 3
+sleep 1.0
+shot e_controls_back
+press 0x0800 3
+sleep 1.2
+shot e_hud
+press 0x4000 3
+sleep 0.8
+press 0x0800 3
+sleep 1.2
+shot e_lighting
+press 0x0010 3
+sleep 0.4
+press 0x0010 3
+sleep 0.4
+press 0x0010 3
+sleep 0.4
+press 0x0010 3
+sleep 0.8
+shot e_lighting_clarity_split
+key F3
+sleep 1.2
+shot e_lighting_f3
+key F3
+sleep 0.8
+press 0x0800 3
+sleep 1.2
+shot e_effects
+press 0x0800 3
+sleep 1.5
+shot e_mods
+press 0x0800 3
+sleep 1.2
+shot e_update
+press 0x0800 3
+sleep 1.5
+shot e_cheats
+press 0x0040 3
+sleep 0.3
+press 0x0040 3
+sleep 0.3
+press 0x0040 3
+sleep 0.3
+press 0x0040 3
+sleep 0.3
+press 0x0040 3
+sleep 0.3
+press 0x0040 3
+sleep 0.8
+shot e_cheats_scrolled
+press 0x0800 3
+sleep 1.0
+shot e_wrap_display
+press 0x1000 3
+sleep 1.0
+shot e_quit_question
+press 0x2000 3
+sleep 0.8
+key Esc
+sleep 1.5
+shot e_closed_saved
+winsize 1280 720
+sleep 2.5
+key F2
+sleep 0.6
+press 0x0800 3
+sleep 1.5
+shot e720_graphics
+key Esc
+sleep 1.0
+winsize 2560 1440
+sleep 2.5
+key F2
+sleep 1.5
+shot e1440_graphics
+key Esc
+sleep 1.0
+close

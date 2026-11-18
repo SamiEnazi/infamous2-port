@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="402" viewBox="0 0 760 402" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+<title>The same spot on a smaller CPU</title>
+<rect width="760" height="402" rx="12" fill="#1a1a19"/>
+<text x="24" y="36" font-size="19" font-weight="600" fill="#f0efec">The same spot on a smaller CPU</text>
+<text x="24" y="58" font-size="13" fill="#c3c2b7">The test PC held to fewer cores (process affinity on its P-cores), 720p internal, medians of 3 runs</text>
+<rect x="24" y="68" width="12" height="12" rx="3" fill="#3987e5"/>
+<text x="42" y="78.5" font-size="12.5" fill="#c3c2b7">This port v0.6.0</text>
+<rect x="177.6" y="68" width="12" height="12" rx="3" fill="#199e70"/>
+<text x="195.6" y="78.5" font-size="12.5" fill="#c3c2b7">This port v0.5.7</text>
+<rect x="331.2" y="68" width="12" height="12" rx="3" fill="#d95926"/>
+<text x="349.2" y="78.5" font-size="12.5" fill="#c3c2b7">RPCS3 0.0.42</text>
+<line x1="250.0" y1="90" x2="250.0" y2="358" stroke="#3a3a37" stroke-width="1"/>
+<text x="250.0" y="374" font-size="11" text-anchor="middle" fill="#c3c2b7">0</text>
+<line x1="352.5" y1="90" x2="352.5" y2="358" stroke="#3a3a37" stroke-width="1"/>
+<text x="352.5" y="374" font-size="11" text-anchor="middle" fill="#c3c2b7">40</text>
+<line x1="455.0" y1="90" x2="455.0" y2="358" stroke="#3a3a37" stroke-width="1"/>
+<text x="455.0" y="374" font-size="11" text-anchor="middle" fill="#c3c2b7">80</text>
+<line x1="557.5" y1="90" x2="557.5" y2="358" stroke="#3a3a37" stroke-width="1"/>
+<text x="557.5" y="374" font-size="11" text-anchor="middle" fill="#c3c2b7">120</text>
+<line x1="660.0" y1="90" x2="660.0" y2="358" stroke="#3a3a37" stroke-width="1"/>
+<text x="660.0" y="374" font-size="11" text-anchor="middle" fill="#c3c2b7">160</text>
+<text x="660.0" y="390" font-size="11" text-anchor="end" fill="#c3c2b7">frames per second, average (higher is better)</text>
+<text x="238" y="121.0" font-size="13.5" font-weight="600" text-anchor="end" fill="#f0efec">Whole CPU</text>
+<text x="238" y="136.0" font-size="11.5" text-anchor="end" fill="#c3c2b7">6P + 8E cores, 20 threads</text>
+<path d="M250.0,96.0 H621.9 Q625.9,96.0 625.9,100.0 V108.0 Q625.9,112.0 621.9,112.0 H250.0 Z" fill="#3987e5"><title>This port v0.6.0, Whole CPU: 147 fps</title></path>
+<text x="632.9" y="108.5" font-size="12.5" font-weight="700" fill="#f0efec">147</text>
+<path d="M250.0,114.0 H552.7 Q556.7,114.0 556.7,118.0 V126.0 Q556.7,130.0 552.7,130.0 H250.0 Z" fill="#199e70"><title>This port v0.5.7, Whole CPU: 120 fps</title></path>
+<text x="563.7" y="126.5" font-size="12.5" font-weight="700" fill="#f0efec">120</text>
+<path d="M250.0,132.0 H357.2 Q361.2,132.0 361.2,136.0 V144.0 Q361.2,148.0 357.2,148.0 H250.0 Z" fill="#d95926"><title>RPCS3 0.0.42, Whole CPU: 43.4 fps</title></path>
+<text x="368.2" y="144.5" font-size="12.5" font-weight="700" fill="#f0efec">43.4</text>
+<text x="238" y="191.0" font-size="13.5" font-weight="600" text-anchor="end" fill="#f0efec">4 cores / 8 threads</text>
+<text x="238" y="206.0" font-size="11.5" text-anchor="end" fill="#c3c2b7"></text>
+<path d="M250.0,166.0 H525.6 Q529.6,166.0 529.6,170.0 V178.0 Q529.6,182.0 525.6,182.0 H250.0 Z" fill="#3987e5"><title>This port v0.6.0, 4 cores / 8 threads: 109 fps</title></path>
+<text x="536.6" y="178.5" font-size="12.5" font-weight="700" fill="#f0efec">109</text>
+<path d="M250.0,184.0 H461.8 Q465.8,184.0 465.8,188.0 V196.0 Q465.8,200.0 461.8,200.0 H250.0 Z" fill="#199e70"><title>This port v0.5.7, 4 cores / 8 threads: 84.2 fps</title></path>
+<text x="472.8" y="196.5" font-size="12.5" font-weight="700" fill="#f0efec">84.2</text>
+<path d="M250.0,202.0 H317.5 Q321.5,202.0 321.5,206.0 V214.0 Q321.5,218.0 317.5,218.0 H250.0 Z" fill="#d95926"><title>RPCS3 0.0.42, 4 cores / 8 threads: 27.9 fps</title></path>
+<text x="328.5" y="214.5" font-size="12.5" font-weight="700" fill="#f0efec">27.9</text>
+<text x="238" y="261.0" font-size="13.5" font-weight="600" text-anchor="end" fill="#f0efec">4 cores / 4 threads</text>
+<text x="238" y="276.0" font-size="11.5" text-anchor="end" fill="#c3c2b7"></text>
+<path d="M250.0,236.0 H527.4 Q531.4,236.0 531.4,240.0 V248.0 Q531.4,252.0 527.4,252.0 H250.0 Z" fill="#3987e5"><title>This port v0.6.0, 4 cores / 4 threads: 110 fps</title></path>
+<text x="538.4" y="248.5" font-size="12.5" font-weight="700" fill="#f0efec">110</text>
+<path d="M250.0,254.0 H406.9 Q410.9,254.0 410.9,258.0 V266.0 Q410.9,270.0 406.9,270.0 H250.0 Z" fill="#199e70"><title>This port v0.5.7, 4 cores / 4 threads: 62.8 fps</title></path>
+<text x="417.9" y="266.5" font-size="12.5" font-weight="700" fill="#f0efec">62.8</text>
+<path d="M250.0,272.0 H261.1 Q265.1,272.0 265.1,276.0 V284.0 Q265.1,288.0 261.1,288.0 H250.0 Z" fill="#d95926"><title>RPCS3 0.0.42, 4 cores / 4 threads: 5.9 fps</title></path>
+<text x="272.1" y="284.5" font-size="12.5" font-weight="700" fill="#f0efec">5.9</text>
+<text x="238" y="322.0" font-size="13.5" font-weight="600" text-anchor="end" fill="#f0efec">2 cores / 4 threads</text>
+<text x="238" y="337.0" font-size="11.5" text-anchor="end" fill="#c3c2b7">v0.5.7 not measured</text>
+<path d="M250.0,306.0 H434.6 Q438.6,306.0 438.6,310.0 V318.0 Q438.6,322.0 434.6,322.0 H250.0 Z" fill="#3987e5"><title>This port v0.6.0, 2 cores / 4 threads: 73.6 fps</title></path>
+<text x="445.6" y="318.5" font-size="12.5" font-weight="700" fill="#f0efec">73.6</text>
+<path d="M250.0,324.0 H262.9 Q266.9,324.0 266.9,328.0 V336.0 Q266.9,340.0 262.9,340.0 H250.0 Z" fill="#d95926"><title>RPCS3 0.0.42, 2 cores / 4 threads: 6.6 fps</title></path>
+<text x="273.9" y="336.5" font-size="12.5" font-weight="700" fill="#f0efec">6.6</text>
+</svg>

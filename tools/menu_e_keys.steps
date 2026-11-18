@@ -1,0 +1,50 @@
+# F2 menu, design E: the keyboard alone (menu-e, 2026-11-16). F2 opens, E / Q switch pages, the
+# arrows move and change values, Esc closes and saves. Sharpening +5 (30% -> 35%) and Texture
+# filtering 16x -> 8x must be in the run's settings.ini afterwards; then the mouse: a click on the rail's
+# Effects icon and one on the Effects resolution value (As game -> High: PS3RECOMP_FX_RES=2).
+# Run: tools\fast.ps1 -Tag menuK -Steps tools\menu_e_keys.steps -NoPictureCheck
+#! seconds 300
+#! savefrom work\saves\first-save\gamedata
+#! fastmovies 1
+wait v_02_city_intro 150
+sleep 25
+anchor
+key F2
+sleep 1.2
+key E
+sleep 0.8
+key Down
+sleep 0.4
+key Down
+sleep 0.4
+key Down
+sleep 0.5
+key Right
+sleep 0.6
+key Down
+sleep 0.5
+key Left
+sleep 0.8
+shot k_graphics_keys
+key Q
+sleep 0.8
+shot k_display_back
+key Tab
+sleep 0.4
+key Tab
+sleep 0.4
+key Tab
+sleep 0.4
+key Tab
+sleep 0.4
+key Tab
+sleep 1.0
+shot k_lighting
+click 46 406
+sleep 1.0
+click 550 122
+sleep 1.0
+shot k_mouse_effects
+key Esc
+sleep 1.2
+close
