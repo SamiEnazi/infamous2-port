@@ -44,6 +44,8 @@ see below), dispatch 6.4%, FIFO walk 5.2%. ~2.8 us per draw, ~7,600 draws per fr
 | Dev 6b300ea | 41.8 | 21.4 ms | 96.1 ms |
 | Dev 6b300ea + Far shadow detail: Reduced | 42.7 | 18.6 ms | 93.8 ms |
 | j6 (b653037) vs t13d (job 204 types 1/3), 8 clean runs each | 41.70 -> 41.93 | 21.04 -> 21.34 ms (noise?) | 97.38 -> 96.26 ms |
+| Upstream v0.6.2 (f746fc6 + measurement, no PGO), `ab62` 4 rounds | **30.10** | 32.2 ms | 60.6 ms |
+| ... same batch: t13g (= 89ca87a) / fs3 (installed + measurement) | 41.83 / 41.02 | 21.0 / 21.9 ms | 96.0 / 98.2 ms |
 
 Far shadow detail in normal play (2026-11-18, j6 build, real clock, 60 fps cap, player's settings and GPU clock
 1400 MHz, HUD on, one 50 s run each of the plaza walk, `sh60full` / `sh60reduced` recordings): Full 34.9 fps,
@@ -156,6 +158,44 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
    player settings, GPU 1200; compare against the dev build (and the installed 4cabf54). If upstream is clearly
    faster on the Deck, move the Deck work onto upstream (our natives 204/210/218/220/223 vs theirs: keep the faster
    exact one per job).
+
+   **Result (2026-11-18): upstream v0.6.2 is 28% slower on the Deck (30.1 vs 41.8 fps), but its job side is much
+   cheaper.** Tree `infamous2-port-upstream`, branch `upstream-test` (no upstream tracking): f746fc6 + e88e22c (our
+   measurement engine part, Linux thread names only, no placement) + d4450b2 (`PORT_C_EXTRA`), no PGO, znver2;
+   copy in `work/port/up62/` (engine exe + `libInfamous2Game.so`). v0.6 needs
+   `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=1048576 PS3_STATIC_TLS_RETRY=1`, else it re-execs and shows up
+   as "exe" (invisible to `pgrep -x Infamous2Recomp`, budget.py, the lock checks). Isolated with
+   `PS3RECOMP_VK_SHADER_CACHE` / `XDG_CONFIG_HOME` / `XDG_CACHE_HOME` in `U/work/sandbox`. Upstream picks
+   `PS3RECOMP_SHADOW_RES=1` on the Deck by itself (1024 maps, = ours); its FBF1X / BARBATCH are off on AMD.
+
+   | ab62 (4 rounds) | fps | main / rsx / spu ms/frame | GPU | W | p99 | >33 ms per run |
+   |---|---|---|---|---|---|---|
+   | upstream | 30.10 (sd 0.41) | 28.6 / 32.2 / 60.6 | 16.0 | 15.9 | 38.2 | ~810 |
+   | t13g | 41.83 (sd 0.84, run 1 off-route) | 18.7 / 21.0 / 96.0 | 15.2 | 15.0 | 27.9 | 4 |
+   | fs3 | 41.02 (sd 1.71) | 19.0 / 21.9 / 98.2 | 15.2 | 14.9 | 28.3 | 3.8 |
+
+   * Upstream's limit is the RSX thread (97% of a CPU). Decomposition (`abx62`, 2 runs each): t13g with
+     `PS3RECOMP_WTRACK=0` 33.75 fps / RSX 28.2 ms (upstream's `rsx_wtrack.c` is Windows-only); t13g with
+     `PS3_CPU_PLACE=off` 37.8 fps / RSX 24.9 ms (upstream has no Linux placement); upstream pinned with taskset
+     31.45 fps / RSX 30.6 ms; the rest (~2 ms) = PGO + our RSX commits. Upstream with 4 pool threads 30.05 fps.
+   * Job side: SPU CPU 60.6 vs 96.0 ms/frame. Upstream runs 2 pool threads (87-100% busy) plus jobs on the main
+     thread in its waits (7.5-10 of its 28.6 ms). Per job (`js62`, ours -> upstream, ms/frame): 218 20.5 -> 15.2,
+     223 19.1 -> 15.5, 204 16.6 -> 11.2 (theirs = v0.5.7's native), 220 13.1 -> 9.1, 210 11.6 -> 2.4 (whole-job
+     native), 213 8.3 -> 5.7, 208 2.1 -> 0.4, 212 2.0 -> 1.0, 209 0.85 -> 0.2; all 109 -> 68-74. Caution: same-code
+     jobs being 25-40% shorter there is partly the setting (2 threads vs 4, so less SMT / cache sharing, and 30 fps
+     instead of 42); only a merged build tells how much is real.
+   * Merge dry-run (deck-perf + f746fc6): text conflicts in 2 files only, `vk_overlay.cpp` (our Far shadow row vs
+     their MSAA rows; their menu moved to `vk_overlay_menu.inc`) and `vk_threaded_rec.h` (1 include hunk). Overlaps
+     git does not see: job 218 entries 0x16320 / 0x17780 / 0x18B80 registered twice (our job218_native.c, their
+     native_218.c); with their runner on, 208/209/210/212 run as whole-job natives (our nx_job208/209/212 and the
+     j210 walker unused); their 204 = v0.5.7 (ours kept); 201/211/220 ours only. The module split needs PGO
+     retrained (`PORT_PGO` = module, `PORT_ENGINE_PGO` = engine) and the GLIBC_TUNABLES line in play.sh / bench.
+   * Decision: do not install v0.6.2. Try moving the Deck work onto upstream in a test branch (item 1).
+
+1. Merge test (next agent): deck-perf + upstream f746fc6 in a separate worktree / branch, keep our Linux RSX
+   pieces (write tracking, placement, RSX commits), place their pool threads, per-job A/B ours vs theirs (exact
+   only), pool thread count 2/3/4. Accept only if it beats t13g by the acceptance rules; then PGO retrain on the
+   winner (item 3).
 
 2. Job 204 remaining declines (5.5% of calls, t13d): type 4 (18.7k per run, handler ~3,650 instructions + ~2,600
    in callees: poor value), type 1 slots 6/8/9 (5.9k; 0x11080 sRGB->linear pow 2.4 and 0xA4A8), FB_STALE (material
