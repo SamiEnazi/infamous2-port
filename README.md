@@ -15,7 +15,6 @@ No emulator while you play, and no emulator to install it.
 [![3.4x the frame rate of RPCS3](https://img.shields.io/badge/vs%20RPCS3-3.4%C3%97%20the%20fps-2a78d6)](#performance)
 [![Any controller](https://img.shields.io/badge/controllers-plug%20%26%20play-1baf7a?logo=steamdeck&logoColor=white)](#what-you-get)
 [![License: MIT](https://img.shields.io/badge/license-MIT-1baf7a)](LICENSE)
-[![Made with Claude Code](https://img.shields.io/badge/made%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](#made-with-claude-code)
 [![Visitors](https://komarev.com/ghpvc/?username=SamiEnazi-infamous2-port&label=visitors&color=3fa9ff&style=flat)](https://github.com/SamiEnazi/infamous2-port)
 
 <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
@@ -446,13 +445,6 @@ Contributors: [ANewJanuary](https://github.com/ANewJanuary) (Linux setup, [#64](
 | `cheats/` | The game side of the cheats and of the mouse camera. |
 | [`natives/`](natives/) | Native versions of the game's heaviest SPU jobs. |
 | `tools/` | The build, Setup, `tools/play.ps1`, and the tools used to test it. |
-
-## Made with Claude Code
-
-This port was built in **2 days and 9 hours**, in one long conversation between **Sami** and **Claude**
-(Anthropic's Claude Opus 5.5, working in [Claude Code](https://claude.com/claude-code)): from the first message
-(6 Nov 2026, 22:42) to the first public release (9 Nov 2026, 07:15). Sami brought the idea, his own copy of the
-game, the direction, the playtesting and the feedback; Claude wrote the code, the tools, Setup and this README.
 
 ## Thanks and credits
 
