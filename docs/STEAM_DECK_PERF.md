@@ -57,6 +57,24 @@ graphics thread and the SPU side were at the limit then.)
 | ... same batch: mgP (training-only profile) / mg (no PGO) / t13g | 49.14 / 42.52 / 41.76 | 19.3 / 22.4 / 21.1 ms | 72.4 / 75.0 / 96.9 ms |
 | mgPr + short tail at 16:10 (`PS3RECOMP_ENG_FASTDRAW_HUD`, 04ddd13, rsx1fdf), `rb4`+`rb5` (player's settings of 17:42: aniso 16, soft shadows 2; GPU 17.4 ms) | **49.75** | 18.87 ms | 74 ms |
 | ... same batches: mgPr | 48.03 | 19.61 ms | 73 ms |
+| hd1 = HEAD e0c7e3d (04ddd13 + 8833293 SDL fix, mg1r), new tooling `ZONE=plaza detstreet.sh` (guest 16-100 s), `zp`+`zp2` 3 clean of 7 | **50.12** | 18.69 ms | 73.1 ms |
+| ... same batches: mgPr, 3 clean of 7 | 48.08 | 19.78 ms | 72.5 ms |
+
+**Street (zone 2, the player's autosave of 17:54: busy street by the pharmacy, toward the cathedral; 2026-11-18,
+agent zone2; section 3).** Guest 10-85 s of the walk, player's settings, GPU 1200, ~8,300 draws:
+
+| Build (batches `zs`+`zs2`) | fps (sd) | main / RSX / jobs+SPU ms per frame | busy main / RSX | GPU ms | W | p99 |
+|---|---|---|---|---|---|---|
+| mgPr, 5 clean of 9 | 45.90 (0.42) | 20.46 / 19.03 / 77.6 | 94 / 87 % | 17.49 | 14.7 | 30.3 |
+| hd1, 3 clean of 9 | **46.34** (0.45) | 20.40 / 17.86 / 77.7 | 95 / 83 % | 17.48 | 14.7 | 29.6 |
+
+The street is **main-thread-bound**: a 2 ms busy wait per frame on the main thread costs 2.2 ms of frame time, on the
+RSX thread 0.7 ms (causal test over guest 4-20 s), so 04ddd13's RSX saving (-1.2 ms, 2.16 us per draw) gives only +1 %
+here. The GPU needs 17.5 ms per frame (81 % of the frame): also over a 60 fps budget. Jobs 75.6 ms/frame (223 Edge
+17.9, 218 17.4, 204 10.4, 220 8.5; pool 85 % busy). Main thread profile: guest PPU code 69 % (flat), jobs run in its
+waits ~14 % + the runner's wait spin 4 % (~3.6 ms/frame of job waiting), guest stores 2.7 %, pthread rwlocks 3.4 %
+(caller not yet found). The street bench has fixed clusters of ~120 ms frames while walking (an artifact of the
+frame-stepped clock, absent on the real clock): its p99 / > 50 ms counts are not real-play numbers.
 
 Real clock, standing at spot 2 (player's settings with the 60 fps cap, GPU 1400): mgPr 57.84 fps over 30 min (5-min
 buckets 57.5-58.3, p99 19.4-19.8 ms, 17 frames > 33 ms, none > 50 ms, worst 38 ms); t13g 48.16 fps over 15 min (p99
@@ -97,7 +115,8 @@ for each single thread (the RSX thread is ~2.56 us per draw now, so 9,000 draws 
 all CPU work per frame (now ~110 ms: main 18.7, RSX 19.5, SPU 71) has to fit the 4 cores / 8 threads under 15 W
 (roughly -30%). GPU: 15.1 ms/frame at 1200 MHz on the plaza, also close to the 16.7 ms limit. New benchmark zone
 wanted by the player: the busy street of their current save, walking to the cathedral (save snapshot
-`<player>/work/pgo/bench-saves/gamedata3`, 17:54).
+`<player>/work/pgo/bench-saves/gamedata3`, 17:54) -- built 2026-11-18 (`work/bench/detstreet.sh`, section 3; results
+above: main-thread-bound at ~46 fps / 8,300 draws).
 
 ## 3. How to measure
 
@@ -162,6 +181,27 @@ wanted by the player: the busy street of their current save, walking to the cath
   `abtable.py` with `DROPCPU=""`. Always pass EXE / an exe dir: detbench / abrun default to the player's install.
   `--only engine` builds into PORT_ENGINE_BUILD (default work/port/build, not PORT_BUILD): set it per build dir.
   The det bench copies the player's current settings.ini: when the player changes settings, compare only within a batch.
+* Street det bench (zone 2, 2026-11-18; merged builds only): `work/bench/detstreet.sh <tag> [ENV=V ...]` with
+  `EXE=<exe dir>` (required). Save `work/bench/zone2/gamedata3` (copy of `<player>/work/pgo/bench-saves/gamedata3`):
+  at boot the game's ListAutoLoad takes the slot with the newest PARAM.SFO (cellSaveData.c save_mtime), here `_0`
+  "(Autosave) 8. Bomb Scare" = the player's street; to load another slot, `touch` its PARAM.SFO in a copy. Route
+  `zone2/route-street.pad` (the player picked it from test z2t2): stand 4 s, left stick half forward to guest 84 s.
+  At normal speed Cole jogs down the tram tracks, crosses the junction to the cathedral grounds and ends against the
+  stone balustrade by the cathedral steps (~8,300 draws; z2t2's turn to the pub only happened under build load).
+  Measured over GUEST 10..85 s (`zstat.py`: frames = the ftrace PRESENT spans after the route start, so every build is
+  measured over the same frames of the walk; a real-time window would cover a different stretch per build), CPU per
+  thread from `zsample.py` (0.5 s samples), GPU from `PS3RECOMP_VK_GPU_PROF`, power from sysfs. Recordings in
+  `D/native/recordings` (`zrun.sh` runs the dev tree's linux_run.py: nothing is written in the player's tree).
+  Route check (SUSPECT(route)): 10 guest-s draw segments vs `zone2/ref-segments-street.txt` (5 %), end shot vs
+  `zone2/ref-end-street.png` (30 % of pixels), median 7,600-9,400. All runs agree to guest ~20 s; at the tram junction
+  hd1 left the route in 5 of 9 runs, mgPr in 2 of 9: plan ~2x the rounds and discard. SUSPECT(input) = someone opened
+  the in-game menu during the run (the HUD gets turned on): discard. The ~120 ms frames at guest 8 / 10 / 16-17 s are a
+  frame-stepped-clock artifact (a guest wait for time inside a frame ends only by the 100 ms stall rule; the real
+  clock shows none). Interleaved A/B: `PREFIX=<p> work/bench/abstreet.sh <rounds> "a=<exe dir>[|ENV=V ...]" "b=..."`,
+  table `python3 work/bench/ztable.py <output>`; `ZONE=plaza` = the old det plaza on the same tooling (guest 16..100 s),
+  `ZONE=street2` = a steadier variant (walk to guest 16 s, then stand + camera pans; ~41.7 fps, 1 of 6 off-route; not
+  the player's pick). `work/bench/zprof.sh` = the same + perf of one thread (`PTHREAD=main|rsx|all`). Never build,
+  profile-analyse or run anything heavy while a game run is going: it skews the run.
 * PGO-safe edits: a change to a function's control flow (a branch, a loop, a select) drops its profile; small static
   functions are inlined into their callers before instrumentation, so e.g. any edit of dl_scan / eng_ic_probe changes
   sink_end_body's hash (the build prints "PGO: N function(s) changed"). New work in a `noinline` function called from
