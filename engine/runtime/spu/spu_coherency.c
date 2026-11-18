@@ -417,7 +417,7 @@ unsigned char* const g_spu_coh_bitmap = s_coh_bitmap;
  * before the line's bit and before its barrier, never cleared; 4 = a page the TOC folding
  * watches. Anything but exactly 1 sends a store down the old path (range, line bit, store,
  * re-check). All zero until the fill, so before it every store is careful. */
-__attribute__((aligned(64))) unsigned char g_ppu_st_pmap[1u << 20];
+PS3_MV_DEF(__attribute__((aligned(64))) unsigned char, g_ppu_st_pmap, [1u << 20], )   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 
 void spu_coh_pmap_init(uint32_t lo, uint32_t hi, uint32_t wlo, uint32_t whi)
 {

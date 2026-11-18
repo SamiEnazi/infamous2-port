@@ -320,6 +320,45 @@ option does not scale the mouse (the port's sensitivities do); the game's invert
 PS3_MOUSE_CAM_HOOK=0: no hooks; PS3_MOUSE_PROBE=1 a [mouse] line per moving camera frame (2: summary only);
 PS3_CHEATS_AT=t:mousemode=0|1 switches the mode (tests).
 
+### GitHub #59 / #51 (2026-11-17, fix/mouse): a fast flick outside aiming was "floaty"
+Reports: Direct mode, small moves fine, a fast flick to look the other way "floaty and not snappy" when not
+aiming, perfect while aiming (#59); "camera inertia/spinning with mouse free-look" (#51). Not a v0.6.0
+regression: the free camera has turned this way since direct mode exists (v0.3.0), at every frame rate.
+- The cause is the game's: the free camera's view follows its target at no more than **5 rad/s** in yaw and
+  pitch and **1000 units/s** in distance -- the vector (5, 5, 1000) at **0x007443B0** (camera tuning table
+  0x00744210 + 0x1A0), read by the solver func_00081CE0 at 0x000820EC (its reciprocal times the path the camera
+  walks from its old place to the new one). A stick never asks for more than 3.75 rad/s; a mouse does. The
+  hook (above) therefore carried the turn: the target was kept 0.19 rad ahead of the view, the view came after
+  at 5 rad/s. Measured (runs native\recordings\mf-*, work\mousefix, PS3_MOUSE_SCRIPT; sensitivity 1):
+  1500 counts (1.2 rad) in 30 ms: 13% turned when the mouse stopped, the rest over the next 0.22-0.25 s;
+  3000 counts (2.4 rad) in 50 ms: 10%, then 0.43-0.50 s more -- the same at 60 fps and uncapped (0.085 rad
+  a frame at 60 fps, 0.047 at ~115). Aiming (func_00098A00) has no such follower: 100% in the frame.
+  Found by a probe of the driver's frame and by writing the vector (a run with 50 instead of 5: the view took
+  the whole 0.19 rad lead every frame).
+- And a frame of delay: the hook wrote the target after the input step, but the step hands the solver its own
+  copy of the angles -- its 5th argument r7 -> the driver's vector at sp+0x140 (yaw, pitch, distance), written
+  at 0x0007E9E4: in player control (state 4) the target it has just stored, the distance from the camera
+  volume. The solver saw the mouse's turn in the next frame.
+- The fix (cheats.cpp hook_free_cam + hook_free_frame; no new hook slot: 0x00082964 is in hooks.txt since
+  the field of view): in a frame that turns by the mouse, after the step and with its manual branch seen, the
+  whole owed turn goes into the target D+0x1C0/0x1C4 and into the step's vector (only when its yaw and pitch
+  are the target's, bit for bit), and the three speeds at 0x007443B0 read 1e6 until the driver's frame is
+  over (hook_free_frame writes the game's values back; frames without mouse motion never see them). The
+  distance's speed too: looking up and down moves the camera in and out, and with 1000 units/s left on the
+  view fell behind a fast pitch turn and the game took the target back to within 0.2 rad of it (a 2600
+  count flick down stopped at 0.26 rad instead of the 1.41 limit).
+  After: slow 1500 counts in 3 s, 1500 in 30 ms, 3000 in 50 ms, 3927 (a half turn) in 40 ms, one frame of
+  400: 0.000800 rad a count each, all of it in the frame of the last count, nothing after, at 60 fps and
+  uncapped; pitch the same up to the game's limits. Aiming unchanged (0.000423 rad a count).
+- What stays the game's: the 0.2 rad clamp of the target to the view at the end of the driver's frame (a
+  camera held by a wall loses the turn it cannot make, as for a stick), the pitch limits, the axes the game
+  switches off, the idle branch after the hold. A saved spot's camera turn (tpc_frame) keeps the carried way.
+- Switches: PS3_MOUSE_VIEW_LIMIT=1 = the game's view speed (the carried turn, as before);
+  PS3_CHEATS_AT=t:mouselimit=0|1 (tests). PS3_MOUSE_LOG=1 = "[mouse] log" lines for reports: counts in, the
+  turn given, what is left, the view before and after, per camera frame with motion (free and aim).
+  The turn math is ps3_mouse_turn_whole / ps3_mouse_turn_lead (engine include/ps3emu/ps3_mouse_camera.h,
+  tested in libs/input/tests/test_pad_mouse_direct.c).
+
 ### GitHub #27 (2026-11-13, inf2-cheats mouse27): the opening's "look up" with the mouse in direct mode
 Report: the opening tutorial's "Use the right stick to look up." does not pass with mouse = direct; it does
 in stick mode. Runs native\recordings\m27-* (game-derived scratch in work\mouse27).
@@ -524,7 +563,8 @@ is held; letting go of R1 ends Float as before).
 reads r3 (it sets r3 before any use), so the lifter's call sites did not write r3 back into ctx, and the hook read a
 stale r3: def = 0x100, every test failed, nothing was swapped. The lifter now writes back every argument register at
 a call to a hooked function (ppu_lifter: solve() gets the PPU_HOOK_FILE set; it was given an empty set). With that,
-in the city from the first save (workl_city.steps, nativeecordingsl-city3): every arc redrawn (EVIL_LIGHTNING_SHADER
+in the city from the first save (workl_city.steps, native
+ecordingsl-city3): every arc redrawn (EVIL_LIGHTNING_SHADER
 set even at neutral karma, 2 variants), and Cole's bolts turn black at his hand and at the hit. (Correction to the
 table above: r3 = the renderer at that call, but SubmitDraws does not read it.)
 

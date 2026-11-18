@@ -234,7 +234,8 @@ static void fd_draw(u32 prim, rsx_topology topology, const rsx_vertex_layout_pla
     g.be->bind_ps_constants(g.be->user, g.fp_cb, p.fp_bytes);
     if (p.sc_send) g.be->set_scissor(g.be->user, p.sc[0], p.sc[1], p.sc[2], p.sc[3]);
     if (p.sref_send) g.be->set_stencil_ref(g.be->user, p.sref);
-    if (p.bias_send) eng_apply_depth_bias(s_dl.sf.zeta_offset, &s_dl.rs);
+    if (p.bias_send) { s_shres_bias_k = eng_shres_bias_k(s_dl.tkq, s_dl.targets[0]);   /* [shadow] */
+                       eng_apply_depth_bias(s_dl.sf.zeta_offset, &s_dl.rs); }
     if (p.clamp_send) eng_apply_depth_clip(s_dl.sf.zeta_offset, &s_dl.rs, s_dl.vpt.scale[1]);
     DL_MARK(8);
     DL_MARK_DRAW0();
@@ -248,6 +249,7 @@ static void fd_draw(u32 prim, rsx_topology topology, const rsx_vertex_layout_pla
         g.zdepths[zslot].had_write = 1;
         g.zdepths[zslot].stamp = ++s_surf_clock;
         g.zdepths[zslot].kq = (u8)s_dl.tkq;
+        eng_shres_note_draw(s_dl.tkq, s_dl.targets[0]);   /* [shadow] the caster count of the scaled maps */
         g.zdepths[zslot].snapshot_valid = 0; g.zdepths[zslot].crop_z_valid = 0;
         g.zdepths[zslot].snapshot_rgba_valid = 0; g.zdepths[zslot].crop_valid = 0;
     }

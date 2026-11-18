@@ -165,8 +165,10 @@ rules are `libs/input/pad_remap.h`:
   controls (a chord); the menu never makes one.
 - Kept for the window and the menu: F1 (HUD), F2 (menu), F3 (lighting A/B), F7 (the
   Cheats page's quick key), F9 (play-log mark), F11 and Alt+Enter (fullscreen), Esc
-  (cancels a change), Alt, the
-  Windows keys, Print Screen. The PS / Xbox / Home button is the system's.
+  (cancels a change), the
+  Windows keys, Print Screen. Alt binds like any key (left and right apart); Alt+Enter,
+  Alt+Tab and Alt+F4 stay the window's, and while a bound Alt is held Enter, Tab and F4
+  do not reach the game. The PS / Xbox / Home button is the system's.
 - Enter and keypad Enter are one key (both are VK_RETURN to Windows): they bind,
   clear and swap together, and the file lists both.
 - Controller cells take buttons and triggers by position (bottom = Cross), written to
@@ -213,7 +215,7 @@ Debugging:
 | `PS3_PAD_TRACE=2` | the same for every packet (one per game frame) |
 | `PS3_PAD_TRACE=all` | changes on every port |
 | `PS3_PAD_STATS=1` | `[padstats]` once a second: reads per port, packets, host polls, the cost of the controller read and of the key read |
-| `PS3_MOUSE_LOG=1` | mouse motion and buttons as they become the right stick |
+| `PS3_MOUSE_LOG=1` | mouse motion and buttons as they become the right stick; in a title with a direct-mode camera hook (inFAMOUS 2) also a `[mouse] log` line per camera frame with motion: counts in, the turn given, the view before and after |
 | `PS3_RUMBLE_LOG=1` | every vibration request of the game |
 
 Scripted controller through the real SDL path (tests):
@@ -252,7 +254,10 @@ what SDL sees outside the game (`--watch 10` for live input).
 - Direct mode (`PS3_MOUSE_MODE=direct`, the default): a title whose camera code takes the
   motion itself (`include/ps3emu/ps3_mouse_camera.h`; inFAMOUS 2: the port's camera hook)
   turns the camera by how far the mouse moved, in free camera and while aiming
-  (`PS3_MOUSE_SENS` / `PS3_MOUSE_AIM_SENS`, invert as set): no cap, no acceleration. While
+  (`PS3_MOUSE_SENS` / `PS3_MOUSE_AIM_SENS`, invert as set): no cap, no acceleration, the
+  same angle per count for a slow move and a flick, in the frame the mouse moved
+  (inFAMOUS 2: `PS3_MOUSE_VIEW_LIMIT=1` keeps the game's own camera follow speed outside
+  aiming, where a fast flick trails behind the hand). While
   it takes the motion the mouse moves no stick (I/J/K/L and a controller still do); when
   it stops (menus, the map, cutscenes, a build without the hook) the mouse is the stick
   again within 150 ms (`libs/input/pad_mouse_direct.h`). F2 > Controls > Mouse camera

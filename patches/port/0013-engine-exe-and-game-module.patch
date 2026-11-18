@@ -1,0 +1,487 @@
+From: SamiEnazi <85966743+SamiEnazi@users.noreply.github.com>
+Subject: [PATCH] the engine exe and the game module (slim split, 2026-11-14)
+
+The exe no longer links the lift: the lifted PPU/SPU code and the lifted firmware are the
+game module (Infamous2Game.dll / libInfamous2Game.so), built on the player's PC by
+tools/build_module.py with clang + lld only, and bound at the start of main
+(engine/include/ps3emu/ps3_module.h). This patch:
+- CMakeLists.txt: the exe from the port's and the engine's own sources only, against the
+  engine's ppu_recomp.h (tools/ppu_engine_header.py: no lifted prototype); every engine TU
+  force-includes runtime/module/ps3_module_vars.h; Linux exports the engine's functions to
+  the module (-rdynamic).
+- main.cpp: ps3_module_attach() first (a missing or mismatched module = a message, exit 3);
+  ps3_module_sync() once vm_base is set; PS3_PGO_DUMP_AT writes an instrumented module's
+  counters.
+- gpu_light.c, gpu_ssao.c: the light / SSAO jobs' lifted routines found by (image, LS
+  address) in the SPU registry (spu_find_function), no longer linked by name.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0dd6150..9a23981 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -36,35 +36,25 @@ if(NOT DEFINED PS3RECOMP_DIR)
+ endif()
+ get_filename_component(PS3RECOMP_DIR "${PS3RECOMP_DIR}" ABSOLUTE)
+ 
+-set(RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/recompiled" CACHE PATH
+-    "Directory holding the lifter's output: ppu_recomp.h and the lifted sources")
+-get_filename_component(RECOMP_DIR "${RECOMP_DIR}" ABSOLUTE)
+-
+-message(STATUS "ps3recomp SDK:   ${PS3RECOMP_DIR}")
+-message(STATUS "Lifted output:   ${RECOMP_DIR}")
+-
+-if(NOT EXISTS "${RECOMP_DIR}/ppu_recomp.h")
+-    message(FATAL_ERROR
+-        "No ppu_recomp.h in ${RECOMP_DIR}.\n"
+-        "That header and the lifted sources beside it are what "
+-        "tools/ppu_lifter.py writes. Run the lifter, drop its output there, "
+-        "or point -DRECOMP_DIR= at wherever it already is.")
+-endif()
+-
+-# The lifted translation units. A game's lift is hundreds of generated files,
+-# so they are globbed rather than listed; re-run CMake after a fresh lift.
+-file(GLOB RECOMP_SOURCES CONFIGURE_DEPENDS
+-    "${RECOMP_DIR}/*.c"
+-    "${RECOMP_DIR}/*.cpp"
+-)
+-if(NOT RECOMP_SOURCES)
+-    message(FATAL_ERROR
+-        "${RECOMP_DIR} has a ppu_recomp.h but no .c or .cpp beside it. The "
+-        "lifted functions and the function table live in those; without them "
+-        "there is nothing to run.")
++# The engine exe (slim split, 2026-11-14): no lifted code is linked here. The lifted PPU/SPU
++# code and the lifted firmware are the GAME MODULE (Infamous2Game.dll / libInfamous2Game.so),
++# built on the player's PC by tools/build_module.py from their own disc, and bound at the start
++# of main (ps3emu/ps3_module.h). The boot scaffold and the port's sources include ppu_recomp.h
++# for ppu_context and the accessors: the engine's own (tools/ppu_engine_header.py), without a
++# lifted prototype.
++find_package(Python3 COMPONENTS Interpreter REQUIRED)
++set(ENGINE_PPU_HEADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/engine_include")
++set(ENGINE_PPU_HEADER "${ENGINE_PPU_HEADER_DIR}/ppu_recomp.h")
++add_custom_command(
++    OUTPUT "${ENGINE_PPU_HEADER}"
++    COMMAND "${Python3_EXECUTABLE}" -I "${PS3RECOMP_DIR}/tools/ppu_engine_header.py" "${ENGINE_PPU_HEADER}"
++    DEPENDS "${PS3RECOMP_DIR}/tools/ppu_engine_header.py" "${PS3RECOMP_DIR}/tools/ppu_lifter.py"
++            "${PS3RECOMP_DIR}/tools/ppu_fastpath.py"
++    COMMENT "Writing the engine's ppu_recomp.h")
++if(NOT EXISTS "${ENGINE_PPU_HEADER}")   # configure time too: the first build's scan needs it
++    execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${PS3RECOMP_DIR}/tools/ppu_engine_header.py" "${ENGINE_PPU_HEADER}")
+ endif()
+-list(LENGTH RECOMP_SOURCES RECOMP_SOURCE_COUNT)
+-message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
++message(STATUS "Engine header:   ${ENGINE_PPU_HEADER}")
+ 
+ # ---------------------------------------------------------------------------
+ # ps3recomp runtime library
+@@ -84,11 +74,7 @@ add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
+ # it. A port may keep a hand-curated one beside its lift; otherwise generate
+ # the canonical every-module table, which is what the toolkit's own boot
+ # harness uses.
+-if(EXISTS "${RECOMP_DIR}/ppu_hle_nids.cpp")
+-    set(HLE_NID_TABLE "${RECOMP_DIR}/ppu_hle_nids.cpp")
+-    message(STATUS "HLE NID table:   ${HLE_NID_TABLE}")
+-else()
+-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
++if(TRUE)
+     set(HLE_NID_TABLE "${CMAKE_CURRENT_BINARY_DIR}/ppu_hle_nids.cpp")
+     # The table is scanned from the library sources: a new export needs a
+     # regenerated table, or its import falls through to the unresolved stub.
+@@ -118,82 +104,9 @@ set(PS3RECOMP_SCAFFOLD
+     "${PS3RECOMP_DIR}/runtime/ppu/ppu_sysprx.cpp"
+ )
+ 
+-# ---------------------------------------------------------------------------
+-# Lifted SPU images (optional)
+-# ---------------------------------------------------------------------------
+-# A title that runs SPU work gets its images lifted into <SPU_DIR>/<image>/ by
+-# tools/spu_lifter.py, with a registration TU generated by
+-# tools/build_spu_workloads.py. cellSpurs dispatches them by content
+-# fingerprint, so the generated table is keyed to the images THIS build ships:
+-# a table generated from another release registers signatures that can never
+-# match, which is worse than shipping none. Both the table and the job-module
+-# registry self-register from constructors and are therefore optional -- a tree
+-# that has not lifted its SPU images yet configures and links without them.
+-set(SPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/spu" CACHE PATH
+-    "Directory holding the lifted SPU images (<SPU_DIR>/<image>/spu_recomp.c)")
+-option(PORT_ENABLE_SPU "Compile and register the title's lifted SPU images" ON)
+-
+-set(SPU_SOURCES "")
+-if(PORT_ENABLE_SPU)
+-    file(GLOB SPU_LIFTED CONFIGURE_DEPENDS "${SPU_DIR}/*/spu_recomp.c")
+-    if(SPU_LIFTED)
+-        list(LENGTH SPU_LIFTED SPU_IMAGE_COUNT)
+-        message(STATUS "Lifted SPU:      ${SPU_IMAGE_COUNT} image(s)")
+-        # The musttail indirect-branch fast path. Excluded from the runtime
+-        # library on purpose (see the SDK root CMakeLists): it must be built
+-        # here, by clang, or the tail call degrades to a plain call and a guest
+-        # loop that branches indirectly walks the thread stack off its guard
+-        # page a few thousand iterations in.
+-        list(APPEND SPU_SOURCES ${SPU_LIFTED}
+-             "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
+-        # Generated beside the lift; each is present only once its generator
+-        # has been run, so each is included only if it is actually here.
+-        # spu_jobs.c: the raw SPURS job binaries (tools/lift_spu_jobs.sh).
+-        foreach(gen IN ITEMS spu_workloads.c spu_jobs.c jobmods_register.c datamods_register.c relocmods_register.c taskset_policy_bytes.c)
+-            if(EXISTS "${SPU_DIR}/${gen}")
+-                list(APPEND SPU_SOURCES "${SPU_DIR}/${gen}")
+-            else()
+-                message(STATUS "  (no ${gen} -- not registered)")
+-            endif()
+-        endforeach()
+-    else()
+-        message(STATUS "Lifted SPU:      none found in ${SPU_DIR}")
+-    endif()
+-endif()
+-
+-# Lifted SPU side of firmware modules (tools/lift_firmware_spu.py): libsre's SPURS
+-# kernel and the code bodies it streams into local store, so they run lifted
+-# instead of on the SPU interpreter when the firmware's own libsre is used.
+-set(FIRMWARE_SPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lle_spu" CACHE PATH
+-    "Directory of lifted firmware SPU code (<dir>/<image>/spu_recomp.c + *_spu_register.c)")
+-if(PORT_ENABLE_SPU AND FIRMWARE_SPU_DIR)
+-    file(GLOB FIRMWARE_SPU CONFIGURE_DEPENDS
+-         "${FIRMWARE_SPU_DIR}/*/spu_recomp.c" "${FIRMWARE_SPU_DIR}/*_spu_register.c")
+-    list(LENGTH FIRMWARE_SPU FIRMWARE_SPU_COUNT)
+-    message(STATUS "Firmware SPU:    ${FIRMWARE_SPU_COUNT} file(s) from ${FIRMWARE_SPU_DIR}")
+-    list(APPEND SPU_SOURCES ${FIRMWARE_SPU})
+-    if(NOT "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c" IN_LIST SPU_SOURCES)
+-        list(APPEND SPU_SOURCES "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
+-    endif()
+-endif()
+-
+-# ---------------------------------------------------------------------------
+-# Lifted firmware modules (the user's own, never redistributed)
+-# ---------------------------------------------------------------------------
+-# liblv2, libsysmodule and libsre from tools/lift_firmware_module.py, one
+-# directory each under lle/: the lifted code and <stem>_module.cpp, which embeds
+-# the relocated image and registers it with the runtime's PRX loader. With
+-# liblv2 in the build the process starts through its module_start, as on the
+-# console.
+-file(GLOB LLE_SOURCES CONFIGURE_DEPENDS
+-    "${CMAKE_CURRENT_SOURCE_DIR}/lle/*/*.cpp")
+-if(NOT LLE_SOURCES)
+-    message(FATAL_ERROR
+-        "No lifted firmware in lle/. Decrypt your own liblv2, libsysmodule and "
+-        "libsre and lift them (README.md, step 5) before configuring.")
+-endif()
+-list(LENGTH LLE_SOURCES LLE_SOURCE_COUNT)
+-message(STATUS "Firmware LLE:    ${LLE_SOURCE_COUNT} file(s)")
++# (The lifted SPU images, the lifted firmware SPU code, spu_dispatch_mt.c, the job and data
++# module registrations and the lifted firmware modules -- the user's own, never redistributed --
++# are the game module's: tools/build_module.py.)
+ 
+ add_executable(${PROJECT_NAME}
+     main.cpp
+@@ -204,52 +117,19 @@ add_executable(${PROJECT_NAME}
+     game_clock.c
+     game_patches.cpp
+     ssao_gpu.c
+-    ${LLE_SOURCES}
+     ${PS3RECOMP_SCAFFOLD}
+     ${HLE_NID_TABLE}
+-    ${RECOMP_SOURCES}
+-    ${SPU_SOURCES}
++    "${ENGINE_PPU_HEADER}"
+ )
+-
+-# The lifted SPU sources use bare #include "spu_context.h". Scope that include
+-# directory (and their flags) to those TUs alone: adding it to the whole target
+-# changes the compile command of every lifted PPU TU, and those are large enough
+-# that the needless rebuild is measured in tens of minutes.
+-#   SPU_USE_DISPATCH_MT -- route SPU_IB_DISPATCH through the musttail path.
+-#   -O2                 -- the target-wide -O1 exists for the huge PPU TUs; the
+-#                          SPU sources are small and decode-hot, so they get
+-#                          full optimization. The last -O on the line wins.
+-if(SPU_SOURCES)
+-    set_source_files_properties(${SPU_SOURCES} PROPERTIES
+-        INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
+-        COMPILE_DEFINITIONS SPU_USE_DISPATCH_MT)
+-    if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+-        # clang-cl (Windows): it ignores the GCC spelling of -ffp-contract=off,
+-        # so it goes through /clang: (tests/compiler/check_semantics.py).
+-        # PORT_SPU_ARCH: the lifted SPU code is 128-bit SIMD throughout, and
+-        # without an ISA flag clang-cl targets baseline x86-64 (SSE2), where
+-        # spu_helpers.h's shufb is a 16-byte scalar loop instead of pshufb
+-        # (__SSE4_1__). AVX2 = x86-64-v3, which every supported host has.
+-        set(PORT_SPU_ARCH "/arch:AVX2" CACHE STRING
+-            "clang-cl ISA flag for the lifted SPU sources (empty = baseline x86-64)")
+-        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;/clang:-ffp-contract=off;${PORT_SPU_ARCH}")
+-    elseif(NOT MSVC)
+-        # GNU spelling (clang/gcc: Linux; also macOS). -ffp-contract=off is
+-        # mandatory: clang's C default fuses a*b+c into one FMA wherever the ISA
+-        # has one (x86-64-v3 does), one rounding where the SPU makes two, and the
+-        # job replay is no longer bit exact. PORT_SPU_ARCH as in the clang-cl
+-        # branch; the x86-64 Linux default is what the Windows build gets from
+-        # rebuild_win.py: x86-64-v3 (= /arch:AVX2), no stack protector, the LS
+-        # fast path and RZ-only floats. Elsewhere (macOS arm64) empty.
+-        if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+-            set(_port_spu_arch "-march=x86-64-v3;-fno-stack-protector;-DSPU_LS_FASTPATH=1;-DSPU_FLOAT_RZ_ONLY=1")
+-        else()
+-            set(_port_spu_arch "")
+-        endif()
+-        set(PORT_SPU_ARCH "${_port_spu_arch}" CACHE STRING
+-            "GNU-style ISA and extra flags for the lifted SPU sources (empty = baseline)")
+-        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-ffp-contract=off;${PORT_SPU_ARCH}")
+-    endif()
++# Every engine TU reaches the game module's shared state through ps3_mv_* (the runtime library's
++# own CMakeLists does the same for its TUs).
++if(MSVC)
++    target_compile_options(${PROJECT_NAME} PRIVATE "/FI${PS3RECOMP_DIR}/runtime/module/ps3_module_vars.h")
++else()
++    target_compile_options(${PROJECT_NAME} PRIVATE -include "${PS3RECOMP_DIR}/runtime/module/ps3_module_vars.h")
++    # Linux: the game module (a .so) binds the engine functions it calls against the exe
++    target_link_options(${PROJECT_NAME} PRIVATE -rdynamic)
++    target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
+ endif()
+ 
+ # app.rc carries the icon, the version block and the manifest, and needs a
+@@ -314,7 +194,8 @@ if(APPLE)
+ endif()
+ 
+ target_include_directories(${PROJECT_NAME} PRIVATE
+-    "${RECOMP_DIR}"                            # the generated ppu_recomp.h
++    "${ENGINE_PPU_HEADER_DIR}"                 # the engine's ppu_recomp.h (no lifted prototypes)
++    "${PS3RECOMP_DIR}/runtime/module"
+     "${PS3RECOMP_DIR}/include"
+     "${PS3RECOMP_DIR}/runtime/ppu"
+     "${PS3RECOMP_DIR}/runtime/spu"
+@@ -375,42 +256,8 @@ elseif(MSVC)
+     )
+ endif()
+ 
+-# The lifted translation units are machine-generated and can run to hundreds of
+-# thousands of lines each, so they get their own flags:
+-#
+-#   - warnings off. They are about generated code and nobody will act on them,
+-#     and at this volume they bury the diagnostics that matter.
+-#   - no floating-point contraction. arm64 fuses a multiply and an add by
+-#     default; a PPC fmadd is spelt as one where the lifter means one.
+-#   - /bigobj on MSVC. A single lifted file routinely passes the 65,536-section
+-#     limit of the default object format.
+-if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+-    # clang-cl (Windows): as MSVC (/w, /bigobj) plus no FP contraction for the
+-    # lifted PPU and firmware code -- the GCC spelling is ignored by clang-cl,
+-    # so it goes through /clang:. PORT_LIFT_OPT is the optimisation level of
+-    # those huge TUs (default -O1).
+-    set(PORT_LIFT_OPT "/clang:-O1" CACHE STRING "Optimisation flag for the lifted TUs (clang-cl)")
+-    set_source_files_properties(${RECOMP_SOURCES} ${LLE_SOURCES} PROPERTIES
+-        COMPILE_OPTIONS "/w;/bigobj;/clang:-ffp-contract=off;${PORT_LIFT_OPT}")
+-elseif(MSVC)
+-    set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
+-        COMPILE_OPTIONS "/w;/bigobj")
+-else()
+-    # GNU spelling (clang/gcc: Linux; also macOS). PORT_LIFT_OPT as in the
+-    # clang-cl branch; the x86-64 Linux default is the Windows build's
+-    # (rebuild_win.py): -O2, x86-64-v3 (= /arch:AVX2: the lift's AltiVec-on-AVX2
+-    # and MOVBE paths), no stack protector (= /GS-). Elsewhere empty = the
+-    # build type's own -O, as before.
+-    if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+-        set(_port_lift_opt "-O2;-march=x86-64-v3;-fno-stack-protector")
+-    else()
+-        set(_port_lift_opt "")
+-    endif()
+-    set(PORT_LIFT_OPT "${_port_lift_opt}" CACHE STRING
+-        "GNU-style optimisation and ISA flags for the lifted TUs (empty = the build type's)")
+-    set_source_files_properties(${RECOMP_SOURCES} ${LLE_SOURCES} PROPERTIES
+-        COMPILE_OPTIONS "-w;-ffp-contract=off;${PORT_LIFT_OPT}")
+-endif()
++# (The lifted translation units' own flags -- no warnings, /bigobj, no FP contraction,
++# PORT_LIFT_OPT, PORT_SPU_ARCH -- are tools/build_module.py's now.)
+ 
+ # ---------------------------------------------------------------------------
+ # Install
+diff --git a/main.cpp b/main.cpp
+index ea50047..1c05d70 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -244,6 +244,9 @@ extern "C" void cellGcm_fifo_kick_wait(unsigned ms);
+ #ifdef PORT_PGO_GEN
+ extern "C" int __llvm_profile_write_file(void);   /* compiler-rt profile runtime */
+ #endif
++/* The game module (slim split, 2026-11-14): the lifted code is a DLL / .so the engine binds at the
++ * start of main (ps3emu/ps3_module.h); PGO training instruments the module, not the engine. */
++#include "ps3emu/ps3_module.h"
+ 
+ static DWORD WINAPI frame_clock(LPVOID)
+ {
+@@ -470,6 +473,7 @@ static bool alloc_guest_vm(void)
+     vm_base = guest_vm_map_flat((size_t)VM_SIZE);
+     ppu_vm_size = 0;
+ #endif
++    ps3_module_sync();   /* the game module's copy of vm_base */
+     return vm_base != nullptr;
+ }
+ 
+@@ -669,6 +673,11 @@ int main(int argc, char** argv)
+         printf("usage: %s <PPU ELF>\n", argv[0]);
+         return 2;
+     }
++    /* The game module first: the lifted code's own registrations (SPU images, firmware modules,
++     * hooks) run here, and everything below finds them. A missing or mismatched module is a
++     * message and an exit (PS3_GAME_MODULE=<path>: another module file). */
++    if (ps3_module_attach() != 0)
++        return 3;
+     /* PS3RECOMP_ENG_GPU_LIGHT: the SPU light job's pixel work moves to the GPU. */
+     infamous2_gpu_light_install();
+     infamous2_gpu_ssao_install();
+@@ -748,10 +757,12 @@ int main(int argc, char** argv)
+      * until the title registers its vblank and flip handlers during init. */
+     g_ps3_guest_caller = harness_guest_caller;
+     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
+-#ifdef PORT_PGO_GEN
+-    /* PGO training build: the scripted runs end in a kill, which skips the
+-     * profile runtime's atexit writer. PS3_PGO_DUMP_AT=<s>[,<s>...]: write the
+-     * counters at those times (each write replaces the file). */
++    /* PGO training (an instrumented game module, or an instrumented single exe): the scripted runs
++     * end in a kill, which skips the profile runtime's atexit writer. PS3_PGO_DUMP_AT=<s>[,<s>...]:
++     * write the counters at those times (each write replaces the file). */
++#ifndef PORT_PGO_GEN
++    if (getenv("PS3_PGO_DUMP_AT") && ps3_module_current() && ps3_module_current()->profile_dump)
++#endif
+     { static auto pgo_dump = [](LPVOID) -> DWORD {
+           const char* e = getenv("PS3_PGO_DUMP_AT");
+           ULONGLONG t0 = GetTickCount64();
+@@ -759,13 +770,17 @@ int main(int argc, char** argv)
+               char* q; double s = strtod(p, &q); if (q == p) break;
+               ULONGLONG due = t0 + (ULONGLONG)(s * 1000);
+               while (GetTickCount64() < due) Sleep(200);
++#ifdef PORT_PGO_GEN
+               int rc = __llvm_profile_write_file();
++#else
++              int rc = ps3_module_profile_dump();
++#endif
+               fprintf(stderr, "[pgo] profile written at %.0f s (rc=%d)\n", s, rc);
+               p = *q == ',' ? q + 1 : q;
+           }
+           return 0; };
+       if (getenv("PS3_PGO_DUMP_AT")) CreateThread(NULL, 0, pgo_dump, NULL, 0, NULL); }
+-#endif
++    ps3_module_sync();   /* (again, before any lifted code runs) the module's copies of the engine's pointers */
+     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
+            entry, STACK_TOP);
+ 
+diff --git a/gpu_light.c b/gpu_light.c
+index dbea5f3..012bc7b 100644
+--- a/gpu_light.c
++++ b/gpu_light.c
+@@ -29,8 +29,10 @@
+ 
+ typedef void (*spu_fn)(spu_context*);
+ spu_fn spu_replace_function(int image_id, uint32_t addr, spu_fn fn);
+-void jobmod_c6e7383dc013_e5400_spu_func_00004AC8(spu_context* ctx);
+-void jobmod_c6e7383dc013_e5400_spu_func_00004578(spu_context* ctx);
++/* (slim split) The light job's lifted routines are the game module's: found by (image, LS
++ * address) in the SPU registry at install time, before any of them is replaced. */
++spu_fn spu_find_function(int image_id, uint32_t addr);
++static spu_fn s_lj_00004AC8, s_lj_00004578;
+ 
+ /* The lifted image id jobmods_register.c gives the light job. */
+ #define LIGHT_JOB_IMAGE 219
+@@ -78,13 +80,13 @@ static void light_tile_gpu(spu_context* ctx)
+ u128 spu_rdch(spu_context* ctx, uint32_t channel);
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value);
+ 
+-#define LJ(a) jobmod_c6e7383dc013_e5400_spu_func_##a
+-void LJ(00005610)(spu_context*);   /* copy config sp+0x20/0x30 -> LS 0x9E00/0x9E10 */
+-void LJ(00005640)(spu_context*);   /* iterator header EA -> LS 0x9F00, 0x9E20 = EA */
+-void LJ(00005AC8)(spu_context*);   /* grab next tile (atomic h1++) */
+-void LJ(00005748)(spu_context*);   /* tile finished (atomic h2++, label on last) */
+-void LJ(00009548)(spu_context*);   /* atomic_add32(r3 = EA, r4 = value) */
+-void LJ(000045E0)(spu_context*);   /* main(): free the DMA tags, return to the WWS kernel */
++#define LJ(a) s_lj_##a          /* jobmod_c6e7383dc013_e5400_spu_func_<a> */
++static spu_fn LJ(00005610);   /* copy config sp+0x20/0x30 -> LS 0x9E00/0x9E10 */
++static spu_fn LJ(00005640);   /* iterator header EA -> LS 0x9F00, 0x9E20 = EA */
++static spu_fn LJ(00005AC8);   /* grab next tile (atomic h1++) */
++static spu_fn LJ(00005748);   /* tile finished (atomic h2++, label on last) */
++static spu_fn LJ(00009548);   /* atomic_add32(r3 = EA, r4 = value) */
++static spu_fn LJ(000045E0);   /* main(): free the DMA tags, return to the WWS kernel */
+ 
+ /* The GPU light path's per-frame tap (gpu_light.c light_tile_gpu, tile (0,0)
+  * branch): frame constants at [0x9C80], light list at [0x9CB0]. */
+@@ -278,8 +280,20 @@ void infamous2_gpu_light_install(void)
+ {
+     const char* e = getenv("PS3RECOMP_ENG_GPU_LIGHT");
+     if (!e || !*e) return;
++    {   /* the job's own routines, all of them (an image that lacks one is not the light job) */
++        static const struct { spu_fn* f; uint32_t at; } want[] = {
++            { &s_lj_00004AC8, 0x4AC8 }, { &s_lj_00004578, 0x4578 }, { &s_lj_00005610, 0x5610 },
++            { &s_lj_00005640, 0x5640 }, { &s_lj_00005AC8, 0x5AC8 }, { &s_lj_00005748, 0x5748 },
++            { &s_lj_00009548, 0x9548 }, { &s_lj_000045E0, 0x45E0 } };
++        for (unsigned i = 0; i < sizeof want / sizeof want[0]; i++)
++            if (!(*want[i].f = spu_find_function(LIGHT_JOB_IMAGE, want[i].at))) {
++                fprintf(stderr, "[gpu light] image %d has no routine at 0x%X: not the light job; "
++                                "SPU pixel work left in place\n", LIGHT_JOB_IMAGE, want[i].at);
++                return;
++            }
++    }
+     const spu_fn old = spu_replace_function(LIGHT_JOB_IMAGE, LIGHT_JOB_TILE, light_tile_gpu);
+-    if (old != jobmod_c6e7383dc013_e5400_spu_func_00004AC8) {
++    if (old != s_lj_00004AC8) {
+         if (old) spu_replace_function(LIGHT_JOB_IMAGE, LIGHT_JOB_TILE, old);
+         fprintf(stderr, "[gpu light] image %d at 0x%X is not the light job's tile routine; "
+                         "SPU pixel work left in place\n", LIGHT_JOB_IMAGE, LIGHT_JOB_TILE);
+@@ -294,7 +308,7 @@ void infamous2_gpu_light_install(void)
+     const char* walk = getenv("PS3RECOMP_ENG_GPU_LIGHT_WALK");
+     if (!s_spu_tile && !(walk && *walk == '1')) {
+         const spu_fn w = spu_replace_function(LIGHT_JOB_IMAGE, 0x4578u, light_skip_4578);
+-        if (w != jobmod_c6e7383dc013_e5400_spu_func_00004578) {
++        if (w != s_lj_00004578) {
+             if (w) spu_replace_function(LIGHT_JOB_IMAGE, 0x4578u, w);
+             fprintf(stderr, "[gpu light] 0x4578 is not the light job's tile walk; walk kept\n");
+         } else
+diff --git a/gpu_ssao.c b/gpu_ssao.c
+index 660075a..7afe264 100644
+--- a/gpu_ssao.c
++++ b/gpu_ssao.c
+@@ -45,11 +45,15 @@ static void ssao_tap_frame(spu_context* ctx)
+ typedef void (*spu_fn)(spu_context*);
+ u128 spu_rdch(spu_context* ctx, uint32_t channel);
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value);
+-#define SJ(a) jobmod_e6fe749031f8_e2060_spu_func_##a
+-void SJ(00004598)(spu_context*);   /* copy config sp+0x20/0x30 -> LS 0x6400/0x6410 */
+-void SJ(000045C8)(spu_context*);   /* header GET -> LS 0x6500, LS 0x6420 = state EA */
+-void SJ(00004A50)(spu_context*);   /* claim one tile (atomic h1++) */
+-void SJ(000046D0)(spu_context*);   /* tile finished (atomic h2++, label on last, next pass) */
++/* (slim split) The SSAO job's lifted routines are the game module's: found by (image, LS
++ * address) in the SPU registry at install time, before any of them is replaced. */
++typedef void (*ssao_spu_fn)(spu_context*);
++#define SJ(a) s_sj_##a          /* jobmod_e6fe749031f8_e2060_spu_func_<a> */
++static ssao_spu_fn SJ(00004598);   /* copy config sp+0x20/0x30 -> LS 0x6400/0x6410 */
++static ssao_spu_fn SJ(000045C8);   /* header GET -> LS 0x6500, LS 0x6420 = state EA */
++static ssao_spu_fn SJ(00004A50);   /* claim one tile (atomic h1++) */
++static ssao_spu_fn SJ(000046D0);   /* tile finished (atomic h2++, label on last, next pass) */
++static ssao_spu_fn SJ(00004330);   /* the tile walk this file replaces */
+ 
+ static uint32_t ls32(const spu_context* c, uint32_t a) { const uint8_t* p = c->ls + (a & SPU_LS_MASK); return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
+ static uint32_t ls16(const spu_context* c, uint32_t a) { const uint8_t* p = c->ls + (a & SPU_LS_MASK); return (uint32_t)p[0] << 8 | p[1]; }
+@@ -150,8 +154,8 @@ void ssao_skip_4330(spu_context* ctx)
+     ctx->int_enable = 0; ctx->pc = ctx->gpr[2]._u32[0]; g_spu_trampoline_fn = spu_indirect_branch; return;
+ }
+ 
+-void jobmod_e6fe749031f8_e2060_spu_func_00004330(spu_context* ctx);
+ spu_fn spu_replace_function(int image_id, uint32_t addr, spu_fn fn);
++spu_fn spu_find_function(int image_id, uint32_t addr);
+ #define SSAO_JOB_IMAGE 226
+ 
+ void infamous2_gpu_ssao_install(void)
+@@ -159,8 +163,19 @@ void infamous2_gpu_ssao_install(void)
+     const char* e = getenv("PS3RECOMP_ENG_GPU_SSAO");
+     const char* l = getenv("PS3RECOMP_ENG_GPU_LIGHT");
+     if (!e || !*e || !l || !*l) return;
++    {   /* the job's own routines, all of them (an image that lacks one is not the SSAO job) */
++        static const struct { ssao_spu_fn* f; uint32_t at; } want[] = {
++            { &s_sj_00004330, 0x4330 }, { &s_sj_00004598, 0x4598 }, { &s_sj_000045C8, 0x45C8 },
++            { &s_sj_00004A50, 0x4A50 }, { &s_sj_000046D0, 0x46D0 } };
++        for (unsigned i = 0; i < sizeof want / sizeof want[0]; i++)
++            if (!(*want[i].f = (ssao_spu_fn)spu_find_function(SSAO_JOB_IMAGE, want[i].at))) {
++                fprintf(stderr, "[gpu ssao] image %d has no routine at 0x%X: not the SSAO job; "
++                                "SPU SSAO kept\n", SSAO_JOB_IMAGE, want[i].at);
++                return;
++            }
++    }
+     const spu_fn old = spu_replace_function(SSAO_JOB_IMAGE, 0x4330u, ssao_skip_4330);
+-    if (old != jobmod_e6fe749031f8_e2060_spu_func_00004330) {
++    if (old != s_sj_00004330) {
+         if (old) spu_replace_function(SSAO_JOB_IMAGE, 0x4330u, old);
+         fprintf(stderr, "[gpu ssao] image %d at 0x4330 is not the SSAO job's walk; SPU SSAO kept\n", SSAO_JOB_IMAGE);
+         return;

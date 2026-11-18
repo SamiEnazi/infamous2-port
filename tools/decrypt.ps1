@@ -6,8 +6,11 @@
 #
 # The decryptor is a command template with {in} and {out}, from config.local.json's "decryptor", e.g.
 #     "decryptor": "\"C:\\Tools\\mydecrypt.exe\" \"{in}\" \"{out}\""
-# Default: tools\rpcs3-adapter.ps1 (RPCS3's own --decrypt, run hidden). Files that are already decrypted pass
-# through the adapter unchanged.
+# Default: tools\ps3tool.py (Sami Enazi's, in the public repository; tools\sony_files.py ps3tool downloads it when
+# a release zip came without it), run as "python tools\ps3tool.py decrypt <in> <out>" by Setup's Python
+# (work\venv, which has pycryptodome); when it is missing or fails and RPCS3 is set up (config.local.json "rpcs3"),
+# tools\rpcs3-adapter.ps1 (RPCS3's own --decrypt, run hidden). Files that are already decrypted pass through the
+# adapter unchanged.
 #
 #   . tools\decrypt.ps1;  Invoke-Decryptor -InPath <encrypted> -OutPath <decrypted>
 #   tools\decrypt.ps1 -In <encrypted> -Out <decrypted>          (one file; exit 0 = done)
@@ -42,7 +45,32 @@ function Split-DecryptorCommand([string]$Template) {
     , $tokens
 }
 
-# config.local.json's "decryptor", or "" = the default: RPCS3 through tools\rpcs3-adapter.ps1.
+# The Python that runs ps3tool: the slim Setup's (v0.6.0: with pycryptodome, which makes it fast), else an older
+# Setup's venv, else its Python.
+function Get-Ps3ToolPython {
+    $root = Split-Path -Parent $PSScriptRoot
+    foreach ($p in (Join-Path $root "tools-cache\slim\python\python.exe"), (Join-Path $root "work\venv\Scripts\python.exe"), (Join-Path $root "tools-cache\python\python.exe")) {
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    $null
+}
+
+# The default decryptors in order: "@ps3tool" (when tools\ps3tool.py and a Python are there), then "" = RPCS3 (when
+# config.local.json names it, or rpcs3.exe is on PATH).
+function Get-DefaultDecryptors {
+    $root = Split-Path -Parent $PSScriptRoot
+    $list = @()
+    $tool = Join-Path $root "tools\ps3tool.py"
+    $py = Get-Ps3ToolPython
+    if ((Test-Path -LiteralPath $tool) -and $py) { $list += "@ps3tool" }
+    $rp = $env:PORT_RPCS3   # (Setup.exe / setup_build.ps1 -Rpcs3, for this build)
+    $cfg = Join-Path $root "config.local.json"
+    if (-not $rp -and (Test-Path -LiteralPath $cfg)) { try { $rp = [string](Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).rpcs3 } catch {} }
+    if (($rp -and (Test-Path -LiteralPath (Join-Path $rp "rpcs3.exe"))) -or (Get-Command "rpcs3.exe" -ErrorAction SilentlyContinue)) { $list += "" }   # "" = the RPCS3 adapter
+    , $list
+}
+
+# config.local.json's "decryptor", or "" = the default (Get-DefaultDecryptors: ps3tool, then RPCS3).
 function Get-DecryptorTemplate {
     $root = Split-Path -Parent $PSScriptRoot
     $cfg = Join-Path $root "config.local.json"
@@ -52,20 +80,60 @@ function Get-DecryptorTemplate {
     return ""
 }
 
+# One decryptor: a configured template, or the default ones in order (ps3tool, then RPCS3): the first that works.
 function Invoke-Decryptor {
     param([string]$InPath, [string]$OutPath)
 
     if ($null -eq $script:DecryptorTemplate) { $script:DecryptorTemplate = Get-DecryptorTemplate }
+    if ($script:DecryptorTemplate) { Invoke-DecryptorWith -Template $script:DecryptorTemplate -InPath $InPath -OutPath $OutPath; return }
+    $defaults = Get-DefaultDecryptors
+    if ($defaults.Count -eq 0) {
+        throw "nothing can decrypt '$InPath': tools\ps3tool.py is missing (tools\sony_files.py ps3tool downloads it) and RPCS3 is not set up"
+    }
+    $errors = @()
+    foreach ($d in $defaults) {
+        try { Invoke-DecryptorWith -Template $d -InPath $InPath -OutPath $OutPath; return }
+        catch { $errors += "$(if ($d) { 'ps3tool' } else { 'RPCS3' }): $($_.Exception.Message)" }
+        if ($d -and $defaults.Count -gt 1) { "  ps3tool could not decrypt $(Split-Path -Leaf $InPath): trying RPCS3" }
+    }
+    throw ($errors -join "`n")
+}
+
+# $Template "" = the RPCS3 adapter, "@ps3tool" = python tools\ps3tool.py decrypt <in> <out>
+function Invoke-DecryptorWith {
+    param([string]$Template, [string]$InPath, [string]$OutPath)
+
     if (Test-Path -LiteralPath $OutPath) { Remove-Item -LiteralPath $OutPath -Force }
 
-    if (-not $script:DecryptorTemplate) {
+    if ($Template -eq "@ps3tool") {
+        # ps3tool as a program, each path quoted as one argument (folder names with spaces or [ ] work)
+        $exe = Get-Ps3ToolPython
+        $tool = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\ps3tool.py'
+        $extra = ""
+        # A PSN copy's license (setup_build.ps1 -Rap): handed to ps3tool by path when its "decrypt" takes one (its --help
+        # names --rap); the file is never read here
+        if ($script:Ps3ToolRap) {
+            if ($null -eq $script:Ps3ToolDecryptHelp) {
+                $script:Ps3ToolDecryptHelp = ""
+                try { $script:Ps3ToolDecryptHelp = (& $exe -I $tool decrypt --help 2>&1 | Out-String) } catch {}
+            }
+            if ($script:Ps3ToolDecryptHelp -match '--rap\b') { $extra = " --rap `"$($script:Ps3ToolRap)`"" }
+            else {
+                # no --rap option: the current ps3tool looks the license up itself, in the folder PS3_RAP_DIR names
+                # (an older one ignores the variable and can't unlock a PSN copy: RPCS3 is then tried, when it is there)
+                $env:PS3_RAP_DIR = Split-Path -Parent $script:Ps3ToolRap
+                "  your license: ps3tool looks for it in $($env:PS3_RAP_DIR)"
+            }
+        }
+        $argLine = "-I `"$tool`" decrypt$extra `"$InPath`" `"$OutPath`""
+    } elseif (-not $Template) {
         # The default: the RPCS3 adapter, each path quoted as one argument (folder names with spaces or [ ] work)
         $exe = "powershell"
         $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $PSScriptRoot 'rpcs3-adapter.ps1')`" `"$InPath`" `"$OutPath`""
     } else {
         # A configured tool: <program> ... "{in}" ... "{out}" (quote a fixed argument that holds spaces as its own part)
-        $tokens = Split-DecryptorCommand $script:DecryptorTemplate
-        if ($tokens.Count -lt 1) { throw "Bad decryptor config: $script:DecryptorTemplate" }
+        $tokens = Split-DecryptorCommand $Template
+        if ($tokens.Count -lt 1) { throw "Bad decryptor config: $Template" }
         $exe = $tokens[0].Text
         $argList = New-Object System.Collections.ArrayList
         for ($i = 1; $i -lt $tokens.Count; $i++) {

@@ -131,8 +131,14 @@ SPU__X_INLINE u128 spu__xperm(u128 a, __m128i I) {
 #ifdef __cplusplus
 extern "C" {
 #endif
+#if defined(PS3_MODULE_VARS_H) || defined(PS3_MODULE_DATA_IMPORT)
+/* the engine (slim split): the game module holds them (ps3emu/ps3_module.h PS3_MODULE_HVARS) */
+extern int g_spu_float_rz;
+extern volatile long long g_spu_rz_ops, g_spu_rz_bad;
+#else
 SPU__ONCE int g_spu_float_rz = 0;
 SPU__ONCE volatile long long g_spu_rz_ops = 0, g_spu_rz_bad = 0;   /* -DSPU_FLOAT_RZ_CHECK builds */
+#endif
 #ifdef __cplusplus
 }
 #endif

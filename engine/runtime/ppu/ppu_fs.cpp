@@ -130,7 +130,14 @@ static void host_path_mount(char* out, size_t cap, const char* guest)
      * Serve it from a real dev_flash tree instead ($PS3_DEV_FLASH, else RPCS3's). */
     if (strncmp(guest, "/dev_flash/", 11) == 0) {
         const char* fw = getenv("PS3_DEV_FLASH");
-        if (!fw || !*fw) fw = "D:/recomp/tools/rpcs3/dev_flash";
+        /* (portable install, v0.6.0) unset: the port's own copy beside the game, <game>/dev_flash, with
+         * <game> the folder holding PS3_VFS_ROOT (game/disc); no absolute path of the PC that built it */
+        char own[1024];
+        if (!fw || !*fw) {
+            const char* vr = getenv("PS3_VFS_ROOT");
+            snprintf(own, sizeof own, "%s/../dev_flash", vr && *vr ? vr : "game/disc");
+            fw = own;
+        }
         snprintf(out, cap, "%s/%s", fw, guest + 11);
         for (char* p = out; *p; p++) if (*p == '\\') *p = '/';
         return;
@@ -812,6 +819,31 @@ static void cellFsMkdir(ppu_context* ctx)
 }
 static void cellFsRmdir(ppu_context* ctx)  { ctx->gpr[3] = CELL_OK; }
 static void cellFsUnlink(ppu_context* ctx) { ctx->gpr[3] = CELL_OK; }
+/* cellFsRename(from, to) through the same host paths as open and mkdir. Unregistered, it fell through to
+ * libs/filesystem/cellFs.c, whose own translation maps /dev_hdd0 to ./gamedata/dev_hdd0 -- not where the
+ * port's files are. inFAMOUS 2's first-start HDD install (made by the game itself when RPCS3's copy is not
+ * there) writes ICON0.PNG.tmp and PIC1.PNG.tmp and renames them as its last step; with the rename failing the
+ * two icons stayed .tmp (the game marks the install finished with USRDIR/ne.bv, so it was not made again).
+ * A file at `to` is replaced, as on the console (Windows' rename() refuses). */
+static void cellFsRename(ppu_context* ctx)
+{
+    char gfrom[1024], gto[1024], hfrom[1100], hto[1100];
+    guest_strcpy(gfrom, (uint32_t)ctx->gpr[3], sizeof gfrom);
+    guest_strcpy(gto, (uint32_t)ctx->gpr[4], sizeof gto);
+    host_path(hfrom, sizeof hfrom, gfrom);
+    host_path(hto, sizeof hto, gto);
+    struct stat st;
+    if (stat(hfrom, &st) != 0) {
+        if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] rename '%s' -> '%s': no such file\n", gfrom, gto);
+        ctx->gpr[3] = 0x80010006u;   /* CELL_ENOENT */
+        return;
+    }
+    struct stat sto;
+    if (!(st.st_mode & S_IFDIR) && stat(hto, &sto) == 0 && !(sto.st_mode & S_IFDIR)) remove(hto);
+    int r = rename(hfrom, hto);
+    if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] rename '%s' -> '%s' (%s)\n", gfrom, gto, r == 0 ? "OK" : "FAIL");
+    ctx->gpr[3] = r == 0 ? CELL_OK : 0x8001002Bu;   /* CELL_EIO */
+}
 static void cellFsFsync(ppu_context* ctx)
 {
     int fd = (int)(uint32_t)ctx->gpr[3];
@@ -923,6 +955,7 @@ extern "C" void ppu_fs_register(void)
     ps3_hle_register_ctx(ps3_compute_nid("cellFsMkdir"),    "cellFsMkdir",    cellFsMkdir);
     ps3_hle_register_ctx(ps3_compute_nid("cellFsRmdir"),    "cellFsRmdir",    cellFsRmdir);
     ps3_hle_register_ctx(ps3_compute_nid("cellFsUnlink"),   "cellFsUnlink",   cellFsUnlink);
+    ps3_hle_register_ctx(ps3_compute_nid("cellFsRename"),   "cellFsRename",   cellFsRename);
     ps3_hle_register_ctx(ps3_compute_nid("cellFsFsync"),    "cellFsFsync",    cellFsFsync);
     ps3_hle_register_ctx(ps3_compute_nid("cellFsAllocateFileAreaWithoutZeroFill"),
                          "cellFsAllocateFileAreaWithoutZeroFill", cellFsAllocateFileAreaWithoutZeroFill);

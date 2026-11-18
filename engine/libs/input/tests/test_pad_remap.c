@@ -363,8 +363,12 @@ static void test_capture(const char* cellpad)
     CHECK(prm_capture_key(41, 1, &in, &why) == PRM_CAP_CANCEL);
     static const struct { int sc; const char* word; } kept[] = {
         { 58, "F1" }, { 59, "F2" }, { 60, "F3" }, { 64, "F7" }, { 66, "F9" }, { 68, "F11" }, { 70, "Print Screen" },
-        { 226, "Alt" }, { 230, "Alt" }, { 227, "Windows" }, { 231, "Windows" },
+        { 227, "Windows" }, { 231, "Windows" },
     };
+    /* Alt binds (GitHub #68): its own key-down arrives with the Alt modifier set */
+    CHECK(prm_capture_key(226, 1, &in, &why) == PRM_CAP_INPUT && in.kind == PRM_KEY && in.code == 0x3A);
+    CHECK(prm_capture_key(230, 1, &in, &why) == PRM_CAP_INPUT && in.kind == PRM_KEY && in.code == 0x3D);
+    CHECK(prm_capture_key(226, 0, &in, &why) == PRM_CAP_INPUT && in.code == 0x3A);
     for (unsigned i = 0; i < sizeof kept / sizeof kept[0]; i++)
         CHECK(prm_capture_key(kept[i].sc, 0, &in, &why) == PRM_CAP_RESERVED && why && strstr(why, kept[i].word));
     CHECK(prm_capture_key(40, 1, &in, &why) == PRM_CAP_RESERVED && strstr(why, "Alt+Enter"));   /* Alt+Enter */

@@ -48,7 +48,7 @@
 #define JR_SEP_S "/"
 #endif
 
-volatile int g_spu_jobrec_mode = 0;
+PS3_MV_DEF(volatile int, g_spu_jobrec_mode, , = 0)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 
 extern void spu_indirect_branch(spu_context* ctx);
 extern void spu_drain_call(spu_context* ctx, uint32_t return_pc);
@@ -932,7 +932,7 @@ static const jr_field s_end_fields[] = {
 /* ------------------------------------------------------------------------- */
 extern uint8_t* vm_base;
 static SRWLOCK s_guest_lock = SRWLOCK_INIT;
-#define JR_DEAD_MAX 16
+#define JR_DEAD_MAX 512
 static SPU_THREAD_LOCAL struct { uint32_t lo, hi; } t_dead[JR_DEAD_MAX];
 static SPU_THREAD_LOCAL unsigned t_dead_n;
 static SPU_THREAD_LOCAL struct { uint32_t ea, size; } t_primed[4096];
@@ -957,9 +957,12 @@ void spu_native_dead_ls(uint32_t lo, uint32_t hi)
     t_dead[t_dead_n].lo = lo; t_dead[t_dead_n].hi = hi; t_dead_n++;
 }
 
+static SPU_THREAD_LOCAL struct { uint32_t lo, hi; } t_adead[JR_DEAD_MAX];   /* PS3_JOBREPLAY_API's pass 2 */
+static SPU_THREAD_LOCAL unsigned t_adead_n;
 static int jr_ls_dead(uint32_t a)
 {
     for (unsigned i = 0; i < t_dead_n; i++) if (a >= t_dead[i].lo && a < t_dead[i].hi) return 1;
+    for (unsigned i = 0; i < t_adead_n; i++) if (a >= t_adead[i].lo && a < t_adead[i].hi) return 1;
     return 0;
 }
 
@@ -1201,12 +1204,121 @@ static void jr_guest_release(jr_tls* t)
 }
 
 /* 1 = equal; else describes the first difference into why */
+/* ------------------------------------------------------------------------- */
+/* PS3_JOBREPLAY_API=native (Track B1, the native job runner): every job is  */
+/* replayed twice. Pass 1 is the replay above, with the lifted job manager's */
+/* API (image 3) behind a wrapper that notes each call the job makes: where  */
+/* it starts and ends in the recorded operations, the job's registers going  */
+/* in and r3 coming out. Pass 2 replays the job again with the C API of      */
+/* engine/libs/spurs/wws_native.c (image 199) answering the calls: each call */
+/* must be the same call with the same registers, its r3 must be what the    */
+/* lifted API answered, the recorded operations the lifted API made (the     */
+/* next job's claim and loads, kernel polls, its interrupt handler) are      */
+/* skipped, and everything the job itself does is checked as in pass 1. At  */
+/* the end the job's own state is compared: its local store from 0x4000 on   */
+/* (but the API's stack frames and the pages the lifted API loaded for the   */
+/* next job), r1, r3, r80..r127, pc, status.                                 */
+/* ------------------------------------------------------------------------- */
+static int s_api_native;
+#define JR_API_N 9
+static const uint32_t s_api_pc[JR_API_N] = { 0x1670, 0x2EB0, 0x16E0, 0x1738, 0x1740, 0x1760, 0x1A58, 0x1A78, 0x19F8 };
+typedef void (*jr_spu_fn)(spu_context*);
+static jr_spu_fn s_api_lifted[JR_API_N];
+typedef struct jr_api_call { uint32_t pc, r1; u128 in[4]; uint32_t c0[2], c1[2]; u128 r3; } jr_api_call;
+#define JR_API_MAX 128
+static SPU_THREAD_LOCAL jr_api_call t_api[JR_API_MAX];
+static SPU_THREAD_LOCAL int t_api_n, t_api_i, t_api_pass, t_api_over;
+extern jr_spu_fn spu_replace_function(int image_id, uint32_t addr, jr_spu_fn fn);
+
+static void jr_api_wrap(spu_context* ctx)
+{
+    const uint32_t pc = ctx->pc & SPU_LS_MASK;
+    int k = 0;
+    while (k < JR_API_N && s_api_pc[k] != pc) k++;
+    if (k == JR_API_N) abort();
+    jr_tls* t = jr_on(ctx);
+    jr_api_call* a = NULL;
+    if (t && t->replaying && t_api_pass == 1) {
+        if (t_api_n < JR_API_MAX) a = &t_api[t_api_n++]; else t_api_over = 1;
+    }
+    const uint32_t ret = ctx->gpr[0]._u32[0];
+    if (a) {
+        a->pc = pc; a->r1 = ctx->gpr[1]._u32[0];
+        for (int i = 0; i < 4; i++) a->in[i] = ctx->gpr[3 + i];
+        a->c0[0] = t->cur[0]; a->c0[1] = t->cur[1];
+    }
+    s_api_lifted[k](ctx);
+    if (ctx->tramp_fn) spu_drain_call(ctx, ret);   /* a transfer the lifted API left pending: finish it here */
+    if (a) { a->c1[0] = t->cur[0]; a->c1[1] = t->cur[1]; a->r3 = ctx->gpr[3]; }
+}
+
+static void jr_api_install(void)
+{
+    for (int k = 0; k < JR_API_N; k++) {
+        s_api_lifted[k] = spu_replace_function(3, s_api_pc[k], jr_api_wrap);
+        if (!s_api_lifted[k]) {
+            fprintf(stderr, "[jobreplay] PS3_JOBREPLAY_API=native: the lifted job manager has no function at 0x%X\n", s_api_pc[k]);
+            exit(2);
+        }
+    }
+}
+
+static void jr_dead_add(uint32_t lo, uint32_t hi)
+{
+    if (t_adead_n >= JR_DEAD_MAX || hi <= lo) return;
+    t_adead[t_adead_n].lo = lo & ~15u; t_adead[t_adead_n].hi = (hi + 15u) & ~15u; t_adead_n++;
+}
+
+/* wws_native.c's API functions, at entry (exit = 0) and before they return (exit = 1) */
+void spu_jobrec_api_note(spu_context* ctx, uint32_t api_pc, int exit)
+{
+    jr_tls* t = jr_on(ctx);
+    if (!t || !t->replaying || t_api_pass != 2) return;
+    if (!exit) {
+        if (t_api_i >= t_api_n) jr_fail(t, "native API: call of 0x%X that the lifted job manager never got", api_pc);
+        const jr_api_call* a = &t_api[t_api_i];
+        if (a->pc != api_pc) jr_fail(t, "native API: call %d is of 0x%X, the lifted job manager got 0x%X", t_api_i, api_pc, a->pc);
+        /* the argument words each call reads (the volatile registers between calls are the API's
+         * scratch: the lifted calls leave their link registers in r4/r5) */
+        const unsigned args = api_pc == 0x2EB0 ? 0xE : api_pc == 0x16E0 ? 0x3 : api_pc == 0x1740 ? 0x1 : 0;
+        for (int i = 0; i < 4; i++)
+            if ((args >> i) & 1 && ctx->gpr[3 + i]._u32[0] != a->in[i]._u32[0])
+                jr_fail(t, "native API: call %d of 0x%X: r%d = %08X, with the lifted API %08X",
+                        t_api_i, api_pc, 3 + i, ctx->gpr[3 + i]._u32[0], a->in[i]._u32[0]);
+        /* what the lifted call left that is not the job's: its stack frames, the pages it loaded */
+        jr_dead_add(a->r1 > 0x800 ? a->r1 - 0x800 : 0, a->r1 + 0x20);   /* + the caller's link save slot */
+        for (int s = 0; s < 2; s++)
+            for (uint32_t q = a->c0[s]; q < a->c1[s]; q++) {
+                const jr_ev* e = &t->f->ev[t->f->sidx[s][q]];
+                if (e->type == EV_DMA && mfc_is_get(e->ch)) jr_dead_add(e->a & SPU_LS_MASK, (e->a & SPU_LS_MASK) + e->c);
+            }
+        return;
+    }
+    const jr_api_call* a = &t_api[t_api_i++];
+    /* r3 is an answer of GetBufferInfo(s) (the whole quad) and AllocTag (the tag, word 0). FreeTag
+     * answers nothing (r3 is whatever the module's command execution left there) and LoadNextJob's r3
+     * is the load state after the module's claim of the NEXT job ("none" from the runner, which never
+     * claims inside a job): the job continues with the recorded value. */
+    const int full = api_pc == 0x2EB0 || api_pc == 0x16E0;
+    if (api_pc == 0x1740 || api_pc == 0x1760) ctx->gpr[3] = a->r3;
+    if (full ? memcmp(&ctx->gpr[3], &a->r3, 16) != 0 : ctx->gpr[3]._u32[0] != a->r3._u32[0])
+        jr_fail(t, "native API: call %d of 0x%X answered r3 = %08X %08X %08X %08X, the lifted API %08X %08X %08X %08X",
+                t_api_i - 1, api_pc, ctx->gpr[3]._u32[0], ctx->gpr[3]._u32[1], ctx->gpr[3]._u32[2], ctx->gpr[3]._u32[3],
+                a->r3._u32[0], a->r3._u32[1], a->r3._u32[2], a->r3._u32[3]);
+    if (!full) ctx->gpr[3] = a->r3;                  /* AllocTag's other words: the mask's unused lanes */
+    t->cur[0] = a->c1[0]; t->cur[1] = a->c1[1];     /* the lifted API's own operations: not the job's */
+}
+
 static int jr_compare_end(const jr_file* f, spu_context* ctx, const uint8_t* rec_ls, char* why, size_t wn)
 {
     jr_state now; jr_capture(ctx, &now);
+    const int api2 = t_api_pass == 2;
     for (size_t i = 0; i < sizeof s_end_fields / sizeof s_end_fields[0]; i++) {
         const jr_field* d = &s_end_fields[i];
         if (d->dispatch && s_interp) continue;
+        if (api2 && d->off != offsetof(jr_state, pc) && d->off != offsetof(jr_state, status) &&
+            d->off != offsetof(jr_state, stop_code) && d->off != offsetof(jr_state, resident_ovl) &&
+            d->off != offsetof(jr_state, int_enable) && d->off != offsetof(jr_state, irq_saved)) continue;
         const uint8_t* a = (const uint8_t*)&now + d->off;
         const uint8_t* b = (const uint8_t*)f->st1 + d->off;
         size_t sz = d->size;
@@ -1227,7 +1339,7 @@ static int jr_compare_end(const jr_file* f, spu_context* ctx, const uint8_t* rec
      * registers r2, r4..r79 as the SPU ABI allows (no caller reads them), so only the
      * ABI-visible ones are compared -- the link, the stack pointer, r3, r80..r127. The
      * job's outputs (DMA, channels, atomics) and the local store are compared in full. */
-    const int abi_only = g_spu_native_ran != 0;
+    const int abi_only = g_spu_native_ran != 0 || api2;
     for (int r = 0; r < 128; r++)
         if (!(abi_only && (r == 2 || (r >= 4 && r < 80))) && memcmp(&ctx->gpr[r], &f->gpr1[r], 16)) {
             int nr = 0; for (int q = 0; q < 128; q++) nr += memcmp(&ctx->gpr[q], &f->gpr1[q], 16) != 0;
@@ -1237,7 +1349,7 @@ static int jr_compare_end(const jr_file* f, spu_context* ctx, const uint8_t* rec
             return 0;
         }
     int ls_diff = 0;
-    if (t_dead_n) {   /* a native ran: the ranges it declared dead are not compared */
+    if (t_dead_n || t_adead_n) {   /* a native ran / the API pass: the ranges declared dead are not compared */
         for (uint32_t a = 0; a < SPU_LS_SIZE && !ls_diff; a += 16)
             if (!jr_ls_dead(a) && memcmp(ctx->ls + a, rec_ls + a, 16)) ls_diff = 1;
     } else ls_diff = memcmp(ctx->ls, rec_ls, SPU_LS_SIZE) != 0;
@@ -1274,7 +1386,271 @@ static void jr_replay_entry(spu_context* ctx)
     t->done = 1;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The native pass (Track B2: native job modules, libs/spurs/wws_njob.h).     */
+/* A job module with a native C version (wws_nmod_find) is run a second time */
+/* per recording, as the runner runs it in the game: no SPU, no local store. */
+/* Its inputs are rebuilt from the recording: the job manager's buffer table */
+/* in the start local store names each buffer set's EA and size (a list set: */
+/* the list, found at its buffer's end, and its elements' data, gathered at  */
+/* the buffer's start); those bytes, every recorded GET and every atomic's   */
+/* line are put into guest memory at their EAs. The native may read only     */
+/* those ranges. Its PUTs are checked in order against the recorded PUTs      */
+/* (EA, size, every byte but the ones it marks as stale local store), its    */
+/* atomic adds against the recorded GETLLAR/PUTLLC pairs (old value served,  */
+/* the stored value checked); every recorded PUT must be matched.            */
+/* PS3_JOBREPLAY_NATIVE=0: no native pass; PS3_JOBREPLAY_NATIVE_REPEAT=<n>:  */
+/* run each native n more times for its timing (best of them).               */
+/* ------------------------------------------------------------------------- */
+#include "../../libs/spurs/wws_njob.h"
+static int s_nat_pass = -1, s_nat_repeat = 0;
+typedef struct jr_nsvc {
+    const jr_file* f;
+    struct jr_nrg { uint32_t lo, hi; } *rg; uint32_t nrg, caprg;   /* primed ranges, sorted and merged */
+    uint32_t put_i, atom_i;                                   /* stream-0 positions (indices into sidx[0]) */
+    uint32_t nput, natom;
+    int failed; char why[600];
+    int timing;                                               /* a timing repeat: no checks, no failure text */
+} jr_nsvc;
+static SPU_THREAD_LOCAL jr_nsvc t_nsvc;
+
+static void jr_nfail(jr_nsvc* s, const char* fmt, ...)
+{
+    if (s->failed || s->timing) { s->failed = 1; return; }
+    s->failed = 1;
+    va_list ap; va_start(ap, fmt); vsnprintf(s->why, sizeof s->why, fmt, ap); va_end(ap);
+}
+static void jr_nrange_add(jr_nsvc* s, uint32_t ea, uint32_t size)
+{
+    if (!size) return;
+    if (s->nrg == s->caprg) {
+        s->caprg = s->caprg ? 2 * s->caprg : 1024;
+        s->rg = (struct jr_nrg*)realloc(s->rg, (size_t)s->caprg * sizeof *s->rg);
+    }
+    s->rg[s->nrg].lo = ea; s->rg[s->nrg].hi = ea + size; s->nrg++;
+}
+static int jr_nrange_cmp(const void* a, const void* b)
+{
+    const uint32_t x = *(const uint32_t*)a, y = *(const uint32_t*)b;
+    return x < y ? -1 : x > y;
+}
+static void jr_nrange_merge(jr_nsvc* s)
+{
+    if (!s->nrg) return;
+    qsort(s->rg, s->nrg, sizeof *s->rg, jr_nrange_cmp);
+    uint32_t m = 0;
+    for (uint32_t i = 1; i < s->nrg; i++) {
+        if (s->rg[i].lo <= s->rg[m].hi) { if (s->rg[i].hi > s->rg[m].hi) s->rg[m].hi = s->rg[i].hi; }
+        else s->rg[++m] = s->rg[i];
+    }
+    s->nrg = m + 1;
+}
+/* guest bytes the recording knows (callers write the earliest last: it wins) */
+static void jr_nprime(jr_nsvc* s, uint32_t ea, const uint8_t* src, uint32_t size)
+{
+    if (!size || ea < 0x10000u || (uint64_t)ea + size > 0xFFFFFFFFull) return;
+    jr_commit(ea, size);
+    memcpy(vm_base + ea, src, size);
+    jr_nrange_add(s, ea, size);
+}
+static const uint8_t* jr_nread(wws_njob* nj, uint32_t ea, uint32_t size)
+{
+    jr_nsvc* s = (jr_nsvc*)nj->svc;
+    if (!size || (uint64_t)ea + size > 0xFFFFFFFFull) return NULL;
+    uint32_t lo = 0, hi = s->nrg;                             /* the last range with lo <= ea */
+    while (lo < hi) { const uint32_t mid = (lo + hi) / 2; if (s->rg[mid].lo <= ea) lo = mid + 1; else hi = mid; }
+    if (!lo || ea + size > s->rg[lo - 1].hi) return NULL;
+    return vm_base + ea;
+}
+static void jr_nput(wws_njob* nj, uint32_t ea, const uint8_t* src, uint32_t size, const uint8_t* dc)
+{
+    jr_nsvc* s = (jr_nsvc*)nj->svc;
+    const jr_file* f = s->f;
+    s->nput++;
+    while (s->put_i < f->ns[0]) {
+        const jr_ev* e = &f->ev[f->sidx[0][s->put_i]];
+        if (e->type == EV_DMA && mfc_is_put(e->ch)) break;
+        s->put_i++;
+    }
+    if (s->put_i >= f->ns[0]) { jr_nfail(s, "native PUT #%u ea=0x%08X size=0x%X: the recording has no more PUTs", s->nput, ea, size); return; }
+    const jr_ev* e = &f->ev[f->sidx[0][s->put_i++]];
+    if (s->timing) return;
+    if (e->b != ea || e->c != size || e->len != size) {
+        jr_nfail(s, "native PUT #%u ea=0x%08X size=0x%X, recording ea=0x%08X size=0x%X", s->nput, ea, size, e->b, e->c);
+        return;
+    }
+    const uint8_t* rec = f->data + e->off;
+    for (uint32_t i = 0; i < size; i++)
+        if (src[i] != rec[i] && !(dc && dc[i])) {
+            jr_nfail(s, "native PUT #%u ea=0x%08X size=0x%X: byte +0x%X is %02X, recording %02X", s->nput, ea, size, i, src[i], rec[i]);
+            return;
+        }
+}
+static uint32_t jr_natomic(wws_njob* nj, uint32_t ea, uint32_t v)
+{
+    jr_nsvc* s = (jr_nsvc*)nj->svc;
+    const jr_file* f = s->f;
+    const uint32_t line = ea & ~127u, o = ea & 127u & ~3u;
+    s->natom++;
+    for (uint32_t i = s->atom_i; i < f->ns[0]; i++) {
+        const jr_ev* g = &f->ev[f->sidx[0][i]];
+        if (g->type != EV_ATOM || g->ch != MFC_GETLLAR_CMD || g->b != line) continue;
+        for (uint32_t k = i + 1; k < f->ns[0]; k++) {
+            const jr_ev* p = &f->ev[f->sidx[0][k]];
+            if (p->type != EV_ATOM || p->b != line || p->ch == MFC_GETLLAR_CMD) continue;
+            if (p->c != 0) break;                             /* that PUTLLC failed: the next GETLLAR */
+            uint32_t be;
+            memcpy(&be, f->data + g->off + 128 + o, 4);
+            const uint32_t old = __builtin_bswap32(be);
+            memcpy(&be, f->data + p->off + o, 4);
+            const uint32_t st = __builtin_bswap32(be);
+            if (!s->timing && st != old + v)
+                jr_nfail(s, "native atomic add #%u on 0x%08X: old 0x%08X + 0x%X, the recording stored 0x%08X", s->natom, ea, old, v, st);
+            s->atom_i = k + 1;
+            return old;
+        }
+    }
+    jr_nfail(s, "native atomic add #%u on 0x%08X (+0x%X): the recording has no stored atomic on that line", s->natom, ea, v);
+    return 0;
+}
+static uint32_t jr_be32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return __builtin_bswap32(v); }
+
+/* the job's buffers from the job manager's tables in the start local store (wws_native.c's layout:
+ * LS_SETS 0xDF0, LS_BUFS 0xEB0, LS_MAP 0x11B0, LS_RUNSLOT 0x12E0, LS_PARAMS 0x1350) */
+static int jr_njob_build(const jr_file* f, const wws_nmod* m, wws_njob* nj, jr_nsvc* s, char* why, size_t wn)
+{
+    const uint8_t* ls = f->ls0;
+    const uint32_t L = jr_be32(ls + 0x12E0);
+    if (L > 2) { snprintf(why, wn, "no run slot in the start local store (0x%X)", L); return 0; }
+    struct { uint32_t dst, lls, ea, size; int list; } st[WWS_NJOB_SETS];
+    int nst = 0;
+    for (uint32_t set = 0; set < WWS_NJOB_SETS; set++) {
+        const uint32_t S = jr_be32(ls + 0xDF0 + L * 64 + set * 4);
+        if (!S) continue;
+        const uint32_t first = S >> 24, ppb = (S >> 16) & 0xFF, fbi = S & 0xFF;
+        const uint32_t p = ls[0x11B0 + fbi];
+        if (p == 0xFF) continue;
+        const uint32_t e0 = jr_be32(ls + 0xEB0 + (fbi + p) * 8), e1 = jr_be32(ls + 0xEB0 + (fbi + p) * 8 + 4);
+        if (!(e0 & 0x08000000u)) continue;
+        const uint32_t page = (first + ppb * p) & 0xFF;
+        wws_nbuf* b = &nj->buf[set];
+        b->used = 1; b->ea = e1 & ~15u; b->size = ((e0 >> 8) & 0x3FFF) << 4;
+        b->load = b->ea && b->size; b->list = b->load && (m->list_sets >> set & 1); b->share = (e0 >> 30) & 1;
+        b->pages = (uint8_t)ppb; b->nbufs = (uint8_t)((S >> 8) & 0x7F);
+        if (!b->load || !set) continue;                       /* set 0: the job code */
+        st[nst].dst = page << 10; st[nst].ea = b->ea; st[nst].size = b->size; st[nst].list = b->list;
+        st[nst].lls = b->list ? ((page + ppb) << 10) - b->size : 0;   /* the list at the region's end (D & 7 = 0) */
+        if (st[nst].dst + (b->list ? 0 : b->size) > SPU_LS_SIZE || st[nst].lls + b->size > SPU_LS_SIZE) {
+            snprintf(why, wn, "set %u: buffer outside the local store", set); return 0;
+        }
+        nst++;
+    }
+    const uint32_t pp = jr_be32(ls + 0x1350) & SPU_LS_MASK;
+    if (pp >= 0xC00 && pp < 0x1000) { nj->params = ls + pp; nj->params_len = 0x1000 - pp > 256 ? 256 : 0x1000 - pp; }
+    /* guest memory: every recorded GET and atomic line, the earliest written last; then the staged inputs */
+    for (uint32_t i = f->h->n_ev; i-- > 0; ) {
+        const jr_ev* e = &f->ev[i];
+        if (e->type == EV_DMA && e->len && mfc_is_get(e->ch)) jr_nprime(s, e->b, f->data + e->off, e->len);
+        else if (e->type == EV_ATOM && e->ch == MFC_GETLLAR_CMD && e->len >= 256) jr_nprime(s, e->b, f->data + e->off + 128, 128);
+    }
+    for (int k = 0; k < nst; k++) {
+        if (!st[k].list) { jr_nprime(s, st[k].ea, ls + st[k].dst, st[k].size); continue; }
+        jr_nprime(s, st[k].ea, ls + st[k].lls, st[k].size);
+        uint32_t dest = st[k].dst;                             /* mfc_run_list's local-store walk */
+        for (uint32_t o = 0; o + 8 <= st[k].size; o += 8) {
+            const uint32_t sz = jr_be32(ls + st[k].lls + o) & 0x7FFF, eal = jr_be32(ls + st[k].lls + o + 4);
+            if (!sz) continue;
+            const uint32_t tl = (dest & ~15u) | (eal & 15u);
+            if (tl + sz > SPU_LS_SIZE) { snprintf(why, wn, "a list element outside the local store"); return 0; }
+            jr_nprime(s, eal, ls + tl, sz);
+            dest = (dest & ~15u) + ((sz + 15u) & ~15u);
+        }
+    }
+    jr_nrange_merge(s);
+    return 1;
+}
+
+static volatile long s_nat_n[JR_MAX_OVL], s_nat_ok[JR_MAX_OVL], s_nat_decl[JR_MAX_OVL], s_nat_fail[JR_MAX_OVL];
+static volatile uint64_t s_nat_ns[JR_MAX_OVL], s_nat_best_ns[JR_MAX_OVL];
+static volatile long s_nat_why[JR_MAX_OVL][32];
+
+/* after pass 1: 1 = pass (or no native for this module), 0 = the native is wrong (r->why) */
+static int jr_native_pass(const jr_file* f, jr_result* r)
+{
+    if (s_nat_pass < 0) {
+        const char* e = getenv("PS3_JOBREPLAY_NATIVE");
+        s_nat_pass = !(e && *e == '0');
+        e = getenv("PS3_JOBREPLAY_NATIVE_REPEAT");
+        s_nat_repeat = e ? atoi(e) : 0;
+    }
+    if (!s_nat_pass || f->h->ovl < 0 || f->h->ovl >= JR_MAX_OVL) return 1;
+    const wws_nmod* m = wws_nmod_find(f->h->ovl);
+    if (!m) return 1;
+    const int o = f->h->ovl;
+    jr_nsvc* s = &t_nsvc;
+    s->nrg = 0;
+    AcquireSRWLockExclusive(&s_guest_lock);
+    t_primed_n = 0; t_chunks_n = 0;
+    static SPU_THREAD_LOCAL wws_njob nj;
+    memset(&nj, 0, sizeof nj);
+    nj.module = o; nj.read = jr_nread; nj.put = jr_nput; nj.atomic_add = jr_natomic; nj.svc = s;
+    s->f = f; s->put_i = s->atom_i = 0; s->nput = s->natom = 0; s->failed = 0; s->why[0] = 0; s->timing = 0;
+    char why[300] = "";
+    const int ok = jr_njob_build(f, m, &nj, s, why, sizeof why);
+    int ran = 0;
+    uint64_t ns = 0, best = ~0ull;
+    uint32_t fb = 0;
+    if (ok) {
+        const wws_njob nj0 = nj;
+        const uint64_t q0 = jr_qpc();
+        ran = m->run(&nj);
+        ns = jr_ns(jr_qpc() - q0); best = ns;
+        fb = nj.fallback;
+        if (ran == 1 && !s->failed) {
+            uint32_t left = 0;                                 /* every recorded PUT matched */
+            for (uint32_t i = s->put_i; i < f->ns[0]; i++) {
+                const jr_ev* e = &f->ev[f->sidx[0][i]];
+                if (e->type == EV_DMA && mfc_is_put(e->ch)) left++;
+            }
+            if (left) jr_nfail(s, "native made %u PUT(s), the recording has %u more", s->nput, left);
+        } else if (ran != 1 && !s->failed && (s->nput || s->natom)) {
+            jr_nfail(s, "native declined (reasons 0x%X) after %u PUT(s) / %u atomic(s)", nj.fallback, s->nput, s->natom);
+        }
+        for (int k = 0; k < s_nat_repeat && ran == 1 && !s->failed; k++) {
+            nj = nj0;
+            s->put_i = s->atom_i = 0; s->timing = 1;
+            const uint64_t q1 = jr_qpc();
+            m->run(&nj);
+            const uint64_t d = jr_ns(jr_qpc() - q1);
+            if (d < best) best = d;
+            s->timing = 0; s->failed = 0;
+        }
+    }
+    for (uint32_t i = 0; i < s->nrg; i++) memset(vm_base + s->rg[i].lo, 0, s->rg[i].hi - s->rg[i].lo);
+    s->nrg = 0; t_primed_n = 0; t_chunks_n = 0;
+    ReleaseSRWLockExclusive(&s_guest_lock);
+    __atomic_add_fetch(&s_nat_n[o], 1, __ATOMIC_RELAXED);
+    if (!ok || s->failed) {
+        __atomic_add_fetch(&s_nat_fail[o], 1, __ATOMIC_RELAXED);
+        if (r->pass == 1) {
+            r->pass = 0;
+            snprintf(r->why, sizeof r->why, "native pass (%s): %s", m->name, ok ? s->why : why);
+        }
+        return 0;
+    }
+    if (ran != 1) {
+        __atomic_add_fetch(&s_nat_decl[o], 1, __ATOMIC_RELAXED);
+        for (int b = 0; b < 32; b++) if (fb >> b & 1) __atomic_add_fetch(&s_nat_why[o][b], 1, __ATOMIC_RELAXED);
+        return 1;
+    }
+    __atomic_add_fetch(&s_nat_ok[o], 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&s_nat_ns[o], ns, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&s_nat_best_ns[o], best, __ATOMIC_RELAXED);
+    return 1;
+}
+
 static volatile long s_native_jobs = 0;   /* replayed jobs in which a native rewrite ran */
+static volatile long s_api_jobs = 0;      /* PS3_JOBREPLAY_API=native: jobs whose second pass (the C API) passed */
 static int s_break_get = 0;   /* PS3_JOBREPLAY_BREAK=get: corrupt one served GET byte (checker self-test) */
 
 /* A replay that runs away (a broken build looping) is stopped by the
@@ -1295,6 +1671,7 @@ static void jr_replay_one(const jr_file* f, jr_result* r, uint8_t* rec_ls, jr_sl
     AcquireSRWLockExclusive(&slot->lock); slot->ctx = ctx; slot->t0_ms = jr_ms_now(); ReleaseSRWLockExclusive(&slot->lock);
     const uint64_t q0 = jr_qpc();
     g_spu_native_ran = 0; t_dead_n = 0; t_primed_n = 0; t->guest_locked = 0; t->native_ran = 0; t->prime_ticks = 0; t->nat_atom = 0;
+    t_api_pass = s_api_native ? 1 : 0; t_api_n = 0; t_api_i = 0; t_api_over = 0;
     const int halted = spu_run_with_halt(jr_replay_entry, ctx);
     if (g_spu_native_ran) __atomic_add_fetch(&s_native_jobs, 1, __ATOMIC_RELAXED);
     AcquireSRWLockExclusive(&slot->lock); slot->ctx = NULL; ReleaseSRWLockExclusive(&slot->lock);
@@ -1321,6 +1698,56 @@ static void jr_replay_one(const jr_file* f, jr_result* r, uint8_t* rec_ls, jr_sl
         }
         r->pass = jr_compare_end(f, ctx, rec_ls, r->why, sizeof r->why);
     }
+    if (s_api_native && r->pass == 1 && t_api_n > 0 && !t_api_over) {
+        /* pass 2: the same job with the native runner's API */
+        jr_guest_release(t);
+        spu_mfc_release(ctx);
+        spu_context_init(ctx, f->h->spu_id);
+        jr_restore(ctx, f->st0);
+        memcpy(ctx->gpr, f->gpr0, sizeof ctx->gpr);
+        memcpy(ctx->ls, f->ls0, SPU_LS_SIZE);
+        ctx->image_id = 199;                           /* WWS_NATIVE_IMAGE */
+        /* the policy module was resident as a code span (image 3 at LS 0xA00): the native API
+         * answers those addresses now, as in the runner's contexts */
+        for (unsigned k = 0; k < SPU_RESIDENT_CODE_SLOTS; k++)
+            if (ctx->resident_code[k].image_id == 3) memset(&ctx->resident_code[k], 0, sizeof ctx->resident_code[k]);
+        ctx->ib_gen++;
+        t->active = 1; t->ctx = ctx; t->recording = 0; t->replaying = 1; t->skip = 0;
+        t->f = f; t->cur[0] = t->cur[1] = 0; t->failed = 0; t->done = 0; t->why[0] = 0;
+        g_spu_native_ran = 0; t_dead_n = 0; t_primed_n = 0; t->guest_locked = 0; t->native_ran = 0; t->prime_ticks = 0; t->nat_atom = 0;
+        t_adead_n = 0;
+        jr_dead_add(0, 0x4000);                        /* the job manager's own local store */
+        jr_dead_add(0x3F9B0, SPU_LS_SIZE);             /* its stack frames above the job's (r1 0x3F990 + link slot) */
+        for (uint32_t q = 0; q < f->ns[1]; q++) {      /* what its interrupt handler loaded for the next job */
+            const jr_ev* e = &f->ev[f->sidx[1][q]];
+            if (e->type == EV_DMA && mfc_is_get(e->ch)) jr_dead_add(e->a & SPU_LS_MASK, (e->a & SPU_LS_MASK) + e->c);
+        }
+        t_api_pass = 2; t_api_i = 0;
+        AcquireSRWLockExclusive(&slot->lock); slot->ctx = ctx; slot->t0_ms = jr_ms_now(); ReleaseSRWLockExclusive(&slot->lock);
+        const int halted2 = spu_run_with_halt(jr_replay_entry, ctx);
+        AcquireSRWLockExclusive(&slot->lock); slot->ctx = NULL; ReleaseSRWLockExclusive(&slot->lock);
+        t->active = 0; t->replaying = 0;
+        if (t->failed) {
+            r->pass = 0; snprintf(r->why, sizeof r->why, "%s", t->why);
+        } else if (halted2 || !t->done) {
+            r->pass = 0; snprintf(r->why, sizeof r->why, "native API: the job did not return (pc=0x%05X)", ctx->pc & SPU_LS_MASK);
+        } else if (t_api_i != t_api_n) {
+            r->pass = 0; snprintf(r->why, sizeof r->why, "native API: %d of the lifted API's %d calls made", t_api_i, t_api_n);
+        } else if (t->cur[0] != f->ns[0]) {
+            r->pass = 0;
+            const jr_ev* e = &f->ev[f->sidx[0][t->cur[0]]];
+            snprintf(r->why, sizeof r->why, "native API: missing operations: replayed %u of %u; next recorded %s 0x%X a=0x%X b=0x%X",
+                     t->cur[0], f->ns[0], s_ev_name[e->type < 8 ? e->type : 0], e->ch, e->a, e->b);
+        } else {
+            r->pass = jr_compare_end(f, ctx, rec_ls, r->why, sizeof r->why);
+            if (!r->pass) {
+                char tmp[sizeof r->why]; snprintf(tmp, sizeof tmp, "native API: %s", r->why);
+                snprintf(r->why, sizeof r->why, "%s", tmp);
+            }
+        }
+        if (r->pass == 1) __atomic_add_fetch(&s_api_jobs, 1, __ATOMIC_RELAXED);
+    }
+    t_api_pass = s_api_native ? 1 : 0; t_api_n = 0; t_api_over = 0; t_adead_n = 0;
     uint64_t h = 0xCBF29CE484222325ull;
     h = jr_fnv(h, ctx->gpr, sizeof ctx->gpr); h = jr_fnv(h, ctx->ls, SPU_LS_SIZE);
     h = jr_fnv(h, &r->pass, sizeof r->pass); h = jr_fnv(h, r->why, strlen(r->why));
@@ -1379,6 +1806,7 @@ static DWORD WINAPI jr_worker(LPVOID arg)
                 continue;
             }
             jr_replay_one(&f, r, rec_ls, slot);
+            if (k == 0) jr_native_pass(&f, r);   /* Track B2: the module's native C version, if it has one */
         }
         jr_file_free(&f);
         __atomic_add_fetch(&js->done, 1, __ATOMIC_RELAXED);
@@ -1399,6 +1827,12 @@ int spu_jobreplay_main(void)
     long per_mod = (e = getenv("PS3_JOBREPLAY_MAX")) ? strtol(e, 0, 0) : 0;
     s_break_get = (e = getenv("PS3_JOBREPLAY_BREAK")) && !strcmp(e, "get");
     s_interp = (e = getenv("PS3_JOBREPLAY_INTERP")) && *e == '1';
+    s_api_native = (e = getenv("PS3_JOBREPLAY_API")) && !strcmp(e, "native");
+    {   /* the native runner's job-manager API (libs/spurs/wws_native.c): recordings the runner made use it */
+        extern void wws_native_api_register(void);
+        wws_native_api_register();
+    }
+    if (s_api_native) jr_api_install();
     uint8_t want[JR_MAX_OVL];
     if ((e = getenv("PS3_JOBREPLAY_MOD")) && *e) { memset(want, 0, sizeof want); jr_parse_ids(e, want, 1); }
     else memset(want, 1, sizeof want);
@@ -1530,6 +1964,24 @@ int spu_jobreplay_main(void)
         if (s_native_jobs)
             fprintf(w, "native rewrites ran in %ld replayed job(s) (end registers compared: r0 r1 r3 r80..r127)\n",
                     s_native_jobs);
+        if (s_api_native)
+            fprintf(w, "native job-manager API (PS3_JOBREPLAY_API=native): %ld job(s) passed their second pass with the C API\n",
+                    s_api_jobs);
+        for (int o = 0; o < JR_MAX_OVL; o++) {   /* Track B2: the native job modules' pass */
+            if (!s_nat_n[o]) continue;
+            const wws_nmod* nm = wws_nmod_find(o);
+            char rs[400] = ""; int rl = 0;
+            for (int b = 0; b < 32 && rl < (int)sizeof rs - 40; b++) {
+                if (!s_nat_why[o][b]) continue;
+                const char* nmb = NULL;
+                if (nm && nm->reasons) for (int q = 0; nm->reasons[q]; q++) if (q == b) { nmb = nm->reasons[q]; break; }
+                rl += snprintf(rs + rl, sizeof rs - (size_t)rl, " %s:%ld", nmb ? nmb : "?", s_nat_why[o][b]);
+            }
+            fprintf(w, "[jobreplay] native %d (%s): %ld job(s): %ld exact, %ld declined%s%s%s, %ld WRONG; native %.2f us/job (best of repeats %.2f)\n",
+                    o, nm ? nm->name : "?", s_nat_n[o], s_nat_ok[o], s_nat_decl[o], rl ? " (" : "", rl ? rs + 1 : "",
+                    rl ? ")" : "", s_nat_fail[o], s_nat_ok[o] ? (double)s_nat_ns[o] / 1e3 / s_nat_ok[o] : 0.0,
+                    s_nat_ok[o] ? (double)s_nat_best_ns[o] / 1e3 / s_nat_ok[o] : 0.0);
+        }
         for (int o = 0; o < JR_MAX_OVL; o++) {
             if (mod[o].first_fail < 0) continue;
             const jr_result* r = &js.res[mod[o].first_fail];

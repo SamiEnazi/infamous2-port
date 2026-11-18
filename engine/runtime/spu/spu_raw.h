@@ -73,6 +73,15 @@ void spu_raw_reg_store(uint32_t ea, uint32_t val, int width);
  * 0 leaves the caller's plain memory read alone. */
 int  spu_raw_reg_load(uint32_t ea, uint32_t* out);
 
+/* PPU_LEAN_MEM (track A): the guarded problem-state windows (runtime/memory/vm_guard.h
+ * VMG_RAW_SPU). prepare moves the registers' memory beside the window (before the guard is
+ * armed), abandon moves it back (the guard could not be armed); load / store are the guard's
+ * callbacks (n = 1, 2, 4, 8; the guest's value), 1 = done. */
+int  spu_raw_guard_prepare(void);
+void spu_raw_guard_abandon(void);
+int  spu_raw_guard_load(uint32_t ea, unsigned n, uint64_t* val);
+int  spu_raw_guard_store(uint32_t ea, unsigned n, uint64_t val);
+
 /* lv2 registration (runtime/syscalls/lv2_register.c). */
 struct lv2_syscall_table;
 void sys_raw_spu_init(struct lv2_syscall_table* tbl);

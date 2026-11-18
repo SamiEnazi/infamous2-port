@@ -54,7 +54,7 @@ New-Label ("You need your own copy of the game: the disc's files (the folder wit
            "the PS3 firmware and the game's 1.04 update installed. Setup decrypts and translates YOUR copy " +
            "on this PC; nothing of the game is downloaded or shared.") 16 42 728 48 $false | Out-Null
 $disc = New-PathRow "Game disc folder (the folder that holds PS3_GAME):" 94 $(if (Test-Path -LiteralPath (Join-Path $root "game\disc\PS3_GAME")) { (Get-Item -LiteralPath (Join-Path $root "game\disc")).FullName } else { "" }) "The game's disc folder: the one that holds PS3_GAME"
-$rpcs3 = New-PathRow "RPCS3 folder (the folder that holds rpcs3.exe):" 144 $(if ($saved["rpcs3"]) { $saved["rpcs3"] } else { "" }) "The RPCS3 folder: the one that holds rpcs3.exe"
+$rpcs3 = New-PathRow "RPCS3 folder (optional; without it Setup downloads the update and firmware from Sony):" 144 $(if ($saved["rpcs3"]) { $saved["rpcs3"] } else { "" }) "The RPCS3 folder: the one that holds rpcs3.exe"
 
 $list = New-Object System.Windows.Forms.ListView
 $list.Location = New-Object System.Drawing.Point(16, 198); $list.Size = New-Object System.Drawing.Size(728, 250)
@@ -112,7 +112,7 @@ $btnTools.Add_Click({
     }
 })
 $btnBuild.Add_Click({
-    if (Get-Process rpcs3 -ErrorAction SilentlyContinue) { [System.Windows.Forms.MessageBox]::Show("Close RPCS3 first: Setup uses it to decrypt your game.", "Setup") | Out-Null; return }
+    if ($rpcs3.Text.Trim() -and -not (Test-Path -LiteralPath (Join-Path $PSScriptRoot "ps3tool.py")) -and (Get-Process rpcs3 -ErrorAction SilentlyContinue)) { [System.Windows.Forms.MessageBox]::Show("Close RPCS3 first: Setup uses it to decrypt your game.", "Setup") | Out-Null; return }
     # The build downloads its tools (kept for quick updates); Microsoft's C++ files need their license.
     $lic = "Setup downloads the build tools into this folder (about 1.3 GB, kept for quick updates; nothing is installed).`n`n" +
            "Microsoft's C++ files (MSVC and the Windows SDK) come under the Visual Studio Build Tools license:`n" +
@@ -120,7 +120,9 @@ $btnBuild.Add_Click({
     if ([System.Windows.Forms.MessageBox]::Show($lic, "Microsoft's license", "YesNo", "Question") -ne "Yes") { return }
     New-Item -ItemType Directory -Force (Split-Path $logPath) | Out-Null
     Set-Content -LiteralPath $logPath -Value "" -Encoding UTF8
-    $a = "-NoProfile -ExecutionPolicy Bypass -Command `"& '$(Join-Path $PSScriptRoot 'setup_build.ps1')' -Disc '$($disc.Text.Trim())' -Rpcs3 '$($rpcs3.Text.Trim())' -AcceptMsvcLicense -Cleanup *>&1 | Out-File -Encoding utf8 -FilePath '$logPath'; exit `$LASTEXITCODE`""
+    # each path as a single-quoted PowerShell string ('' for a ' in a folder name)
+    $q = { param($t) "'" + ([string]$t).Replace("'", "''") + "'" }
+    $a = "-NoProfile -ExecutionPolicy Bypass -Command `"& $(& $q (Join-Path $PSScriptRoot 'setup_build.ps1')) -Disc $(& $q $disc.Text.Trim()) -Rpcs3 $(& $q $rpcs3.Text.Trim()) -AcceptMsvcLicense -Cleanup *>&1 | Out-File -Encoding utf8 -FilePath $(& $q $logPath); exit `$LASTEXITCODE`""
     $script:proc = Start-Process powershell -ArgumentList $a -WindowStyle Hidden -PassThru
     $btnBuild.Enabled = $false; $btnPlay.Enabled = $false; $btnTools.Enabled = $false
     $status.Text = "Building... (you can leave this window open; the log is below)"

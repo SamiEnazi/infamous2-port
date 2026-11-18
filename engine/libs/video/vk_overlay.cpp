@@ -94,7 +94,6 @@ void  ps3_lang_in_use(int kind, char* asked, char* given, size_t n);   /* runtim
 int   ps3_lang_available(int kind, char (*out)[24], int max);
 void  ps3_lang_missing(int kind, char* out, size_t n);   /* the dub wanted but not on the disc */
 int   vk_overlay_cheats_count(void);            /* vk_overlay_cheats.cpp: the title's cheats (ps3_cheats.h) */
-void  vk_overlay_cheats_page(float w);
 int   ps3_overlay_cheat_set(const char* id, double v);   /* below: "cheat=id=value" in the timed script */
 int   vk_overlay_cheats_owns_key(const char* k);         /* its PS3_CHEAT_* lines of the settings file */
 void  vk_overlay_cheats_write(FILE* f);
@@ -150,7 +149,7 @@ static bool env_on(const char* v)
  * variable; one that is set wins. Lines for variables the menu does not
  * manage are applied the same way and kept when the file is rewritten. */
 enum {
-    V_FPS_CAP, V_PRESENT, V_FULLSCREEN,
+    V_FPS_CAP, V_PRESENT, V_FULLSCREEN, V_CAPTURE,
     V_AA, V_SHARPEN, V_RENDER_SCALE, V_ANISO, V_UPSCALE,
     V_DOF, V_EDGE_BLUR, V_MESH_TRIM, V_EDGE_VP,
     V_VOLUME,
@@ -161,11 +160,12 @@ enum {
     V_ASPECT,                 /* [wide] */
     V_GAME_MODS,              /* [mods] */
     V_FOV,                    /* (dofov) the title's field of view (cheats.cpp), live */
+    V_MSAA, V_ALPHA_AA,       /* [aa] read at start (rsx_vulkan_backend.c vk_msaa.inc, rsx_fp_apply_alpha_aa) */
     V_SHADOW_LOD,             /* (deck) far shadow cascade detail (natives/spu/job210_native.c), live */
     V_N
 };
 static const char* const kVar[V_N] = {
-    "PS3RECOMP_FPS_CAP", "PS3RECOMP_VK_PRESENT", "PS3RECOMP_VK_FULLSCREEN",
+    "PS3RECOMP_FPS_CAP", "PS3RECOMP_VK_PRESENT", "PS3RECOMP_VK_FULLSCREEN", "PS3RECOMP_VK_CAPTURE_FRIENDLY",
     "PS3RECOMP_AA", "PS3RECOMP_SHARPEN", "PS3RECOMP_RENDER_SCALE", "PS3RECOMP_ANISO", "PS3RECOMP_UPSCALE",
     "PS3RECOMP_DOF", "PS3RECOMP_EDGE_BLUR", "PS3RECOMP_MESH_TRIM", "PS3RECOMP_EDGE_VP",
     "PS3_AUDIO_VOLUME",
@@ -177,6 +177,7 @@ static const char* const kVar[V_N] = {
     "PS3RECOMP_ASPECT",                               /* [wide] read once, at start */
     "PS3_GAME_MODS",                                  /* [mods] read once, at start */
     "PS3_FOV",                                        /* (dofov) percent of the game's field of view */
+    "PS3RECOMP_MSAA", "PS3RECOMP_ALPHA_AA",           /* [aa] read once, at start */
     "PS3RECOMP_SHADOW_LOD",                           /* (deck) 1 = the game's far shadows, 20 = reduced */
 };
 /* Plain arrays: filled during this file's dynamic initialisation, before
@@ -216,6 +217,7 @@ static const struct { const char* var; const char* low; const char* std_; const 
     { "PS3RECOMP_ENG_FBFETCH",     "1",   "",     ""  },   /* decals read their targets in place at 720p too */
     { "PS3RECOMP_SSAO",            "0",   "2",    "0" },   /* the game's half-resolution AO */
     { "PS3RECOMP_SOFT_SHADOWS",    "0",   "2",    "0" },   /* the PS3's shadow filter */
+    { "PS3RECOMP_SHADOW_RES",      "1",   "2",    "2" },   /* [shadow] the PS3's 1024x1024 sun-shadow maps (2x: ~50 MB more) */
     { "PS3RECOMP_FX_RES",          "1",   "full", "1" },   /* fire and smoke at the game's 512x288 */
     { "PS3RECOMP_ENG_TEXCACHE_MB", "512", "0",    "0" },   /* past 512 MB, textures not used for 5 s go */
     { "PS3RECOMP_VRAM_PRESSURE",   "1",   "0",    "0" },   /* near the budget the texture cache stops growing */
@@ -621,6 +623,8 @@ extern "C" void vk_overlay_settings_changed(void)
     s_dirty_t = now_s();
 }
 static void set_open(int o);
+static void menu_escape(void);          /* [menu-e] Esc / Circle: a question's Cancel, Back, or close (vk_overlay_menu.inc) */
+static void menu_closed(void);          /* [menu-e] set_open(0): no compare line, no sub-page */
 /* [remap] F2 > Controls rebinding (vk_overlay_remap.inc) */
 static bool remap_capturing(void);
 static bool remap_escape(void);
@@ -639,6 +643,7 @@ static void set_open(int o)
     std::lock_guard<std::recursive_mutex> il(s_imgui_lock);
     s_open = o;
     g_pad_overlay_open = o;          /* cellPad: every port reads neutral while open */
+    fprintf(stderr, "[overlay] menu %s\n", o ? "open" : "closed");   /* [menu-e] (test drivers wait for it) */
     if (o) {
         /* The cursor back for the menu, whatever the game had done with it. */
         s_rel_mouse_saved = SDL_GetRelativeMouseMode() == SDL_TRUE;
@@ -652,6 +657,7 @@ static void set_open(int o)
     } else {
         s_quit_ask = 0;
         remap_cancel();                  /* [remap] a binding being changed: dropped */
+        menu_closed();                   /* [menu-e] no compare line, no sub-page */
         if (s_imgui_ready) {
             ImGuiIO& io = ImGui::GetIO();
             io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
@@ -683,7 +689,7 @@ static int theme_apply(const char* value) { s_theme_want = vk_ov_theme_parse(val
 static void toggle_fullscreen(void)
 {
     SDL_Window* w = (SDL_Window*)s_vk.sdl_window;
-    const bool fs = w && (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN) != 0;
+    const bool fs = w && vk_backend_window_full() != 0;
     if (!apply_setting(V_FULLSCREEN, fs ? "0" : "1"))
         vk_overlay_notice("Fullscreen: applies when the game restarts");
     s_ui_stale = true;
@@ -692,21 +698,26 @@ static void toggle_fullscreen(void)
 /* The menu's pages: the settings pages, then Cheats (always the last one) when the title
  * has any. A new settings page goes before it: TAB_CHEATS is the number of settings pages
  * ([light] Lighting = 5, [fx] Effects = 6). */
-enum { TAB_MODS = 7, TAB_UPDATE = 8, TAB_CHEATS = 9, MENU_TABS = TAB_CHEATS };   /* [mods] Mods, [update] Update before Cheats */
-static int tab_count(void) { return TAB_CHEATS + (vk_overlay_cheats_count() > 0 ? 1 : 0); }
+enum { TAB_MODS = 7, TAB_UPDATE = 8, TAB_CHEATS = 9, TAB_ABOUT = 10, MENU_TABS = TAB_CHEATS };   /* [mods] Mods, [update] Update before Cheats */
+/* [about] About is the rail's last icon, after Cheats: s_tab counts along the rail, tab_page
+ * names the page there (without cheats, About sits where Cheats would). */
+static int tab_count(void) { return TAB_CHEATS + (vk_overlay_cheats_count() > 0 ? 1 : 0) + 1; }
+static int tab_page(int t) { return t >= tab_count() - 1 ? TAB_ABOUT : t; }
 
 static int tab_from_name(const char* e)
 {
     static const char* const names[TAB_CHEATS + 1] = { "display", "graphics", "audio", "controls", "hud", "lighting", "effects", "mods", "update", "cheats" };
     if (!e || !*e) return -1;
     if (e[0] >= '0' && e[0] <= '9') { const int t = atoi(e); return t >= 0 && t < tab_count() ? t : 0; }
-    for (int i = 0; i < tab_count(); i++) if (!SDL_strcasecmp(e, names[i])) return i;
+    if (!SDL_strcasecmp(e, "about")) return tab_count() - 1;   /* [about] */
+    for (int i = 0; i < tab_count() - 1; i++) if (!SDL_strcasecmp(e, names[i])) return i;
     if (!SDL_strcasecmp(e, "performance") || !SDL_strcasecmp(e, "perf")) return 4;
     if (!SDL_strcasecmp(e, "language") || !SDL_strcasecmp(e, "lang")) return 2;   /* Audio holds Language */
     return -1;
 }
 
 static void lowend_preset(bool low);   /* (lowend) vk_overlay_lowend.inc */
+static void menu_script(const char* w);   /* [menu-e] the timed script's menu verbs (vk_overlay_menu.inc) */
 /* PS3RECOMP_OVERLAY_MENU_AT="40:display,50:audio,60:close" (tests). */
 enum { SCRIPT_N = 16 };
 static struct { double t; char what[64]; bool done; } s_script[SCRIPT_N];
@@ -748,6 +759,8 @@ static void script_poll(double now)
             if (eq) { *eq = 0; ps3_overlay_cheat_set(k, atof(eq + 1)); }
         }
         else if (!SDL_strncasecmp(w, "bind=", 5)) remap_script(w + 5);   /* [remap] "bind=cross=key:F17", "bind=reset" */
+        else if (!SDL_strncasecmp(w, "sub=", 4) || !SDL_strncasecmp(w, "focus=", 6) || !SDL_strncasecmp(w, "nav=", 4) ||
+                 !SDL_strncasecmp(w, "split=", 6)) menu_script(w);            /* [menu-e] sub=remap|zip|notes|none, focus=<row id>, nav=<key>, split=<0..1> */
         else if (!SDL_strcasecmp(w, "preset=low")) lowend_preset(true);       /* (lowend) the Graphics page's buttons */
         else if (!SDL_strcasecmp(w, "preset=standard")) lowend_preset(false);
         else { const int t = tab_from_name(w); if (t >= 0) s_tab_want = t; set_open(1); }
@@ -761,10 +774,16 @@ static int s_ev_n;
 static void ev_push(const SDL_Event* e)
 {
     std::lock_guard<std::mutex> g(s_ev_lock);
-    if (s_ev_n < 128) s_ev[s_ev_n++] = *e;
+    if (s_ev_n >= 128) return;
+    s_ev[s_ev_n] = *e;
+    /* [menu-e] a key the window got without SDL's keyboard focus (posted to it, e.g. by a test driver
+     * or a launcher) has windowID 0, which imgui_impl_sdl2 drops: it is this window's */
+    if ((e->type == SDL_KEYDOWN || e->type == SDL_KEYUP) && !e->key.windowID && s_vk.sdl_window)
+        s_ev[s_ev_n].key.windowID = SDL_GetWindowID((SDL_Window*)s_vk.sdl_window);
+    s_ev_n++;
 }
 
-static void lfx_compare_toggle(void);   /* [light] F3, vk_overlay_light.inc */
+static bool lfx_compare_toggle(void);   /* [light] F3, vk_overlay_light.inc */
 
 extern "C" int vk_overlay_event(const void* ev)
 {
@@ -779,7 +798,13 @@ extern "C" int vk_overlay_event(const void* ev)
         if (s_open && remap_capturing()) { ev_push(e); return 1; }
         if (k == SDLK_F1) { if (press) { set_hud(!s_hud); if (!s_hud) vk_overlay_notice("Performance HUD off (F1 shows it)"); } return 1; }
         if (k == SDLK_F2) { if (press && !vk_overlay_saves_active()) set_open(!s_open); return 1; }
-        if (k == SDLK_F3) { if (press) lfx_compare_toggle(); return 1; }   /* [light] lighting A/B */
+        if (k == SDLK_F3) {   /* [light] lighting + effects A/B; [menu-e] held over 0.35 s = a peek (back on release) */
+            static double t_down;
+            static bool flipped;
+            if (press) { flipped = lfx_compare_toggle(); t_down = now_s(); }
+            else if (e->type == SDL_KEYUP && flipped) { flipped = false; if (now_s() - t_down > 0.35) lfx_compare_toggle(); }
+            return 1;
+        }
         if (k == SDLK_F7) { if (press) vk_overlay_cheats_hotkey(); return 1; }   /* [spot] the Cheats page's quick key */
         if (k == SDLK_F11 || (k == SDLK_RETURN && (e->key.keysym.mod & KMOD_ALT))) {
             if (press) toggle_fullscreen();
@@ -787,8 +812,7 @@ extern "C" int vk_overlay_event(const void* ev)
         }
         if (!s_open) return 0;
         if (k == SDLK_ESCAPE) {
-            if (press) { if (vk_overlay_saves_active()) vk_overlay_saves_back(); else if (s_quit_ask) s_quit_cancel = true;
-                         else if (!remap_escape()) set_open(0); }   /* [remap] Esc on Swap / Reset = Cancel */
+            if (press) { if (vk_overlay_saves_active()) vk_overlay_saves_back(); else menu_escape(); }   /* [menu-e] a question's Cancel, Back, or close */
             return 1;
         }
         ev_push(e);
@@ -993,6 +1017,7 @@ static void stats_tick(double now)
 
 /* ---- ImGui ---------------------------------------------------------------------- */
 static ImGuiStyle s_base_style;
+static ImFont* s_font_semi_load;   /* [menu-e] imgui_setup's semibold face (vk_overlay_menu.inc s_font_semi) */
 static float s_scale_applied = -1.0f;
 
 static void check_vk(VkResult r)
@@ -1149,6 +1174,16 @@ static bool imgui_setup(void)
       for (const char* f : bolds) if (file_exists(f) && (bold = io.Fonts->AddFontFromFileTTF(f, 17.0f)) != NULL) break;
 #endif
       vk_ov_theme_set_bold(bold); }
+    /* [menu-e] the semibold face for the menu's values and chips (Segoe UI Semibold; else the bold one) */
+    { ImFont* semi = NULL;
+#ifdef _WIN32
+      char win[MAX_PATH] = "C:\\Windows";
+      GetWindowsDirectoryA(win, sizeof win);
+      char p[MAX_PATH + 32];
+      snprintf(p, sizeof p, "%s\\Fonts\\seguisb.ttf", win);
+      if (file_exists(p)) semi = io.Fonts->AddFontFromFileTTF(p, 17.0f);
+#endif
+      s_font_semi_load = semi; }
 
     ImGuiStyle& st = ImGui::GetStyle();
     vk_ov_theme_style(st);
@@ -1187,43 +1222,32 @@ static bool sdl_setup(void)
 
 /* ---- the menu's view of the settings, read when it opens -------------------- */
 static const int kCap[] = { 30, 60, 72, 120, 144, 0 };
-static const char* const kCapName[] = { "30 fps", "60 fps (recommended)", "72 fps (smooth on 144 Hz)",
-                                        "120 fps", "144 fps", "Unlimited" };
 static const char* const kPresent[] = { "fifo", "mailbox", "immediate" };
-static const char* const kPresentName[] = { "Vsync (FIFO)", "Low latency, no tearing (Mailbox)",
-                                            "Immediate (lowest latency, may tear)" };
-static const char* const kAA[] = { "off", "fxaa", "smaa" };
-static const char* const kAAName[] = { "Off", "FXAA (fast)", "SMAA (sharper)" };
 /* [res] PS3RECOMP_RENDER_SCALE (rsx_vulkan_backend.c's [res] block) */
 static const char* const kScale[] = { "1", "1.5", "2", "3" };
-static const char* const kScaleName[] = { "720p  (1280x720, the PS3's)", "1080p  (1920x1080)",
-                                          "1440p  (2560x1440)", "4K  (3840x2160)" };
 static const char* const kAniso[] = { "1", "2", "4", "8", "16" };
-static const char* const kAnisoName[] = { "Off (1x)", "2x", "4x", "8x", "16x" };
 /* [wide] PS3RECOMP_ASPECT (vk_postfx.c ps3_aspect_wanted, docs/WIDESCREEN.md) */
 static const char* const kAspect[] = { "16:9", "auto", "21:9", "32:9", "16:10" };
-static const char* const kAspectName[] = { "16:9  (the game's)", "Auto  (the screen's or window's shape)",
-                                           "21:9  ultrawide", "32:9  super ultrawide", "16:10" };
 static const char* const kUp[] = { "fsr", "cas", "bilinear" };   /* VK_POSTFX_UP_* order */
 /* (dofov) PS3RECOMP_DOF (rsx_draw_engine.c): the game's depth of field */
 static const char* const kDof[] = { "1", "play", "0" };
-static const char* const kDofName[] = { "On  (the PS3 look)", "Off in gameplay  (cutscenes keep it)", "Off everywhere" };
 /* (dofov) PS3_FOV: the field of view, percent of the game's own (the title's cheats.cpp; 100 = the game's) */
 enum { kFovMin = 70, kFovMax = 130 };
 static const double kFovGameV = 0.9;   /* the free camera's vertical field of view in play, rad (NOTES.md) */
-static const char* const kUpName[] = { "AMD FSR 1 (sharpest)", "AMD CAS scaling", "Bilinear (soft)" };
+/* (The rows' short names, as the menu shows them, are in vk_overlay_menu.inc [menu-e].) */
 
 struct Ui {
     int cap, cap_custom;      /* index in kCap; -1 = cap_custom fps */
     int present;
     bool fullscreen;
+    bool capture;               // PS3RECOMP_VK_CAPTURE_FRIENDLY (GitHub #51)
     int aa, scale, aniso, upscale; float sharpen;
     int dof;                  /* (dofov) the game's depth of field: index in kDof (rsx_draw_engine.c ENG_DOF_BLEND_FP) */
     bool edge_blur;           /* the game's own edge blur (the same pass) */
     int fov;                  /* (dofov) PS3_FOV: percent of the game's field of view (kFovMin..kFovMax) */
     int shadow_lod;           /* (deck) 0 = the game's far shadow detail, 1 = reduced (PS3RECOMP_SHADOW_LOD=20) */
-    int mesh_trim;            /* [trim]/[edgevp] 0 = the game's culling at the render resolution (default),
-                               * 1 = off (whole meshes), 2 = the PS3's 720p culling */
+    int mesh_trim;            /* [trim]/[edgevp] 0 = the game's culling at the render resolution,
+                               * 1 = off (whole meshes; the default: tools/spu_patches.txt), 2 = the PS3's 720p culling */
     int aspect;               /* [wide] index in kAspect; -1 = another value (env / file) */
     int volume;
     int input_mode, button_icons;
@@ -1238,7 +1262,7 @@ static int pick(const char* v, const char* const* list, int n, int def)
     return def;
 }
 
-static void lang_ui_load(void);   /* the Language section's lists (below, by tab_audio) */
+static void lang_ui_load(void);   /* the Language rows' lists (below; Audio page, vk_overlay_menu.inc) */
 static void ui_load(void)
 {
     lang_ui_load();
@@ -1248,7 +1272,8 @@ static void ui_load(void)
       for (int i = 0; i < 6; i++) if (kCap[i] == f) s_ui.cap = i; }
     s_ui.present = pick(getenv(kVar[V_PRESENT]), kPresent, 3, 1);
     { SDL_Window* w = (SDL_Window*)s_vk.sdl_window;
-      s_ui.fullscreen = w && (SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN) != 0; }
+      s_ui.fullscreen = w && vk_backend_window_full() != 0;
+      s_ui.capture = env_on(kVar[V_CAPTURE]); }
     /* image quality: the values in effect (vk_postfx.c owns the defaults) */
     { const int a = vk_postfx_aa();
       s_ui.aa = a == VK_POSTFX_AA_SMAA ? 2 : a == VK_POSTFX_AA_FXAA ? 1 : 0; }
@@ -1339,179 +1364,7 @@ static void live_mark(int v)
 
 static float combo_w(void) { return S(330.0f); }
 
-static void tab_display(void)
-{
-    section("Frame rate");
-    { char preview[64];
-      if (s_ui.cap >= 0) snprintf(preview, sizeof preview, "%s", kCapName[s_ui.cap]);
-      else snprintf(preview, sizeof preview, "%d fps (custom)", s_ui.cap_custom);
-      ImGui::SetNextItemWidth(combo_w());
-      if (ImGui::BeginCombo("Frame rate cap", preview)) {
-          for (int i = 0; i < 6; i++)
-              if (ImGui::Selectable(kCapName[i], s_ui.cap == i)) {
-                  s_ui.cap = i;
-                  char b[16]; snprintf(b, sizeof b, "%d", kCap[i]);
-                  apply_setting(V_FPS_CAP, b);
-              }
-          ImGui::EndCombo();
-      } }
-    live_mark(V_FPS_CAP);
-    hint("Frames are shown on an even beat. inFAMOUS 2 was made for 30/60: 60 is the target, higher caps "
-         "are for a high-refresh screen where the scene allows it.");
-    if (s_refresh_hz > 0) { char b[64]; snprintf(b, sizeof b, "This display: %d Hz.", s_refresh_hz); hint(b); }
-
-    section("Presentation");
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::Combo("Present mode", &s_ui.present, kPresentName, 3))
-        apply_setting(V_PRESENT, kPresent[s_ui.present]);
-    live_mark(V_PRESENT);
-    hint("Mailbox shows the newest finished frame at each refresh: no tearing and no queue (least input lag "
-         "without tearing). Vsync queues frames behind the display. Immediate may tear. A mode the driver "
-         "lacks falls back to vsync.");
-    if (ImGui::Checkbox("Fullscreen (borderless)", &s_ui.fullscreen))
-        apply_setting(V_FULLSCREEN, s_ui.fullscreen ? "1" : "0");
-    live_mark(V_FULLSCREEN);
-    hint("Also Alt+Enter or F11.");
-    /* [wide] PS3RECOMP_ASPECT: read at start (the game's cameras and every target) */
-    { char preview[64];
-      if (s_ui.aspect >= 0) snprintf(preview, sizeof preview, "%s", kAspectName[s_ui.aspect]);
-      else { const char* e = getenv(kVar[V_ASPECT]); snprintf(preview, sizeof preview, "%s (custom)", e ? e : ""); }
-      ImGui::SetNextItemWidth(combo_w());
-      if (ImGui::BeginCombo("Aspect ratio", preview)) {
-          for (int i = 0; i < 5; i++)
-              if (ImGui::Selectable(kAspectName[i], s_ui.aspect == i)) { s_ui.aspect = i; apply_setting(V_ASPECT, kAspect[i]); }
-          ImGui::EndCombo();
-      } }
-    live_mark(V_ASPECT);
-    { const float k = vk_postfx_aspect_k();
-      char b[400];
-      snprintf(b, sizeof b, "Wider screens see more at the sides (hor+: the same vertical view as 16:9); the HUD, menus and "
-               "movies stay 16:9 in the middle. Auto takes the fullscreen screen's shape (or PS3RECOMP_VK_WINDOW_SIZE's). "
-               "16:10 shows a little less at the sides than 16:9. Now: %s.",
-               k > 1.001f || k < 0.999f ? "wide" : "16:9");
-      hint(b); }
-
-    /* (dofov) PS3_FOV: the title changes its gameplay cameras' field of view (cheats.cpp "Field of view") */
-    section("Camera");
-    { const bool have = ps3_setting_applier(kVar[V_FOV]) != NULL;
-      if (!have) ImGui::BeginDisabled();
-      ImGui::SetNextItemWidth(combo_w());
-      if (ImGui::SliderInt("Field of view", &s_ui.fov, kFovMin, kFovMax, s_ui.fov == 100 ? "100%% (the game's)" : "%d%%",
-                           ImGuiSliderFlags_AlwaysClamp)) {
-          char v[16]; snprintf(v, sizeof v, "%d", s_ui.fov);
-          apply_setting(V_FOV, v);   /* 100 = the game's own (the title then runs the game's code exactly) */
-      }
-      if (!have) ImGui::EndDisabled();
-      if (have) live_mark(V_FOV);
-      /* the free camera's view at this setting and the picture's shape (hor+: the width follows the shape) */
-      const double v = kFovGameV * s_ui.fov / 100.0;
-      const double h = 2.0 * atan(tan(v * 0.5) * (16.0 / 9.0) * (double)vk_postfx_aspect_k());
-      char b[720];
-      snprintf(b, sizeof b, "How much of the world the gameplay camera shows: lower zooms in, higher shows more around "
-               "Cole. The free camera's usual view (the game's %.0f\xC2\xB0 x %.0f\xC2\xB0 at 16:9; some places frame it "
-               "tighter) is now %.0f\xC2\xB0 across and %.0f\xC2\xB0 up and down. Aiming zooms in by the game's own amount at "
-               "every setting, the mouse turns the same angle, and the game's level of detail and culling follow the "
-               "wider or narrower view. Cutscenes keep their own framing.%s",
-               2.0 * atan(tan(kFovGameV * 0.5) * 16.0 / 9.0) * 57.29578, kFovGameV * 57.29578, h * 57.29578, v * 57.29578,
-               have ? "" : " Not in this build: its lift has no camera hooks (cheats/hooks.txt).");
-      hint(b); }
-
-    section("Menu");   /* [theme] */
-    { static const char* const looks[] = { "Hero (blue)", "Infamous (red)" };
-      int look = vk_ov_theme_red();
-      ImGui::SetNextItemWidth(combo_w());
-      if (ImGui::Combo("Menu theme", &look, looks, 2)) apply_setting(V_THEME, look ? "infamous" : "hero"); }
-    live_mark(V_THEME);
-    hint("The colours of this menu, the save list and the system's questions: Cole's blue lightning, or the red of an infamous Cole.");
-
-    section("Now");
-    { SDL_Window* w = (SDL_Window*)s_vk.sdl_window;
-      int ww = 0, wh = 0; if (w) SDL_GetWindowSize(w, &ww, &wh);
-      const float rs = vk_postfx_render_scale();   /* [res] the internal resolution in effect */
-      const float ka = vk_postfx_aspect_k();       /* [wide] the frame's width vs 16:9 */
-      ImGui::Text("Window %d x %d, game image %u x %u", ww, wh,
-                  (unsigned)((float)s_vk.render_width * rs * ka + 0.5f), (unsigned)((float)s_vk.render_height * rs + 0.5f)); }
-}
-
-static void lowend_section(void);   /* (lowend) vk_overlay_lowend.inc */
-static void tab_graphics(void)
-{
-    lowend_section();
-    section("Image quality");
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::Combo("Anti-aliasing", &s_ui.aa, kAAName, 3)) apply_setting(V_AA, kAA[s_ui.aa]);
-    live_mark(V_AA);
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::SliderFloat("Sharpening", &s_ui.sharpen, 0.0f, 1.0f, s_ui.sharpen > 0.0f ? "%.2f" : "off")) {
-        char b[16]; snprintf(b, sizeof b, "%.2f", s_ui.sharpen);
-        apply_setting(V_SHARPEN, b);
-    }
-    live_mark(V_SHARPEN);
-    ImGui::SetNextItemWidth(combo_w());
-    /* [res] internal resolution: the targets are made at start, so "restart" */
-    if (ImGui::Combo("Internal resolution", &s_ui.scale, kScaleName, 4)) apply_setting(V_RENDER_SCALE, kScale[s_ui.scale]);
-    live_mark(V_RENDER_SCALE);
-    { const float rs = vk_postfx_render_scale();
-      char b[320];
-      snprintf(b, sizeof b, "The game draws its 3D scene, effects and HUD at this size (now %ux%u); the window then "
-               "gets it scaled with FSR or shrunk. Each step costs GPU time: 1080p draws 2.25x the pixels of 720p.",
-               (unsigned)(1280.0f * rs * vk_postfx_aspect_k() + 0.5f), (unsigned)(720.0f * rs + 0.5f));   /* [wide] */
-      hint(b); }
-    /* [trim] Edge's SPU triangle culling (tools/spu_patches.txt switch mesh_trim, PS3RECOMP_MESH_TRIM) */
-    { static const char* const kTrimName[] = { "At the render resolution (default)", "Off: whole meshes", "The PS3's 720p culling" };
-      const int slot = spu_patch_find("mesh_trim");
-      if (slot < 0) ImGui::BeginDisabled();
-      ImGui::SetNextItemWidth(combo_w());
-      if (ImGui::Combo("Triangle culling (mesh trimming)", &s_ui.mesh_trim, kTrimName, 3)) {
-          apply_setting(V_MESH_TRIM, s_ui.mesh_trim == 1 ? "0" : "1");
-          apply_setting(V_EDGE_VP, s_ui.mesh_trim == 2 ? "0" : "1");
-      }
-      if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
-          ImGui::SetTooltip("The game's SPU geometry code (Edge) drops back-facing and off-screen triangles, and ones\n"
-                            "that cover no pixel of the PS3's 720p picture. Above 720p that last test cuts thin and\n"
-                            "small parts away: holes in faces.\n"
-                            "At the render resolution: Edge gets the picture's real size, so it keeps every triangle\n"
-                            "that covers a pixel (the idea from ThiagoFraga761/infamous2-pc).\n"
-                            "Off: \"Disable Mesh Trimming\" by Yahfz (RPCS3 patch database), every triangle drawn.");
-      if (slot < 0) ImGui::EndDisabled();
-      live_mark(V_MESH_TRIM);
-      hint(slot < 0 ? "Not in this build: its SPU lift had no tools/spu_patches.txt."
-                    : "At the render resolution: no holes, and the culling saves GPU and graphics-thread time "
-                      "(the default). Off draws whole meshes. The PS3's 720p culling leaves holes above 720p."); }
-    /* (deck) the far shadow cascade's small-object cut (job 210's view block, K.y) */
-    { static const char* const kShadowLodName[] = { "Full (the game's)", "Reduced (faster)" };
-      ImGui::SetNextItemWidth(combo_w());
-      if (ImGui::Combo("Far shadow detail", &s_ui.shadow_lod, kShadowLodName, 2))
-          apply_setting(V_SHADOW_LOD, s_ui.shadow_lod ? "20" : "1");
-      live_mark(V_SHADOW_LOD);
-      hint("Reduced: small objects far away cast no shadow into the distant shadow map (the game already "
-           "leaves out the smallest ones there; this raises that size). About 2,400 fewer shadow draws a "
-           "frame in a busy street: the graphics thread ~12% lighter. Nearby shadows are unchanged."); }
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::Combo("Anisotropic filtering", &s_ui.aniso, kAnisoName, 5)) apply_setting(V_ANISO, kAniso[s_ui.aniso]);
-    live_mark(V_ANISO);
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::Combo("Upscaling (window larger than the game image)", &s_ui.upscale, kUpName, 3)) apply_setting(V_UPSCALE, kUp[s_ui.upscale]);
-    live_mark(V_UPSCALE);
-    hint("\"live\" settings change at once; \"on restart\" ones are saved now and used the next time the "
-         "game starts. A higher internal resolution costs GPU time (see the HUD).");
-
-    section("Game effects");
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::Combo("Depth of field", &s_ui.dof, kDofName, 3)) apply_setting(V_DOF, kDof[s_ui.dof]);
-    live_mark(V_DOF);
-    hint("The game blurs the scene by distance: in play a steady blur of everything far away (the softness "
-         "you see on distant things when the camera turns: inFAMOUS 2 has no camera motion blur), in "
-         "cutscenes a focus chosen for each shot. \"Off in gameplay\" keeps the cutscenes' focus; \"Off "
-         "everywhere\" shows everything sharp. No frame-rate cost.");
-    if (s_ui.dof == 1 && !ps3_title_view_provided())
-        hint("No game camera yet (title screen): \"Off in gameplay\" keeps depth of field off everywhere until you play.");
-    if (ImGui::Checkbox("Edge blur", &s_ui.edge_blur)) apply_setting(V_EDGE_BLUR, s_ui.edge_blur ? "1" : "0");
-    live_mark(V_EDGE_BLUR);
-    hint("The game can soften the borders of the picture where its lighting settings ask for it. Off "
-         "keeps the borders sharp. No frame-rate cost.");
-}
-
+#include "vk_overlay_aa.inc"         /* [aa] aa_choice_*, thin_lines_* */
 /* ---- Language (on the Audio page) -------------------------------------------
  * PS3_LANG is the console language the game is told (libs/system/cellSysutil.c;
  * unset or "auto" = the Windows display language, English when the game has
@@ -1675,129 +1528,6 @@ static const char* lang_dub_fallback(const char* name)
     return lang_has(s_lang.voice, s_lang.nvoice, "english") ? "english" : s_lang.voice[0];
 }
 
-/* "Same as the game" or one of this disc's languages (PS3_VOICE_LANG / PS3_TEXT_LANG). */
-static void lang_pick(int v, const char* label, char (*list)[24], int n)
-{
-    char cur[48];
-    lang_choice(v, cur, sizeof cur);
-    const bool same = lang_unset(v, cur);
-    char preview[128];
-    if (same) snprintf(preview, sizeof preview, "Same as the game");
-    else snprintf(preview, sizeof preview, "%s%s", lang_label(cur), n && !lang_has(list, n, cur) ? " (not on this disc)" : "");
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::BeginCombo(label, preview)) {
-        if (ImGui::Selectable("Same as the game", same)) lang_set(v, "same");
-        for (const auto& k : kLang)   /* the table's order, then any name it does not know */
-            if (lang_has(list, n, k.name) && ImGui::Selectable(k.label, !same && !SDL_strcasecmp(cur, k.name)))
-                lang_set(v, k.name);
-        for (int i = 0; i < n; i++) {
-            bool known = false;
-            for (const auto& k : kLang) known = known || !SDL_strcasecmp(k.name, list[i]);
-            if (!known && ImGui::Selectable(list[i], !same && !SDL_strcasecmp(cur, list[i]))) lang_set(v, list[i]);
-        }
-        ImGui::EndCombo();
-    }
-    restart_mark(v, lang_changed(v));
-    env_mark(v, false);
-}
-
-static void language_section(void)
-{
-    section("Language");
-    char b[320];
-    {   /* PS3_LANG */
-        char cur[48];
-        lang_choice(V_LANG, cur, sizeof cur);
-        const bool autom = lang_unset(V_LANG, cur);
-        char autolabel[128];
-        snprintf(autolabel, sizeof autolabel, "Automatic (%s: %s)", kHostOs, s_lang.win);
-        ImGui::SetNextItemWidth(combo_w());
-        if (ImGui::BeginCombo("Game language", autom ? autolabel : lang_code_label(cur))) {
-            if (ImGui::Selectable(autolabel, autom)) lang_set(V_LANG, "auto");
-            for (const auto& k : kLang) {
-                if (s_lang.ntext && !lang_has(s_lang.text, s_lang.ntext, k.name)) continue;   /* not on this disc */
-                if (ImGui::Selectable(k.label, !autom && !SDL_strcasecmp(cur, k.code))) lang_set(V_LANG, k.code);
-            }
-            ImGui::EndCombo();
-        }
-        restart_mark(V_LANG, lang_changed(V_LANG));
-        env_mark(V_LANG, false);
-        if (autom && s_lang.host[0]) {
-            const char* hn = lang_code_name(s_lang.host);
-            const bool missing = hn && s_lang.ntext && !lang_has(s_lang.text, s_lang.ntext, hn);
-            snprintf(b, sizeof b, "The console language the game is told: its menus, subtitles and dub follow it. "
-                     "Automatic follows the %s display language: %s%s.", kHostOs, lang_code_label(s_lang.host),
-                     missing ? " (this disc has no text in it)" : "");
-        } else if (autom)
-            snprintf(b, sizeof b, "The console language the game is told: its menus, subtitles and dub follow it. "
-                     "Automatic follows the %s display language; the game has no %s, so it is told English (US).",
-                     kHostOs, s_lang.win);
-        else
-            snprintf(b, sizeof b, "The console language the game is told: its menus, subtitles and dub follow it, "
-                     "unless Voice or Text below says otherwise.");
-        {   /* Voice on "Same as the game" and no dub of that language here: the dialogue's fallback */
-            char vcur[48];
-            lang_choice(V_VOICE_LANG, vcur, sizeof vcur);
-            const char* gname = autom ? (s_lang.host[0] ? lang_code_name(s_lang.host) : "english") : lang_code_name(cur);
-            const char* fb = lang_unset(V_VOICE_LANG, vcur) ? lang_dub_fallback(gname) : NULL;
-            if (fb) {
-                const size_t l = strlen(b);
-                snprintf(b + l, sizeof b - l, " This disc has no %s dub: the voices stay %s.", lang_brief(gname), lang_brief(fb));
-            }
-        }
-        hint(b);
-    }
-    lang_pick(V_VOICE_LANG, "Voice", s_lang.voice, s_lang.nvoice);
-    if (s_lang.nvoice == 1)
-        snprintf(b, sizeof b, "The dub: dialogue and the movies' voice track. This disc has one dub: %s.", lang_label(s_lang.voice[0]));
-    else
-        snprintf(b, sizeof b, "The dub: dialogue and the movies' voice track. Only the dubs on this disc are listed.");
-    hint(b);
-    lang_pick(V_TEXT_LANG, "Text", s_lang.text, s_lang.ntext);
-    hint("Menus, HUD and subtitles: they change together (the font with the letters comes with the menus).");
-    if (!s_lang.ntext) hint("No language files found on this disc (PS3_GAME\\USRDIR\\cache\\psarc).");
-
-    if (lang_changed(V_LANG) || lang_changed(V_VOICE_LANG) || lang_changed(V_TEXT_LANG)) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kOrange);
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted("Applies the next time the game starts: the game loads its language once, when it starts.");
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
-    }
-    {   /* what this session runs with */
-        const int told = ps3_sysutil_language_in_use();
-        char va[24], vg[24], ta[24], tg[24];
-        ps3_lang_in_use(0, va, vg, sizeof va);
-        ps3_lang_in_use(1, ta, tg, sizeof ta);
-        char miss[24];
-        ps3_lang_missing(0, miss, sizeof miss);
-        char vs[96] = "", ts[96] = "";   /* a dub the disc lacks, or a file the game asked for that was swapped */
-        if (miss[0]) snprintf(vs, sizeof vs, " (no %s dub on this disc)", lang_brief(miss));
-        else if (vg[0] && strcmp(va, vg)) snprintf(vs, sizeof vs, " instead of %s", lang_brief(va));
-        if (tg[0] && strcmp(ta, tg)) snprintf(ts, sizeof ts, " instead of %s", lang_brief(ta));
-        const char* tn = lang_id_name(told);
-        snprintf(b, sizeof b, "Now: the game was told %s; voice: %s%s; text: %s%s.",
-                 told == 3 ? "Spanish" : told == 7 ? "Portuguese" : tn ? lang_brief(tn) : "-",
-                 vg[0] ? lang_brief(vg) : "-", vs, tg[0] ? lang_brief(tg) : "-", ts);
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(b);
-        ImGui::PopTextWrapPos();
-    }
-}
-
-static void tab_audio(void)
-{
-    section("Sound");
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::SliderInt("Master volume", &s_ui.volume, 0, 100, "%d%%")) {
-        cellAudio_host_set_volume(s_ui.volume);
-        set_value(V_VOLUME, "%d", s_ui.volume);
-    }
-    env_mark(V_VOLUME);
-    hint("What the PC plays; the game's own mix and its volume options are untouched.");
-    language_section();
-}
-
 static char   s_pads[4][128];
 static int    s_n_pads;
 static double s_pads_t;
@@ -1815,65 +1545,8 @@ static void pads_refresh(double now)
     }
 }
 
-#include "vk_overlay_remap.inc"   /* [remap] remap_section: the bindings, rebinding live (issue #6) */
-#include "vk_overlay_mouse.inc"   /* [mouse] mouse_camera_block */
-
-static void tab_controls(double now)
-{
-    section("Controllers");
-    pads_refresh(now);
-    if (!s_n_pads) {
-        const char* e = getenv("PS3_PAD_SDL");
-        hint(e && e[0] == '0' ? "Controller input is off for this run (PS3_PAD_SDL=0)."
-                              : "No controller connected. Switch one on: it is picked up while the game runs.");
-    }
-    for (int i = 0; i < s_n_pads; i++) ImGui::BulletText("%s%s", s_pads[i], i == 0 ? "  (port 1)" : "");
-    { const int eff = ps3_button_icons_effective();
-      ImGui::Text("Button prompts show: %s", eff == 2 ? "Xbox" : eff == 3 ? "keyboard and mouse" : "PlayStation"); }
-
-    section("Play with");
-    { static const char* const modes[] = { "Controller, keyboard and mouse", "Controller only", "Keyboard and mouse only" };
-      static const char* const names[] = { "both", "controller", "keyboard" };
-      ImGui::SetNextItemWidth(combo_w());
-      if (ImGui::Combo("Input", &s_ui.input_mode, modes, 3)) {
-          cellPad_host_set_input_mode(s_ui.input_mode);
-          set_value(V_INPUT_MODE, "%s", names[s_ui.input_mode]);
-      } }
-    env_mark(V_INPUT_MODE);
-    { static const char* const icons[] = { "Automatic (the device in use)", "PlayStation", "Xbox", "Keyboard and mouse" };
-      static const char* const names[] = { "auto", "playstation", "xbox", "keyboard" };
-      ImGui::SetNextItemWidth(combo_w());
-      if (ImGui::Combo("Button icons", &s_ui.button_icons, icons, 4)) {
-          ps3_button_icons_set_mode(s_ui.button_icons);
-          set_value(V_BUTTON_ICONS, "%s", names[s_ui.button_icons]);
-      } }
-    env_mark(V_BUTTON_ICONS);
-    if (ImGui::Checkbox("Vibration", &s_ui.rumble)) {
-        cellPad_host_set_rumble_strength(s_ui.rumble ? s_ui.rumble_strength : 0);
-        set_value(V_RUMBLE, "%d", s_ui.rumble ? 1 : 0);
-        if (s_ui.rumble) set_value(V_RUMBLE_STRENGTH, "%d", s_ui.rumble_strength);
-    }
-    env_mark(V_RUMBLE);
-    ImGui::BeginDisabled(!s_ui.rumble);
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::SliderInt("Vibration strength", &s_ui.rumble_strength, 10, 200, "%d%%")) {
-        cellPad_host_set_rumble_strength(s_ui.rumble_strength);
-        set_value(V_RUMBLE_STRENGTH, "%d", s_ui.rumble_strength);
-    }
-    ImGui::EndDisabled();
-    env_mark(V_RUMBLE_STRENGTH);
-
-    /* ---- [mouse] begin: the mouse camera (vk_overlay_mouse.inc) ---- */
-    mouse_camera_block();
-    /* ---- [mouse] end ---- */
-
-    remap_section(now);   /* [remap] "Buttons and keys": every binding, changeable (vk_overlay_remap.inc) */
-
-    section("This menu");
-    hint("F2 opens and closes it; on a controller hold L3+R3 together for a second. Esc or Circle closes it, "
-         "L1/R1 switch pages. While it is open the game gets no input (it keeps running: pause first with START). "
-         "F1 shows or hides the performance HUD, Alt+Enter or F11 switches fullscreen.");
-}
+#include "vk_overlay_remap.inc"   /* [remap] the bindings' rules and dialogs, rebinding live (issue #6); the grid: vk_overlay_menu.inc */
+#include "vk_overlay_mouse.inc"   /* [mouse] cellPad's mouse camera setters (the rows: vk_overlay_menu.inc) */
 
 static void stats_lines(bool compact)
 {
@@ -1918,29 +1591,6 @@ static void stats_lines(bool compact)
     }
 }
 
-static void tab_hud(void)
-{
-    section("Performance HUD");
-    { bool h = s_hud != 0;
-      if (ImGui::Checkbox("Show it while playing (F1)", &h)) set_hud(h); }
-    env_mark(V_HUD);
-    static const char* const corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::Combo("Corner", &s_hud_corner, corners, 4)) set_value(V_HUD_CORNER, "%d", s_hud_corner);
-    ImGui::SetNextItemWidth(combo_w());
-    if (ImGui::SliderFloat("Background opacity", &s_hud_opacity, 0.0f, 1.0f, "%.2f")) set_value(V_HUD_OPACITY, "%.2f", s_hud_opacity);
-    if (ImGui::Checkbox("Frame time graph", &s_hud_graph)) set_value(V_HUD_GRAPH, "%d", s_hud_graph ? 1 : 0);
-    ImGui::SameLine(0, S(30));
-    if (ImGui::Checkbox("CPU use", &s_hud_cpu)) { set_value(V_HUD_CPU, "%d", s_hud_cpu ? 1 : 0); }
-    section("Now");
-    stats_lines(false);
-    if (s_gpu_name[0]) ImGui::Text("GPU: %s (Vulkan)", s_gpu_name);
-    hint("FPS and frame time count presented frames; \"1% low\" is the frame rate of the slowest 1% of the last "
-         "few seconds. CPU: the whole process, as a share of all logical cores; RSX: the thread that turns the "
-         "game's draws into Vulkan and presents; top: the busiest other thread (the game's main thread or an SPU). "
-         "The faint line in the graph is the frame-rate cap's frame time.");
-}
-
 /* ---- Effects page (fx): effects resolution (texture packs: the Mods page) --
  * A page of its own. Its settings are not in the V_ table: fx_set applies
  * one live (ps3_setting_apply: rsx_draw_engine.c registers the appliers) and
@@ -1965,13 +1615,6 @@ static void fx_set(const char* name, const char* value)
     s_dirty_t = now_s();
 }
 
-static void fx_live(const char* name)
-{
-    ImGui::SameLine();
-    if (ps3_setting_applier(name)) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "live");
-    else ImGui::TextColored(kGrey, "on restart");
-}
-
 /* The pack folders inside the packs folder ("_dump" and other "_" names are not packs). */
 static int fx_pack_list(char names[][64], int max)
 {
@@ -1991,45 +1634,6 @@ static int fx_pack_list(char names[][64], int max)
     FindClose(h);
 #endif
     return n;
-}
-
-static void tab_effects(void)
-{
-    section("Fire, smoke and particles");
-    {   /* PS3RECOMP_FX_RES: 1 (the game's), 2, full (2.5 at 720p) */
-        static const char* const kVal[] = { "1", "2", "full" };
-        static const char* const kName[] = { "As the game (512 x 288)", "High (1024 x 576)", "Full (1280 x 720)" };
-        const char* e = getenv("PS3RECOMP_FX_RES");
-        int cur = 0;
-        if (e && (!strcmp(e, "full") || atof(e) >= 2.5)) cur = 2;
-        else if (e && atof(e) > 1.0) cur = 1;
-        ImGui::SetNextItemWidth(combo_w());
-        if (ImGui::Combo("Effects resolution", &cur, kName, 3)) fx_set("PS3RECOMP_FX_RES", kVal[cur]);
-        fx_live("PS3RECOMP_FX_RES");
-        hint("The game draws fire, smoke, sparks, debris and the Beast into a small picture (512 x 288) and "
-             "stretches it over the frame: that is the blocky edge round flames and smoke. High and Full draw "
-             "them at a higher resolution, same art, sharper. Costs some GPU time where there is a lot of smoke "
-             "(see the HUD).");
-    }
-    section("Glow and blur");
-    {   /* (fx12) PS3RECOMP_FX_GLOW: 1 (default), 2, 0 (the old way) -- GitHub issue #12 */
-        static const char* const kVal[] = { "1", "2", "0" };
-        static const char* const kName[] = { "The PS3's size, smooth (default)", "The PS3's size",
-                                             "The render resolution (old)" };
-        const char* e = getenv("PS3RECOMP_FX_GLOW");
-        int cur = 0;
-        if (e && e[0] == '2' && !e[1]) cur = 1;
-        else if (e && e[0] == '0' && !e[1]) cur = 2;
-        ImGui::SetNextItemWidth(combo_w());
-        if (ImGui::Combo("Glow and blur", &cur, kName, 3)) fx_set("PS3RECOMP_FX_GLOW", kVal[cur]);
-        fx_live("PS3RECOMP_FX_GLOW");
-        hint("The glow round lightning, lamps and fire, and the soft background blur, are made in small pictures "
-             "(320 x 180 and smaller) with filters built for those sizes. Drawn at the render resolution (the old "
-             "way) the filters leave gaps above 720p: blocky, doubled glow round lightning and lamps. The PS3's "
-             "size keeps the game's own look at every resolution; Smooth also averages the full picture down "
-             "before the game takes its glow from it, so thin lightning glows steadily.");
-    }
-
 }
 
 /* ---- Mods page [mods]: game mods and texture packs ------------------------
@@ -2156,96 +1760,9 @@ static ImTextureData* pic_for(int i, const ps3_game_mod& m)
     return NULL;
 }
 
-static ImVec2 fit(const ImTextureData* t, float w, float h)
-{
-    const float s1 = w / (float)t->Width, s2 = h / (float)t->Height;
-    const float s = s1 < s2 ? s1 : s2;
-    return ImVec2((float)t->Width * s, (float)t->Height * s);
-}
-
-static char s_mods_sel[128];   /* the mod whose picture is shown large ("" = none) */
-
-static void mods_status_line(const ps3_game_mod& m)
-{
-    /* green: used now and next time; orange: wanted but not used (or not usable); grey: off */
-    const bool good = m.active && m.on && m.next;
-    const bool bad = !m.for_game || !strncmp(m.status, "Not used", 8) || (m.on && !m.next);
-    const ImVec4 col = good ? ImVec4(0.45f, 0.85f, 0.45f, 1.0f) : bad ? kOrange : kGrey;
-    ImGui::PushStyleColor(ImGuiCol_Text, col);
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextUnformatted(m.status);
-    ImGui::PopTextWrapPos();
-    ImGui::PopStyleColor();
-}
-
-static void mods_options(int i, int n)
-{
-    ps3_game_mod_option o[64];
-    if (n > 64) n = 64;
-    int got = 0;
-    for (int k = 0; k < n; k++) if (ps3_game_mods_option(i, k, &o[got])) got++;
-    ImGui::Indent(S(28.0f));
-    /* options of their own (no group) first: check boxes, by name as the Manager lists them */
-    for (int k = 0; k < got; k++) {
-        if (o[k].dropdown || o[k].group_id[0]) continue;
-        ImGui::PushID(k);
-        bool on = o[k].picked != 0;
-        if (ImGui::Checkbox(o[k].name, &on)) ps3_game_mods_pick(i, k, on ? 1 : 0);
-        ImGui::PopID();
-    }
-    /* then each group once: its name as a heading, its options below it. One at a time
-     * (a dropdown group, or a toggle group whose options all change the same file): radio
-     * buttons, a drop-down list past 12 options; any number: check boxes. */
-    for (int k = 0; k < got; k++) {
-        if (!o[k].dropdown && !o[k].group_id[0]) continue;
-        bool first = true;
-        for (int j = 0; j < k; j++) if ((o[j].dropdown || o[j].group_id[0]) && !strcmp(o[j].group_id, o[k].group_id)) first = false;
-        if (!first) continue;
-        const bool one = o[k].dropdown != 0;
-        int count = 0, cur = -1;
-        for (int j = k; j < got; j++)
-            if (!strcmp(o[j].group_id, o[k].group_id)) { count++; if (o[j].picked && cur < 0) cur = j; }
-        if (cur < 0) cur = k;
-        ImGui::PushID(1000 + k);
-        ImGui::Spacing();
-        ImGui::TextUnformatted(o[k].group[0] ? o[k].group : "Options");
-        if (one) {
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, kGrey);
-            ImGui::TextUnformatted(o[k].single ? "(one at a time: they all change the same texture)" : "(pick one)");
-            ImGui::PopStyleColor();
-        }
-        ImGui::Indent(S(20.0f));
-        if (one && count > 12) {
-            ImGui::SetNextItemWidth(combo_w());
-            if (ImGui::BeginCombo("##pick", o[cur].name)) {
-                for (int j = k; j < got; j++) {
-                    if (strcmp(o[j].group_id, o[k].group_id)) continue;
-                    if (ImGui::Selectable(o[j].name, j == cur)) ps3_game_mods_pick(i, j, 1);
-                }
-                ImGui::EndCombo();
-            }
-        } else {
-            for (int j = k; j < got; j++) {
-                if (strcmp(o[j].group_id, o[k].group_id)) continue;
-                ImGui::PushID(j);
-                if (one) {
-                    if (ImGui::RadioButton(o[j].name, j == cur) && j != cur) ps3_game_mods_pick(i, j, 1);
-                } else {
-                    bool on = o[j].picked != 0;
-                    if (ImGui::Checkbox(o[j].name, &on)) ps3_game_mods_pick(i, j, on ? 1 : 0);
-                }
-                ImGui::PopID();
-            }
-        }
-        ImGui::Unindent(S(20.0f));
-        ImGui::PopID();
-    }
-    ImGui::Unindent(S(28.0f));
-}
-
 /* ---- [modsui] "Restart to apply" ------------------------------------------- */
 static volatile int s_restart_ask;   /* 1 open the question, 2 showing */
+static volatile bool s_restart_cancel;   /* [menu-e] Esc / Circle on it */
 
 /* Saves, then ends this game and starts it again (cellSysutil.c ps3_host_restart:
  * the launcher or this exe again). The test hook (PS3_GAME_MODS_TEST "restart")
@@ -2268,7 +1785,7 @@ static void restart_confirm(void)
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (!ImGui::BeginPopupModal("Restart the game?###restartask", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
                                                                   ImGuiWindowFlags_NoSavedSettings)) {
-        s_restart_ask = 0; return;
+        s_restart_ask = 0; s_restart_cancel = false; return;
     }
     ImGui::TextUnformatted("The game closes and starts again with the mods as you set them.");
     ImGui::TextUnformatted("It comes back at the title screen: choose Continue there to go on from your last save.");
@@ -2278,248 +1795,13 @@ static void restart_confirm(void)
     ImGui::SameLine();
     const bool cancel = ImGui::Button("Cancel");
     ImGui::SetItemDefaultFocus();   /* Cancel: a stray Cross does not restart */
-    if (cancel) { s_restart_ask = 0; ImGui::CloseCurrentPopup(); }
+    if (cancel || s_restart_cancel) { s_restart_ask = 0; s_restart_cancel = false; ImGui::CloseCurrentPopup(); }
     else if (go) {
         s_restart_ask = 0;
         ImGui::CloseCurrentPopup();
         vk_overlay_restart_game("Mods: Restart to apply");
     }
     ImGui::EndPopup();
-}
-
-/* ---- [modsui] "Add a mod from a zip" ------------------------------------------ */
-static bool s_zip_open;
-
-static void zip_panel(void)
-{
-    ImGui::Indent(S(16.0f));
-    char what[200];
-    float prog = 0.0f;
-    const bool busy = ps3_game_mods_zip_busy(what, sizeof what, &prog) != 0;
-    hint("Zip files in your Downloads folder and in the mods folder, newest first. A zip is checked before "
-         "anything is written: only mod files are taken out of it, never a program, and nothing outside the "
-         "mods folder is ever touched.");
-    const int n = ps3_game_mods_zip_count();
-    for (int k = 0; k < n; k++) {
-        ps3_game_mod_zip z;
-        if (!ps3_game_mods_zip_get(k, &z)) continue;
-        ImGui::PushID(3000 + k);
-        ImGui::PushFont(vk_ov_theme_bold(), 0.0f);
-        ImGui::TextUnformatted(z.file);
-        ImGui::PopFont();
-        ImGui::SameLine();
-        char when[32] = "";
-        const time_t tt = (time_t)z.mtime;
-        if (const struct tm* lt = localtime(&tt)) strftime(when, sizeof when, "%Y-%m-%d %H:%M", lt);
-        ImGui::TextColored(kGrey, "%s, %s, %.1f MB", z.where, when, (double)z.size / (1024.0 * 1024.0));
-        ImGui::PushStyleColor(ImGuiCol_Text, z.ok ? kGrey : kOrange);
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(z.ok ? z.what : z.what[0] ? z.what : "cannot be installed");
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
-        if (z.ok) {
-            if (busy) ImGui::BeginDisabled();
-            if (!z.exists) { if (ImGui::Button("Install")) ps3_game_mods_zip_install(z.path, 0); }
-            else {
-                if (ImGui::Button("Replace")) ps3_game_mods_zip_install(z.path, 1);
-                ImGui::SameLine();
-                ImGui::TextColored(kGrey, "the mod there now stays until the new one is in place");
-            }
-            if (busy) ImGui::EndDisabled();
-        }
-        ImGui::PopID();
-        ImGui::Spacing();
-    }
-    if (busy) {
-        char b[260];
-        snprintf(b, sizeof b, "%s...", what);
-        ImGui::ProgressBar(prog > 0.0f ? prog : -1.0f * (float)ImGui::GetTime(), ImVec2(combo_w(), 0.0f), b);
-    } else if (!n) hint("No mod zip files there.");
-    const int other = ps3_game_mods_zip_not_mods();
-    if (other) { char b[160]; snprintf(b, sizeof b, "%d other zip file(s) there are not mods (no mod.json in them).", other); hint(b); }
-#ifdef _WIN32
-    if (busy) ImGui::BeginDisabled();
-    if (ImGui::Button("Choose another file...")) ps3_game_mods_zip_choose();
-    if (busy) ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button("Look again")) ps3_game_mods_zips_refresh();
-    hint("Choose another file opens the Windows file window over the game (Alt+Tab if it stays behind); "
-         "its folder is listed from then on.");
-#else
-    if (ImGui::Button("Look again")) ps3_game_mods_zips_refresh();
-#endif
-    static char res[2400];
-    static unsigned seen;
-    static int kind;
-    const unsigned seq = ps3_game_mods_zip_seq();
-    if (seq != seen) {
-        static char last[2400];
-        kind = ps3_game_mods_zip_result(res, sizeof res);
-        if (strcmp(res, last)) {   /* a new report: an install may have changed the list */
-            snprintf(last, sizeof last, "%s", res);
-            if (kind > 0) pics_release_all();
-        }
-        seen = seq;
-    }
-    if (kind) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kind > 0 ? ImVec4(0.45f, 0.85f, 0.45f, 1.0f) : kOrange);
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(res);
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
-    }
-    ImGui::Unindent(S(16.0f));
-}
-
-static void tab_mods(void)
-{
-    section("Game mods");
-    const char* dir = ps3_game_mods_dir();
-    if (!dir || !*dir) {
-        hint("No mods folder: start the game with \"Play inFAMOUS 2\" (it uses the \"mods\" folder beside it), "
-             "or set PS3_GAME_MODS_DIR.");
-    } else {
-        const char* e = getenv(kVar[V_GAME_MODS]);
-        bool use = !(e && e[0] == '0' && !e[1]);
-        if (ImGui::Checkbox("Use mods", &use)) apply_setting(V_GAME_MODS, use ? "1" : "0");
-        { const char* now = getenv(kVar[V_GAME_MODS]); restart_mark(V_GAME_MODS, strcmp(now ? now : "", s_start[V_GAME_MODS]) != 0); }
-        env_mark(V_GAME_MODS, false);
-        if (ps3_game_mods_restart_needed()) {   /* [modsui] */
-            if (ps3_host_can_restart()) {
-                ImGui::PushStyleColor(ImGuiCol_Text, kOrange);
-                const bool go = ImGui::Button("Restart to apply");
-                ImGui::PopStyleColor();
-                if (go) s_restart_ask = 1;
-                ImGui::SameLine();
-                ImGui::TextColored(kGrey, "the mods differ from what this session uses");
-            } else hint("The mods differ from what this session uses: they apply the next time the game starts.");
-        }
-#ifdef _WIN32
-        if (ImGui::Button("Open the mods folder")) ps3_game_mods_open_folder();
-        ImGui::SameLine();
-#endif
-        if (ImGui::Button("Look for new mods")) { ps3_game_mods_rescan(); pics_release_all(); }
-        ImGui::SameLine();
-        if (ImGui::Button(s_zip_open ? "Hide the zip files" : "Add a mod from a zip...")) {
-            s_zip_open = !s_zip_open;
-            if (s_zip_open) ps3_game_mods_zips_refresh();
-        }
-        { char b[720]; snprintf(b, sizeof b, "Mods folder: %s", dir); hint(b); }
-        if (s_zip_open) { ImGui::Separator(); zip_panel(); }
-        const int n = ps3_game_mods_count();
-        if (!n)
-            hint("No mods yet. Use \"Add a mod from a zip\", or unzip a mod into the mods folder (each mod is a folder "
-                 "with a mod.json in it), then \"Look for new mods\".");
-        bool any_pic = false;
-        for (int i = 0; i < n && !any_pic; i++) { ps3_game_mod m; if (ps3_game_mods_get(i, &m) && m.has_image) any_pic = true; }
-        const float tw = S(96.0f), th = S(64.0f);
-        for (int i = 0; i < n; i++) {
-            ps3_game_mod m;
-            if (!ps3_game_mods_get(i, &m)) continue;
-            ImGui::PushID(i);
-            ImGui::Separator();
-            ImTextureData* pic = NULL;
-            if (any_pic) {   /* [modsui] the picture column: click for it large, hover for a bigger look */
-                pic = pic_for(i, m);
-                if (pic) {
-                    const ImVec2 sz = fit(pic, tw, th);
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2((tw - sz.x) * 0.5f, (th - sz.y) * 0.5f));
-                    if (ImGui::ImageButton("##pic", pic->GetTexRef(), sz))
-                        snprintf(s_mods_sel, sizeof s_mods_sel, "%s", strcmp(s_mods_sel, m.folder) ? m.folder : "");
-                    ImGui::PopStyleVar();
-                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip) && strcmp(s_mods_sel, m.folder)) {
-                        ImGui::BeginTooltip();
-                        ImGui::Image(pic->GetTexRef(), fit(pic, S(360.0f), S(260.0f)));
-                        ImGui::EndTooltip();
-                    }
-                } else ImGui::Dummy(ImVec2(tw, th));
-                ImGui::SameLine();
-            }
-            ImGui::BeginGroup();
-            bool on = m.on != 0;
-            if (!m.for_game) ImGui::BeginDisabled();
-            if (ImGui::Checkbox("##on", &on)) ps3_game_mods_set_on(i, on ? 1 : 0);
-            if (!m.for_game) ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::PushFont(vk_ov_theme_bold(), 0.0f);
-            ImGui::TextUnformatted(m.name);
-            ImGui::PopFont();
-            ImGui::SameLine();
-            const bool ver = m.version[0] && strcmp(m.version, "unknown");
-            const bool who = m.author[0] && strcmp(m.author, "unknown");
-            ImGui::TextColored(kGrey, "%s%s%s%s", ver ? "v" : "", ver ? m.version : "", who ? (ver ? "  by " : "by ") : "", who ? m.author : "");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
-                if (m.priority) ImGui::SetTooltip("%s\n%d whole file(s), %d texture patch(es), %d xpps patch(es)\nPut first by you (priority %d)",
-                                                  m.folder, m.n_files, m.n_tex, m.n_xpps, m.priority);
-                else ImGui::SetTooltip("%s\n%d whole file(s), %d texture patch(es), %d xpps patch(es)", m.folder, m.n_files, m.n_tex, m.n_xpps);
-            }
-            mods_status_line(m);
-            if (m.clash && m.on) {   /* [modsui] who wins a clash */
-                if (ImGui::SmallButton("Use this one instead")) ps3_game_mods_prefer(i);
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, kGrey);
-                ImGui::PushTextWrapPos(0.0f);
-                ImGui::Text("(%s)", m.prefer);
-                ImGui::PopTextWrapPos();
-                ImGui::PopStyleColor();
-            }
-            if (m.n_modules && m.for_game) mods_options(i, m.n_modules);
-            ImGui::EndGroup();
-            if (pic && !strcmp(s_mods_sel, m.folder)) {
-                float w = ImGui::GetContentRegionAvail().x;
-                if (w > S(480.0f)) w = S(480.0f);
-                ImGui::Image(pic->GetTexRef(), fit(pic, w, S(360.0f)));
-            }
-            ImGui::PopID();
-        }
-        if (n) ImGui::Separator();
-        hint("Mods made for the inFAMOUS Mod Manager work as they are, with no Unlocker: the game's own files are "
-             "never changed, the port hands the game the mod's files in their place. Turning a mod on or off, "
-             "changing its options or the one used in a clash applies the next time the game starts (\"Restart "
-             "to apply\" does that now). When two mods change the same file, the one put first is used (\"Use "
-             "this one instead\"), else the first by folder name.");
-    }
-
-    section("Texture packs");
-    {
-        static char packs[16][64];
-        static int npacks = -1;
-        static double listed;
-        const double now = now_s();
-        if (npacks < 0 || now - listed > 2.0) { npacks = fx_pack_list(packs, 16); listed = now; }
-        const char* e = getenv("PS3_MODS");
-        int cur = 0;   /* 0 = off, k = packs[k - 1] */
-        for (int i = 0; i < npacks; i++) if (e && !SDL_strcasecmp(e, packs[i])) cur = i + 1;
-        char preview[80];
-        snprintf(preview, sizeof preview, "%s", cur ? packs[cur - 1] : (e && *e ? e : "Off"));
-        ImGui::SetNextItemWidth(combo_w());
-        if (ImGui::BeginCombo("Texture pack", preview)) {
-            if (ImGui::Selectable("Off", cur == 0)) fx_set("PS3_MODS", "");
-            for (int i = 0; i < npacks; i++)
-                if (ImGui::Selectable(packs[i], cur == i + 1)) fx_set("PS3_MODS", packs[i]);
-            ImGui::EndCombo();
-        }
-        fx_live("PS3_MODS");
-        if (ImGui::Button("Reload pack files")) fx_set("PS3_MODS", e ? e : "");
-        unsigned np = 0, nf = 0, na = 0; int dumping = 0;
-        rsx_texpack_status(&np, &nf, &na, &dumping);
-        ImGui::SameLine();
-        if (np) ImGui::Text("%u replacement file(s) in use, %u upload(s) replaced", nf, na);
-        else ImGui::TextColored(kGrey, "no pack in use");
-        const char* dir = rsx_texpack_dir();
-        if (dir && *dir) { char b[720]; snprintf(b, sizeof b, "Packs folder: %s", dir); hint(b); }
-        else hint("No packs folder: make a \"texpacks\" folder (work\\texpacks), or set PS3_MODS_DIR.");
-        hint("A pack is a folder of PNG (or DDS) files named by the texture they replace (the dump's names). "
-             "Larger pictures are fine: a higher-resolution pack. The game's own textures come back when "
-             "the pack is Off. \"Reload pack files\" picks up files you changed or added.");
-
-        bool d = dumping != 0;
-        if (ImGui::Checkbox("Dump textures (to make a pack)", &d)) ps3_setting_apply("PS3_MODS_DUMP", d ? "1" : "0");
-        fx_live("PS3_MODS_DUMP");
-        hint("Writes each texture the game shows, once, as <name>.png into the packs folder's _dump; "
-             "fx_textures.txt there lists the ones fire, smoke and sparks use. Slows the game while on; "
-             "not saved (off at the next start).");
-    }
 }
 
 static void quit_confirm(void)
@@ -2551,62 +1833,13 @@ static void quit_confirm(void)
     ImGui::EndPopup();
 }
 
-#include "vk_overlay_light.inc"   /* [light] tab_lighting, lfx_compare_toggle */
-#include "vk_overlay_update.inc"  /* [update] tab_update, update_confirm, update_attach */
+#include "vk_overlay_shadow.inc"  /* [shadow] shadow_quality_* (the Lighting page's Shadow quality row) */
+#include "vk_overlay_light.inc"   /* [light] lfx_choose, lfx_compare_toggle (F3) */
+#include "vk_overlay_update.inc"  /* [update] the status watcher, update_confirm, update_attach */
+#include "vk_overlay_about.inc"   /* [about] the supporters list's reader, about_open_url, about_attach */
 #include "vk_overlay_lowend.inc"  /* (lowend) the automatic choice for small cards, the Graphics presets */
 
-static void draw_menu(double now)
-{
-    if (vk_overlay_saves_active()) { vk_overlay_saves_draw(S(1.0f)); return; }   /* [saves] */
-    const ImGuiIO& io = ImGui::GetIO();
-    /* the game dimmed behind the menu */
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 110));
-    const ImVec2 size(S(720.0f), S(620.0f));
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(size.x < io.DisplaySize.x - 20 ? size.x : io.DisplaySize.x - 20,
-                                    size.y < io.DisplaySize.y - 20 ? size.y : io.DisplaySize.y - 20), ImGuiCond_Always);
-    if (!vk_ov_begin("inFAMOUS 2  -  Settings###ps3menu", NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                                                              ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
-        ImGui::End(); return;
-    }
-    static const char* const names[TAB_CHEATS + 1] = { "Display", "Graphics", "Audio", "Controls", "HUD", "Lighting", "Effects", "Mods", "Update", "Cheats" };
-    s_ntabs = tab_count();
-    if (ImGui::BeginTabBar("tabs")) {
-        for (int i = 0; i < tab_count(); i++) {
-            const ImGuiTabItemFlags f = (s_tab_want == i) ? ImGuiTabItemFlags_SetSelected : 0;
-            ImGui::PushFont(vk_ov_theme_bold(), 0.0f);   /* [theme] tab labels in the bold face */
-            const bool tab_open = ImGui::BeginTabItem(names[i], NULL, f);
-            ImGui::PopFont();
-            if (tab_open) {
-                s_tab = i;
-                ImGui::BeginChild("page", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 1.4f));
-                switch (i) { case 0: tab_display(); break; case 1: tab_graphics(); break; case 2: tab_audio(); break;
-                             case 3: tab_controls(now); break; case 4: tab_hud(); break;
-                             case 5: tab_lighting(); break; case 6: tab_effects(); break;
-                             case TAB_MODS: tab_mods(); break;
-                             case TAB_UPDATE: tab_update(now); break;
-                             case TAB_CHEATS: vk_overlay_cheats_page(combo_w()); break; default: break; }
-                ImGui::EndChild();
-                ImGui::EndTabItem();
-            }
-        }
-        s_tab_want = -1;
-        ImGui::EndTabBar();
-    }
-    ImGui::Separator();
-    if (ImGui::Button("Close")) set_open(0);
-    ImGui::SameLine();
-    if (ImGui::Button("Quit game")) s_quit_ask = 1;
-    ImGui::SameLine();
-    hint(s_tab == TAB_CHEATS ? (vk_overlay_cheats_remember() ? "Cheats apply at once and are remembered."
-                                                             : "Cheats apply at once and are not saved.")
-         : s_ini_path[0] ? "Changes apply at once where they can and are saved."
-                         : "Changes apply at once (not saved: PS3_OVERLAY_INI is empty).");
-    quit_confirm();
-    restart_confirm();   /* [modsui] */
-    update_confirm();    /* [update] */
-    ImGui::End();
-}
+#include "vk_overlay_menu.inc"  /* [menu-e] the settings menu, design E: rows, rail, info card */
 
 static void draw_hud(void)
 {
@@ -2638,8 +1871,9 @@ static void draw_notices(double now)
     { std::lock_guard<std::mutex> g(s_notice_lock); memcpy(n, s_notice, sizeof n); }
     const ImGuiIO& io = ImGui::GetIO();
     /* bottom right (bottom left when the HUD is there) */
-    const bool left = (s_hud_corner == 3);
+    const bool left = (s_hud_corner == 3) && !s_open;
     float y = io.DisplaySize.y - S(14.0f);
+    if (s_open && s_card_top > 0.0f) y = s_card_top - S(10.0f);   /* [menu-e] above the menu's card */
     for (int i = 0; i < 3; i++) {
         if (n[i].until <= now) continue;
         const float a = (float)((n[i].until - now) < 0.5 ? (n[i].until - now) / 0.5 : 1.0);
@@ -2683,6 +1917,8 @@ static void feed_pad(ImGuiIO& io)
     io.AddKeyEvent(ImGuiKey_GamepadFaceRight, (b & PAD_CIRCLE) != 0);
     io.AddKeyEvent(ImGuiKey_GamepadFaceLeft,  (b & PAD_SQUARE) != 0);
     io.AddKeyEvent(ImGuiKey_GamepadFaceUp,    (b & PAD_TRIANGLE) != 0);
+    io.AddKeyEvent(ImGuiKey_GamepadL2,        (b & PAD_L2) != 0);   /* [menu-e] the compare line */
+    io.AddKeyEvent(ImGuiKey_GamepadR2,        (b & PAD_R2) != 0);
     auto axis = [](int v, int dir) {   /* dir -1: towards 0, +1: towards 255 */
         float f = dir < 0 ? (128 - v) / 127.0f : (v - 128) / 127.0f;
         f = (f - 0.25f) / 0.75f;
@@ -2697,10 +1933,11 @@ static void feed_pad(ImGuiIO& io)
     const uint16_t pressed = b & (uint16_t)~prev;
     prev = b;
     if (vk_overlay_saves_active()) { vk_overlay_saves_pad(b, lx, ly); return; }   /* [saves] */
-    if (s_quit_ask) { if (pressed & PAD_CIRCLE) s_quit_cancel = true; return; }
-    if (pressed & PAD_L1) s_tab_want = (s_tab + tab_count() - 1) % tab_count();
+    if (pressed) fprintf(stderr, "[overlay] menu pad: 0x%04X\n", (unsigned)pressed);   /* [menu-e] the test runs' presses, in the log */
+    if (menu_modal()) { if (pressed & PAD_CIRCLE) menu_escape(); return; }   /* a question: Circle = its Cancel */
+    if (pressed & PAD_L1) s_tab_want = (s_tab + tab_count() - 1) % tab_count();   /* wrapping */
     if (pressed & PAD_R1) s_tab_want = (s_tab + 1) % tab_count();
-    if ((pressed & PAD_CIRCLE) && !ImGui::IsAnyItemActive()) set_open(0);
+    if (pressed & PAD_CIRCLE) menu_escape();                                       /* Back, or close */
 }
 
 /* ---- the entry points ------------------------------------------------------ */
@@ -2743,6 +1980,8 @@ extern "C" void vk_overlay_attach(const vk_overlay_attach_info* info)
     vk_overlay_cheats_attach();      /* remembered cheats on again, and a notice naming them */
     vk_overlay_saves_attach();       /* [saves] the save-data list dialog for cellSaveData */
     update_attach();                 /* [update] the launcher's answer about a newer version (F2 > Update) */
+    about_attach();                  /* [about] the supporters list (F2 > About) */
+    menu_census();                   /* [menu-e] every setting has a row (else a loud warning), the startup line */
     update_active();
     fprintf(stderr, "[overlay] in-game menu: F2 (or hold L3+R3); HUD %s (F1); fullscreen Alt+Enter / F11; settings %s\n",
             s_hud ? "on" : "off", s_ini_path[0] ? s_ini_path : "not saved (PS3_OVERLAY_INI empty)");

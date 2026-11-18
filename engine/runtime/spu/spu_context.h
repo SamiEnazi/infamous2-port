@@ -609,10 +609,15 @@ static inline __m128i spu_ls_bswap_words(__m128i x) {
 #else
 #  define SPU_GATE __attribute__((weak))
 #endif
+#if defined(PS3_MODULE_VARS_H) || defined(PS3_MODULE_DATA_IMPORT)
+/* the engine (slim split): the game module holds them (ps3emu/ps3_module.h PS3_MODULE_HVARS) */
+extern int g_spu_ls_probe, g_spu_smc_watch, g_wws_code_probe, g_wws_read_probe;
+#else
 SPU_GATE int g_spu_ls_probe   = -1;  /* spu_ls_read_probe (SPU_LS_LOWREAD)      */
 SPU_GATE int g_spu_smc_watch  = -1;  /* spu_ls_write_probe_smc (SPU_SMC_WATCH)  */
 SPU_GATE int g_wws_code_probe = 0;   /* WWS code-buffer resolution, capped      */
 SPU_GATE int g_wws_read_probe = 0;
+#endif
 extern int g_spu_ls_dbg;     /* any LS debug hook armed (spu_channels.c) */
 static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context* ctx, uint32_t lsa)
 {
@@ -664,7 +669,11 @@ static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context*
 /* g_spu_lifted_flags: what the lifted TUs were compiled for, set by each one before main (bit 0
  * SPU_LS_FASTPATH, bit 1 SPU_FLOAT_RZ_ONLY), read by the runtime paths those forms cannot serve
  * (a raw SPU's LS, SPU_FLOAT_RZ=0). One merged definition per program. */
+#if defined(PS3_MODULE_VARS_H) || defined(PS3_MODULE_DATA_IMPORT)
+extern int g_spu_lifted_flags;   /* (slim split) the game module's */
+#else
 SPU_GATE int g_spu_lifted_flags = 0;
+#endif
 #if defined(SPU_LS_FASTPATH) && SPU_LS_FASTPATH
 #define SPU_LS_BASE(ctx) ((ctx)->ls_store)
 #define SPU_LS_DBG_ON 0

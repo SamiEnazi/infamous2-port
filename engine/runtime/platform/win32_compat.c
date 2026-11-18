@@ -55,6 +55,10 @@
 #else
 #  include <semaphore.h>
 #  include <ucontext.h>
+#  if defined(__linux__)
+#    include <link.h>    /* dl_iterate_phdr: the thread-local blocks a new thread's stack must hold */
+#    include <stdio.h>
+#  endif
 #endif
 
 /* The signal that parks a thread for SuspendThread on Linux. SIGRTMIN and the
@@ -527,6 +531,33 @@ static int thread_arm(ps3_obj* t)
     return 1;
 }
 
+/* A Win32 stack size is the thread's stack alone. glibc carves the thread-local blocks of the program and of
+ * every library loaded at start (the static TLS) out of the same mapping and refuses, with EINVAL, a stack that
+ * cannot hold them: with the game module's and the Vulkan drivers' TLS that is over 1 MB, so every
+ * CreateThread(.., 1u << 20, ..) and smaller failed (v0.6.0: the native job runner's pool threads were never
+ * made and the game waited for its first jobs forever). The TLS of every loaded module is added to the size
+ * asked for; a little too much is harmless (the pages are only touched when used). */
+#if defined(__linux__)
+static int tls_phdr_cb(struct dl_phdr_info* info, size_t size, void* sum)
+{
+    (void)size;
+    for (int i = 0; i < info->dlpi_phnum; i++)
+        if (info->dlpi_phdr[i].p_type == PT_TLS) {
+            size_t al = info->dlpi_phdr[i].p_align ? info->dlpi_phdr[i].p_align : 1;
+            *(size_t*)sum += (info->dlpi_phdr[i].p_memsz + al - 1) / al * al;
+        }
+    return 0;
+}
+static size_t stack_tls_bytes(void)
+{
+    size_t n = 0;
+    dl_iterate_phdr(tls_phdr_cb, &n);
+    return n + 16384;   /* the thread descriptor and glibc's own surplus */
+}
+#else
+static size_t stack_tls_bytes(void) { return 0; }
+#endif
+
 static HANDLE create_thread(SIZE_T stack, PS3_THREAD_FN fn, unsigned (*fn_crt)(void*),
                             LPVOID arg, DWORD flags, DWORD* out_tid)
 {
@@ -552,12 +583,22 @@ static HANDLE create_thread(SIZE_T stack, PS3_THREAD_FN fn, unsigned (*fn_crt)(v
          * under the minimum. */
         size_t page = (size_t)sysconf(_SC_PAGESIZE);
         if (page == 0) page = 4096;
-        size_t sz = (stack + page - 1) & ~(page - 1);
+        size_t sz = (stack + stack_tls_bytes() + page - 1) & ~(page - 1);
         if (sz < (size_t)PTHREAD_STACK_MIN) sz = ((size_t)PTHREAD_STACK_MIN + page - 1) & ~(page - 1);
         pthread_attr_setstacksize(&attr, sz);
     }
     int rc = pthread_create(&t->pt, &attr, thread_trampoline, t);
+    if (rc == EINVAL && stack) {
+        /* still too small for this system's libc: the default stack size rather than no thread */
+        pthread_attr_destroy(&attr);
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        rc = pthread_create(&t->pt, &attr, thread_trampoline, t);
+    }
     pthread_attr_destroy(&attr);
+#if defined(__linux__)
+    if (rc != 0) fprintf(stderr, "[win32_compat] CreateThread: pthread_create failed (%s), stack %zu\n", strerror(rc), (size_t)stack);
+#endif
     if (rc != 0) {
         /* Through the release path: the record is already in the thread table
          * and, off Darwin, owns two semaphores. */
@@ -1897,7 +1938,10 @@ static void veh_signal_handler(int sig, siginfo_t* si, void* uctx)
             (PVECTORED_EXCEPTION_HANDLER)__atomic_load_n(&n->fn, __ATOMIC_ACQUIRE);
         if (!fn) continue;
         if (fn(&ep) == EXCEPTION_CONTINUE_EXECUTION) {
-            ctx_to_uc(uc, &ctx, 0);
+            /* every register, not just pc/sp (track A, 2026-11-16): a handler that finishes the
+             * faulting load itself (runtime/memory/vm_guard.c) sets its destination register.
+             * Registers a handler left alone are written back with the values they had. */
+            ctx_to_uc(uc, &ctx, 1);
             errno = saved_errno;
             return;
         }

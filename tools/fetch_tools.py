@@ -86,6 +86,19 @@ def mb(n):
     return f"{n / 1048576:.0f} MB"
 
 
+def retry_os(fn, *args):
+    """os.replace / shutil.move of what was just written or unpacked: a virus scanner (or Windows Search) reading
+    a new file holds it for a moment, and Windows then says "Access is denied" (5) or "in use" (32). Tried again
+    for up to 30 s."""
+    for i in range(61):
+        try:
+            return fn(*args)
+        except OSError as e:
+            if i == 60 or getattr(e, "winerror", None) not in (5, 32):
+                raise
+            time.sleep(0.5)
+
+
 def fetch(url):
     req = urllib.request.Request(url, headers={"User-Agent": "inFAMOUS2-port-setup"})
     for attempt in (1, 2):
@@ -100,34 +113,61 @@ def fetch(url):
 
 
 def download(url, path, sha256, size, what, prog):
-    """url -> path with progress, checked against sha256; retried once."""
+    """url -> path with progress, checked against sha256. A connection that drops mid-file (seen on players' and
+    our own lines: Microsoft's and Sony's servers, a file cut short with no error) is resumed where it stopped
+    (the servers answer byte ranges; a server that does not gets the file from the start), up to 6 tries; a
+    file with the wrong SHA-256 at its full size is fetched again from the start."""
     if os.path.isfile(path) and _sha256(path) == sha256.lower():
         prog.add(size, what)
         return
-    for attempt in (1, 2):
-        got = 0
+    part = path + ".part"
+    counted = 0                      # this file's bytes in prog.done (taken back before each try)
+    for attempt in range(1, 7):
+        have = os.path.getsize(part) if os.path.isfile(part) else 0
+        if size and have > size:
+            os.remove(part)
+            have = 0
+        prog.done -= counted
+        counted = 0
         try:
-            req = urllib.request.Request(url.replace(" ", "%20"), headers={"User-Agent": "inFAMOUS2-port-setup"})
-            h = hashlib.sha256()
-            with urllib.request.urlopen(req, timeout=120) as r, open(path + ".part", "wb") as f:
-                while True:
-                    b = r.read(1 << 20)
-                    if not b:
-                        break
-                    f.write(b)
-                    h.update(b)
-                    got += len(b)
-                    prog.add(len(b), f"downloading {what} ({mb(got)} of {mb(size)})")
+            headers = {"User-Agent": "inFAMOUS2-port-setup"}
+            if have:
+                headers["Range"] = f"bytes={have}-"
+            req = urllib.request.Request(url.replace(" ", "%20"), headers=headers)
+            with urllib.request.urlopen(req, timeout=120) as r:
+                if have and r.status != 206:      # no range answer: the whole file again
+                    have = 0
+                h = hashlib.sha256()
+                if have:                           # the bytes already there, hashed first
+                    with open(part, "rb") as f:
+                        for blk in iter(lambda: f.read(1 << 20), b""):
+                            h.update(blk)
+                    prog.add(have, what)
+                    counted = have
+                got = have
+                with open(part, "ab" if have else "wb") as f:
+                    while True:
+                        blk = r.read(1 << 20)
+                        if not blk:
+                            break
+                        f.write(blk)
+                        h.update(blk)
+                        got += len(blk)
+                        counted += len(blk)
+                        prog.add(len(blk), f"downloading {what} ({mb(got)} of {mb(size)})")
             if h.hexdigest() != sha256.lower():
+                if size and got < size:
+                    raise OSError(f"the download stopped early ({got} of {size} bytes)")
+                os.remove(part)                    # whole but wrong: from the start next time
                 raise OSError(f"the download has the wrong SHA-256 ({h.hexdigest()})")
-            os.replace(path + ".part", path)
+            retry_os(os.replace, part, path)
             return
         except OSError as e:
-            prog.done -= got
-            if attempt == 2:
+            if attempt == 6:
+                prog.done -= counted
                 raise SystemExit(f"downloading {what} failed: {e}. Check the internet connection and try again.")
-            print(f"  {what}: {e} -- trying once more", flush=True)
-            time.sleep(3)
+            print(f"  {what}: {e} -- trying again{' (going on where it stopped)' if os.path.isfile(part) else ''}", flush=True)
+            time.sleep(min(3 * attempt, 10))
 
 
 def _sha256(path):
@@ -142,6 +182,33 @@ def _fresh(path):
     if os.path.isdir(path):
         shutil.rmtree(path)
     os.makedirs(path)
+
+
+def _msi_plain(path):
+    """msiexec takes this folder as is: msiexec reads "[x]" in a path as the value of a property x (empty), stops at
+    a few other characters, and the Windows Installer service will not go through a junction a user made (error 448,
+    "untrusted mount point": Setup's plain-named link to an odd folder, tools/safe_paths.ps1)."""
+    return (all(c.isascii() and (c.isalnum() or c in " _.-\\:()~") for c in path)
+            and os.path.normcase(os.path.realpath(path)) == os.path.normcase(os.path.abspath(path)))
+
+
+def _msi_stage():
+    """A plain real folder for the SDK's packages and their unpacking when the port's own folder is not one
+    (GitHub #34: "E:\\Decomps & Recomps", "[v1]", other alphabets); None when the port's folder is fine."""
+    if _msi_plain(CACHE):
+        return None
+    cands = [os.path.join(os.environ.get("TEMP", ""), "inf2-msi"),
+             os.path.join(os.environ.get("ProgramData", ""), "inFAMOUS2-port", "msi"),
+             os.path.join(os.environ.get("SystemDrive", "C:") + "\\", "inFAMOUS2-port-b", "msi")]
+    for c in cands:
+        if os.path.isabs(c) and _msi_plain(os.path.dirname(c)):
+            try:
+                _fresh(c)
+                return c
+            except OSError:
+                continue
+    raise SystemExit("unpacking the Windows SDK needs a folder with a plain name and none was usable "
+                     f"({', '.join(cands)}): move the port to a folder like C:\\Games\\inFAMOUS2 and run Setup again")
 
 
 def _ready(path, text):
@@ -232,7 +299,7 @@ def get_archive(key, prog):
     src = os.path.join(tmp, a["top"]) if a["top"] else tmp
     if os.path.isdir(dest):
         shutil.rmtree(dest)
-    os.replace(src, dest)
+    retry_os(os.replace, src, dest)
     if os.path.isdir(tmp):
         shutil.rmtree(tmp)
     os.remove(arc)
@@ -267,7 +334,7 @@ def get_llvm_member(member, prog):
     src = os.path.join(tmp, *m.split("/"))
     if not os.path.isfile(src):
         raise SystemExit(f"{member} is not in {a['label']}'s archive")
-    os.replace(src, os.path.join(dest, *member.split("/")))
+    retry_os(os.replace, src, os.path.join(dest, *member.split("/")))
     shutil.rmtree(tmp, ignore_errors=True)
     os.remove(arc)
     print(f"  {a['label']}: {member} added to tools-cache\\llvm", flush=True)
@@ -373,18 +440,33 @@ def get_msvc(files, pay, full, sv, prog):
     # msiexec /a only unpacks (an "administrative install" into a folder): no install, no admin.
     sdk_tmp = os.path.join(CACHE, "sdk.unpack")
     _fresh(sdk_tmp)
+    # a port folder msiexec can't take: the packages (and the cabinets beside them) are unpacked in a plain folder
+    stage = _msi_stage()
+    unpack = sdk_tmp
+    if stage:
+        prog.say(f"unpacking the Windows SDK in {stage} (a plain path for Windows Installer)", force=True)
+        for n in sorted(set(os.path.basename(m) for m in msis) | set(cabs)):
+            if os.path.isfile(os.path.join(d, n)):
+                shutil.copy2(os.path.join(d, n), os.path.join(stage, n))
+        msis = [os.path.join(stage, os.path.basename(m)) for m in msis]
+        unpack = os.path.join(stage, "unpack")
+        os.makedirs(unpack)
     for i, m in enumerate(msis, 1):
         prog.say(f"unpacking the Windows SDK ({i} of {len(msis)})", force=True)
         for attempt in range(8):
-            r = subprocess.run(f'msiexec.exe /a "{m}" /quiet /qn TARGETDIR="{sdk_tmp}"', timeout=900)
+            r = subprocess.run(f'msiexec.exe /a "{m}" /quiet /qn TARGETDIR="{unpack}"', timeout=900)
             if r.returncode != 1618:          # 1618: another installation is running: wait for it
                 break
             time.sleep(15)
         if r.returncode:
             raise SystemExit(f"unpacking {os.path.basename(m)} failed (msiexec exit code {r.returncode})")
-        copied = os.path.join(sdk_tmp, os.path.basename(m))
+        copied = os.path.join(unpack, os.path.basename(m))
         if os.path.isfile(copied):
             os.remove(copied)
+    if stage:
+        shutil.rmtree(sdk_tmp)
+        shutil.move(unpack, sdk_tmp)          # (another drive: copied, then deleted)
+        shutil.rmtree(stage, ignore_errors=True)
     kits = os.path.join(sdk_tmp, "Windows Kits", "10")
     vc_root = os.path.join(msvc_tmp, "VC", "Tools", "MSVC")
     if not os.path.isdir(vc_root) or not os.path.isdir(os.path.join(kits, "Include")):
@@ -392,7 +474,7 @@ def get_msvc(files, pay, full, sv, prog):
     for dest, src in ((os.path.join(CACHE, "msvc"), msvc_tmp), (os.path.join(CACHE, "sdk"), kits)):
         if os.path.isdir(dest):
             shutil.rmtree(dest)
-        os.replace(src, dest)
+        retry_os(os.replace, src, dest)
     shutil.rmtree(sdk_tmp, ignore_errors=True)
     shutil.rmtree(d, ignore_errors=True)
     for k, pin in (("msvc", MSVC_VERSION), ("sdk", SDK_VERSION)):   # what was asked for (stale())

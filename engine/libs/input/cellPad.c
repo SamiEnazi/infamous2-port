@@ -1798,16 +1798,20 @@ static void pad_win_keys(uint32_t keys[4], const PadInputMap* map)
         ((GetAsyncKeyState(VK_LMENU) & 0x8000) && !PAD_WANT(0x3Au)) ||
         ((GetAsyncKeyState(VK_RMENU) & 0x8000) && !PAD_WANT(0x3Du)))
         return;
+    /* Alt bound to a control and held (GitHub #68): the game gets it and the other keys, but not the second
+     * key of the window's Alt chords -- Enter (fullscreen), Tab (Alt+Tab), F4 (quit) */
+    const int alt = ((GetAsyncKeyState(VK_LMENU) | GetAsyncKeyState(VK_RMENU)) & 0x8000) != 0;
     for (int i = 0; i < PAD_N_SCAN_KEYS; i++) {
         const unsigned mac = kWinScanMac[i][1];
         if (PAD_WANT(mac) && s_scan_vk[i] && (GetAsyncKeyState(s_scan_vk[i]) & 0x8000)) PAD_SET(mac);
     }
     for (int i = 0; i < PAD_N_VK_KEYS; i++) {
         const unsigned mac = kWinVkMac[i][1];
+        if (alt && (mac == 0x24u || mac == 0x30u || mac == 0x76u)) continue;
         if (PAD_WANT(mac) && (GetAsyncKeyState(kWinVkMac[i][0]) & 0x8000)) PAD_SET(mac);
     }
     /* keypad Enter is VK_RETURN too: one Enter for both */
-    if (PAD_WANT(0x4Cu) && (GetAsyncKeyState(VK_RETURN) & 0x8000)) PAD_SET(0x4Cu);
+    if (!alt && PAD_WANT(0x4Cu) && (GetAsyncKeyState(VK_RETURN) & 0x8000)) PAD_SET(0x4Cu);
 #undef PAD_WANT
 #undef PAD_SET
 }
@@ -2001,9 +2005,9 @@ volatile int      g_pad_overlay_open;
 volatile uint32_t g_pad_overlay_toggle;
 volatile uint32_t g_pad_overlay_nav, g_pad_overlay_nav2;
 /* g_pad_overlay_open == 2: a SYSTEM dialog holds the pad (the save-data list,
- * libs/video/vk_overlay_saves.cpp). The scripted buttons (PAD_SCRIPT, PAD_FILE)
- * then go to it -- as a player's would -- instead of the title: port 0's mask of
- * them on its latest read, here. */
+ * libs/video/vk_overlay_saves.cpp); 1: the F2 menu is open. The scripted buttons
+ * (PAD_SCRIPT, PAD_FILE) then go to it -- as a player's would -- instead of the
+ * title: port 0's mask of them on its latest read, here. */
 volatile uint32_t g_pad_overlay_inject;
 static void pad_overlay_gate(void)
 {
@@ -2608,9 +2612,11 @@ skip_inject: ;
               data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= 0x08;   /* START */
       } }
 
-    /* A system dialog holds the pad (g_pad_overlay_open == 2): the scripted
-     * presses below go to it (g_pad_overlay_inject), not to the title. */
-    const int sysdlg = g_pad_overlay_open == 2 && port_no == 0;
+    /* A system dialog holds the pad (g_pad_overlay_open == 2), or the F2 menu is
+     * open (1, the title reads neutral input then): the scripted presses below go
+     * to it (g_pad_overlay_inject), not to the title -- as a player's pad would
+     * ([menu-e]: tests drive the menu with PAD_FILE / PAD_SCRIPT). */
+    const int sysdlg = g_pad_overlay_open != 0 && port_no == 0;
     uint32_t sysdlg_inj = 0;
 
     /* PAD_SCRIPT="<sec>:<mask>,<sec>:<mask>,..." -- press a NAMED button at a

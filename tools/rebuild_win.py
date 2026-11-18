@@ -8,8 +8,16 @@ EU disc BCES01143 + v1.04 update, whose code is identical: PPU-41a7d047...).
     python -I tools/rebuild_win.py [--only step,step] [--from step]
     python -I tools/rebuild.py ...        (the same driver, a host-neutral name)
 
-Steps: inputs port firmware ppu spu jobs compile
+Steps: inputs port firmware ppu spu jobs compile   (compile = engine + module)
 Logs:  work/logs/<step>.log    Output: work/port/
+
+The exe is two files since the slim split (2026-11-14): the ENGINE (Infamous2Recomp.exe: ours and
+third-party code, built here with CMake, or prebuilt: PORT_ENGINE_EXE=<its exe>) and the GAME
+MODULE (Infamous2Game.dll / libInfamous2Game.so: the lift, built by tools/build_module.py with
+clang + lld only), side by side in PORT_BUILD (default work/port/build). PORT_PGO applies to the
+module (the player-side "Optimise for this PC"); PORT_ENGINE_PGO to the engine (ours, at release).
+PORT_ENGINE_BUILD: where the engine is built (default work/port/build) when PORT_BUILD is another
+folder (a PGO training build): its exe and DLLs are copied next to the module.
 
 Host: on Windows clang-cl + lld-link in the Visual Studio / portable MSVC environment.
 On Linux (step_compile_linux) clang/clang++ + lld with the same flags in GNU spelling
@@ -21,6 +29,7 @@ lib/cmake/glslang; unset = deps/glslang-install-linux when present, else the sys
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -41,6 +50,8 @@ ELF_SRC = os.path.join(ROOT, "eboot", "EBOOT_upd104.elf")
 ELF = os.path.join(WORK, "EBOOT.elf")
 IS_WIN = os.name == "nt"   # else Linux: step_compile_linux
 PY = os.path.join(WORK, "venv", "Scripts", "python.exe") if IS_WIN else os.path.join(WORK, "venv", "bin", "python")
+if not os.path.isfile(PY):   # (slim split) no venv: the Python running this (the slim Setup's embeddable one)
+    PY = sys.executable
 DEPS = os.path.join(ROOT, "deps")
 # PORT_SPU_REWRITES: another native SPU rewrite directory (an agent's own copy; holds natives.txt + *.c),
 # PORT_SPU_NATIVES_FILE: another natives.txt. Defaults: natives/spu of the repository (work/rewrites/spu when
@@ -73,6 +84,7 @@ SPU_IMAGE_EXTRA = ("0x9C84", "0x9DB8")
 JOBMOD_EXTRA = (("jobmod_ab654d30fd90_efe70", ("0x15280", "0x155EC")),
                 ("jobmod_cbb4b5c85d75_e59f8", ("0x6C44", "0x6C64")))
 STEPS = ("inputs", "port", "firmware", "ppu", "spu", "jobs", "compile")
+SUBSTEPS = {"engine": "compile", "module": "compile"}   # --only engine / --only module: one half of compile
 
 
 def T(name):
@@ -105,18 +117,150 @@ class StepError(Exception):
     pass
 
 
-def rpcs3_firmware(rpcs3):
-    """(the installed firmware's dev_flash, the RPCS3 program). Windows: both in the RPCS3 folder.
-    Linux: `rpcs3` is the AppImage or a folder holding rpcs3; dev_flash is beside it when there,
-    else in RPCS3's config folder ($XDG_CONFIG_HOME/rpcs3, ~/.config/rpcs3)."""
+def rpcs3_vfs_dir(data_dirs, name, probe):
+    """RPCS3's dev_hdd0 / dev_flash (GitHub #50, #46): config/vfs.yml of each RPCS3 data folder may
+    point it anywhere ("$(EmulatorDir)" = that data folder); else <data folder>/<name>. The first place
+    holding `probe` (a path inside it), else the first place."""
+    cands = []
+    for d in data_dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        try:
+            for line in open(os.path.join(d, "config", "vfs.yml"), encoding="utf-8", errors="replace"):
+                m = re.match(r'^\s*"?/?(\w+)/?"?\s*:\s*(.*?)\s*$', line)
+                if m and m.group(1) == name:
+                    v = m.group(2).strip().strip("\"'")
+                    if v:
+                        if v.startswith("$(EmulatorDir)"):
+                            v = os.path.join(d, v[len("$(EmulatorDir)"):].lstrip("/\\"))
+                        elif not os.path.isabs(v):
+                            v = os.path.join(d, v)
+                        cands.append(os.path.normpath(v))
+                    break
+        except OSError:
+            pass
+        cands.append(os.path.join(d, name))
+    for c in cands:
+        if os.path.exists(os.path.join(c, probe)):
+            return c
+    return cands[0] if cands else None
+
+
+def rpcs3_data_dirs(rpcs3):
+    """Folders that can be RPCS3's data folder: Windows: the RPCS3 folder (portable) or %APPDATA%\rpcs3.
+    Linux: the folder holding rpcs3, ~/.config/rpcs3 (AppImage, distro package), the Flatpak's."""
     if IS_WIN:
-        return os.path.join(rpcs3, "dev_flash"), os.path.join(rpcs3, "rpcs3.exe")
+        return [rpcs3, os.path.join(os.environ.get("APPDATA", ""), "rpcs3"), os.path.join(os.environ.get("LOCALAPPDATA", ""), "rpcs3")]
+    cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
     exe = rpcs3 if os.path.isfile(rpcs3) else os.path.join(rpcs3, "rpcs3")
-    flash = os.path.join(os.path.dirname(exe), "dev_flash")
-    if not os.path.isdir(flash):
-        cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-        flash = os.path.join(cfg, "rpcs3", "dev_flash")
+    return [os.path.dirname(exe) if os.path.isfile(rpcs3) else rpcs3, os.path.join(cfg, "rpcs3"),
+            os.path.join(os.path.expanduser("~"), ".var", "app", "net.rpcs3.RPCS3", "config", "rpcs3")]
+
+
+def rpcs3_firmware(rpcs3):
+    """(the installed firmware's dev_flash, the RPCS3 program). Windows: the program is in the RPCS3 folder.
+    Linux: `rpcs3` is the AppImage or a folder holding rpcs3. dev_flash: where RPCS3's vfs.yml says, else
+    in RPCS3's data folder (beside the program, $XDG_CONFIG_HOME/rpcs3, ~/.config/rpcs3, the Flatpak's)."""
+    if IS_WIN:
+        exe = os.path.join(rpcs3, "rpcs3.exe")
+    else:
+        exe = rpcs3 if os.path.isfile(rpcs3) else os.path.join(rpcs3, "rpcs3")
+    flash = rpcs3_vfs_dir(rpcs3_data_dirs(rpcs3), "dev_flash", os.path.join("sys", "external", "liblv2.sprx"))
     return flash, exe
+
+
+# ---- what the player sees while a long step runs (Setup.exe, tools/setup.sh) ------------------------
+# Each step says in plain words what it is when it starts ("  step: <text> (about N minutes)"; the raw
+# "[ppu]" line stays above it for support), and while one of its tools runs, a line every 5 seconds:
+# "  progress: <n>% <text>: <real progress>, <m:ss> so far". Real progress where the tool's log has it
+# (the lifter's "lifted k/N functions" and the files it wrote, a compile's "[k/N]"), else the time against
+# the test PC's. The tools run exactly as before (same environment, same buffering).
+# Output only: nothing about the build changes (the tools' own output goes to work/logs as before).
+STEP_TEXT = {   # step: (plain words, seconds on the test PC)
+    "inputs": ("Checking the game's files", 1), "port": ("Preparing the port's files", 3),
+    "firmware": ("Translating the PS3 system modules", 25), "ppu": ("Translating the game's code", 260),
+    "spu": ("Translating the game's helper programs", 5), "jobs": ("Translating the game's job programs", 35),
+    "compile": ("Compiling the game for your PC", 150), "engine": ("Compiling the engine", 60),
+    "module": ("Compiling the game for your PC", 150),
+}
+_CUR = {"step": "", "t0": 0.0}
+_RE_FUNCS = re.compile(rb"lifted (\d+)/(\d+) functions")
+_RE_KN = re.compile(rb"^\s*\[(\d+)/(\d+)\]", re.M)
+
+
+def step_about(sec):
+    if sec < 20:
+        return "a few seconds"
+    if sec < 50:
+        return "about half a minute"
+    m = int(round(sec / 60.0))
+    return "about a minute" if m <= 1 else f"about {m} minutes"
+
+
+def step_announce(step):
+    _CUR["step"], _CUR["t0"] = step, time.time()
+    text, typ = STEP_TEXT.get(step, (step, 10))
+    print(f"  step: {text} ({step_about(typ)})", flush=True)
+
+
+def heartbeat(log_path, start):
+    """one "progress:" line for the step that is running (never raises: it is only for the eye)"""
+    try:
+        step = _CUR["step"]
+        text, typ = STEP_TEXT.get(step, (step or "Working", 10))
+        el = max(0.0, time.time() - _CUR["t0"])
+        frac, detail = 1.0 - pow(2.718281828, -1.6 * el / max(1.0, typ)), ""
+        with open(log_path, "rb") as f:
+            size = f.seek(0, 2)
+            f.seek(max(start, size - (256 << 10)))
+            tail = f.read()
+        m = None
+        for m in _RE_FUNCS.finditer(tail):
+            pass
+        if step == "ppu":
+            # The game's code, on the test PC: the functions translated in the first half minute, then the lifter's
+            # passes over the whole program (about two minutes, no count), then its C++ files written (36 of them).
+            rec = os.path.join(PORT, "recompiled")
+            files = len([x for x in os.listdir(rec) if x.endswith(".cpp")]) if os.path.isdir(rec) else 0
+            k, n = (int(m.group(1)), max(1, int(m.group(2)))) if m else (0, 0)
+            if files:
+                frac, detail = 0.62 + 0.36 * min(1.0, files / 37.0), f"writing the translated code, file {files}"
+            elif m and k < n:
+                frac, detail = 0.12 * k / n, f"{k:,} of {n:,} functions"
+            else:
+                frac = min(0.62, el / max(1.0, typ))
+                if m:
+                    detail = f"all {n:,} functions translated, now joining them up"
+        else:
+            for m in _RE_KN.finditer(tail):
+                pass
+            if m and int(m.group(2)) > 0:
+                k, n = int(m.group(1)), int(m.group(2))
+                frac, detail = k / n, f"{k} of {n} files"
+        pct = int(max(0.0, min(0.99, frac)) * 100)
+        print(f"  progress: {pct}% {text}{': ' + detail if detail else ''}, {int(el) // 60}:{int(el) % 60:02d} so far", flush=True)
+    except Exception:
+        pass
+
+
+def run_beating(cmd, cwd, lf, env, log_path, start):
+    """subprocess.run(cmd, stdout=lf) with a heartbeat line every 5 seconds; returns the finished process"""
+    p = subprocess.Popen(cmd, cwd=cwd, stdout=lf, stderr=subprocess.STDOUT, env=env)
+    try:
+        beat = time.time()
+        while True:
+            try:
+                p.wait(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if time.time() - beat >= 5.0:
+                beat = time.time()
+                heartbeat(log_path, start)
+    except BaseException:
+        p.kill()
+        raise
+    return p
 
 
 def run(step, cmd, cwd=PORT, env_defaults=None):
@@ -150,9 +294,21 @@ def run(step, cmd, cwd=PORT, env_defaults=None):
             # them (the game's code only); a toolkit without the feature ignores the variable.
             if os.environ.get("PORT_SPU_PATCHES", "1") != "0" and os.path.isfile(SPU_PATCHES):
                 env.setdefault("SPU_PATCH_FILE", SPU_PATCHES)
-        p = subprocess.run(cmd, cwd=cwd, stdout=lf, stderr=subprocess.STDOUT, env=env)
+        start = lf.tell()
+        p = run_beating(cmd, cwd, lf, env, os.path.join(LOGS, step + ".log"), start)
         lf.write(f"[exit {p.returncode} after {time.time() - t0:.1f}s]\n")
     if p.returncode != 0:
+        # the last lines of what the tool said, into Setup's log too (GitHub #41: a player's log that only says
+        # "exited 1 (see work/logs/firmware.log)" can't tell us what went wrong)
+        try:
+            with open(os.path.join(LOGS, step + ".log"), "rb") as f:
+                f.seek(start)
+                tail = f.read().decode("utf-8", "replace").splitlines()[-12:]
+            for line in tail:
+                if line.strip():
+                    print("    | " + line.rstrip()[:300])
+        except OSError:
+            pass
         raise StepError(f"{os.path.basename(cmd[1]) if len(cmd) > 1 else cmd[0]} exited {p.returncode} "
                         f"(see work/logs/{step}.log)")
 
@@ -180,9 +336,12 @@ LIFT_DIRS = {"firmware": ("lle", "lle_spu"), "ppu": ("recompiled",), "spu": ("sp
 JOB_OUTPUTS = ("jobmods_register.c", "datamods_register.c", "relocmods_register.c", "jobmods_manifest.json")
 # switches that change the compile, a tool's place or this logic, not what a lift writes
 LIFT_ENV_SKIP = {"PORT_JOBS", "PORT_BUILD", "PORT_PGO", "PORT_PGO_NAMES", "PORT_LIFT_OPT", "PORT_SPU_ARCH",
+                 "PORT_ENGINE_EXE", "PORT_ENGINE_BUILD", "PORT_ENGINE_PGO",
                  "PORT_LIFT_LTO", "PORT_LIFT_REUSE", "PORT_BUILD_CACHE", "PORT_ONLY_CACHE", "PORT_RPCS3",
                  "PORT_VCVARS", "PORT_NINJA", "PORT_LLVM", "PORT_CMAKE", "PORT_PYTHON", "PORT_MSVC", "PORT_SDK",
                  "PORT_SETUP_API", "PORT_SETUP_CODELOAD",   # (Setup.exe's test stand-in for GitHub)
+                 "PORT_SETUP_RELEASES", "PORT_SLIM_ASSETS", "PORT_SONY_DOWNLOADS", "PORT_SETUP_NO_ASK",
+                 "PORT_SETUP_NO_RPCS3", "PORT_REAL_ROOT", "PORT_DESKTOP",   # (where things come from, not what a lift writes)
                  "PORT_PGO_TEST", "PORT_PGO_TRAIN", "PORT_PGO_KEEP_TRAIN"}   # (setup_build.ps1 -Pgo's test switches)
 _lifted = set()                           # the lift steps that ran in this invocation
 
@@ -203,11 +362,37 @@ def _hash_tree(h, top):
             _hash_file(h, os.path.relpath(p, top).replace("\\", "/"), p)
 
 
+# What of this script no lift step depends on: the compile side (the engine, the game module), the lines for the
+# player, the PGO reports. A change there alone must not translate the player's game again: v0.6.2 changed only
+# the engine's build and every update would have spent 4 to 7 minutes on a lift that came out byte for byte the
+# same. Everything else in this file counts, as Python reads it (comments and blank lines do not).
+NOT_LIFT = {"step_about", "step_announce", "heartbeat", "pgo_profile_names", "pgo_mismatch_summary",
+            "module_build_dir", "engine_build_dir", "step_compile", "step_module", "step_engine", "linux_tools",
+            "linux_compile_flags", "linux_configure_cmd", "step_engine_linux", "linux_log_has"}
+
+
+def _script_lift_code():
+    """this script without the NOT_LIFT functions and its own doc string, as one text"""
+    import ast
+    with open(os.path.abspath(__file__), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    body = [n for n in tree.body if not (isinstance(n, ast.FunctionDef) and n.name in NOT_LIFT)]
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    tree.body = body
+    return ast.dump(tree, include_attributes=False)
+
+
 def fingerprint(step):
     """What a lift step reads, as one hash."""
     h = hashlib.sha256()
-    h.update(("\0".join(["lift-v1", step, sys.version, str(os.cpu_count()), os.path.abspath(TK), os.path.abspath(PORT)]) + "\0").encode())
-    _hash_file(h, "rebuild_win.py", os.path.abspath(__file__))
+    # (v0.6.0: the folders relative to the port's own, so a moved or copied install keeps its lift)
+    rel = lambda p: os.path.relpath(os.path.abspath(p), ROOT).replace("\\", "/") if os.path.splitdrive(os.path.abspath(p))[0].lower() == os.path.splitdrive(ROOT)[0].lower() else os.path.abspath(p)
+    h.update(("\0".join(["lift-v3", step, sys.version, str(os.cpu_count()), rel(TK), rel(PORT)]) + "\0").encode())
+    try:
+        h.update(b"script" + bytes(1) + hashlib.sha256(_script_lift_code().encode("utf-8")).hexdigest().encode())
+    except (OSError, SyntaxError, ValueError):
+        _hash_file(h, "rebuild_win.py", os.path.abspath(__file__))
     _hash_tree(h, os.path.join(TK, "tools"))
     for k in sorted(os.environ, key=str.upper):
         ku = k.upper()
@@ -377,18 +562,33 @@ def step_inputs():
     shutil.copy2(ELF_SRC, ELF)
     print(f"  EBOOT.elf  {PPU_HASH}  ok")
     os.makedirs(FW, exist_ok=True)
+    own_flash = os.path.join(ROOT, "game", "dev_flash")   # Setup's copy of the player's firmware files (step 3)
     for m in FIRMWARE:
         prx = os.path.join(FW, m + ".prx")
+        dst = os.path.join(FW, m + ".sprx")
+        # the port's own copy (Setup: from RPCS3, or from Sony's servers by tools/sony_files.py), else RPCS3's
+        own = os.path.join(ROOT, "game", "dev_flash", "sys", "external", m + ".sprx")
+        rp = port_paths.get("rpcs3", required=False)
+        flash, rpcs3_exe = rpcs3_firmware(rp) if rp else (None, None)
+        src = own if os.path.isfile(own) or not flash else os.path.join(flash, "sys", "external", m + ".sprx")
+        # another firmware than the last build's (a 4.93 installed after a failed build with an older one: GitHub #41)
+        if os.path.isfile(prx) and os.path.isfile(src) and os.path.isfile(dst) and sha256(src) != sha256(dst):
+            print(f"  {m}.sprx: another firmware than the last build's: decrypted again")
+            os.remove(prx)
         if not os.path.isfile(prx):
-            flash, rpcs3_exe = rpcs3_firmware(port_paths.get("rpcs3"))
-            src = os.path.join(flash, "sys", "external", m + ".sprx")
-            dst = os.path.join(FW, m + ".sprx")
+            if not os.path.isfile(src):
+                raise StepError(f"no {m}.sprx: Setup puts the PS3 firmware files into game/dev_flash (run Setup again)")
             shutil.copy2(src, dst)
+            ps3tool = os.path.join(ROOT, "tools", "ps3tool.py")
             if IS_WIN and os.path.isfile(os.path.join(ROOT, "tools", "decrypt.ps1")):
-                # the pluggable step: config.local.json's "decryptor", else RPCS3 run hidden (tools\decrypt.ps1)
+                # the pluggable step: config.local.json's "decryptor", else ps3tool, else RPCS3 run hidden (tools\decrypt.ps1)
                 subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                                 os.path.join(ROOT, "tools", "decrypt.ps1"), "-In", dst, "-Out", prx], timeout=300)
-            else:
+            elif os.path.isfile(ps3tool):
+                # Linux: ps3tool as a program (tools/setup.sh decrypts these in its step 4 already; this is for a
+                # later build that lost work/fw)
+                subprocess.run([sys.executable, "-I", ps3tool, "decrypt", dst, prx], timeout=300)
+            elif rpcs3_exe:
                 # RPCS3 is single-instance: one file per invocation, nothing else running
                 subprocess.run([rpcs3_exe, "--decrypt", dst], timeout=120)
                 for cand in (os.path.join(FW, m + ".prx"), os.path.join(FW, m + ".elf")):
@@ -568,25 +768,88 @@ def pgo_mismatch_summary(logf, start):
           + (" -- retrain when these are hot (new profile file name)" if top[0][1] >= 1e8 else ""))
 
 
+def module_build_dir():
+    return os.environ.get("PORT_BUILD") or os.path.join(PORT, "build")   # PORT_BUILD: a separate build tree
+
+
+def engine_build_dir():
+    return os.environ.get("PORT_ENGINE_BUILD") or os.path.join(PORT, "build")
+
+
+ENGINE_FILES = ("Infamous2Recomp.exe", "Infamous2Recomp.pdb", "SDL2.dll") if IS_WIN else ("Infamous2Recomp",)
+
+
 def step_compile():
+    step_engine()
+    step_module()
+
+
+def step_module():
+    """The game module (tools/build_module.py) into PORT_BUILD, next to the engine."""
     if not IS_WIN:
-        return step_compile_linux()
-    spu_rewrites()
-    lift_restore_times()   # (PORT_LIFT_REUSE) after spu_rewrites: its spu/zz_native_* files count too
+        spu_rewrites()
+    else:
+        spu_rewrites()
+        lift_restore_times()   # (PORT_LIFT_REUSE) after spu_rewrites: its spu/zz_native_* files count too
+    build = module_build_dir()
+    os.makedirs(build, exist_ok=True)
+    # the engine beside it: a prebuilt one (PORT_ENGINE_EXE) or the one step_engine built elsewhere
+    src = os.path.dirname(os.path.abspath(os.environ["PORT_ENGINE_EXE"])) if os.environ.get("PORT_ENGINE_EXE") else engine_build_dir()
+    if os.path.normcase(os.path.abspath(src)) != os.path.normcase(os.path.abspath(build)):
+        for n in ENGINE_FILES:
+            f = os.path.join(src, n)
+            if os.path.isfile(f):
+                try:
+                    shutil.copy2(f, build)
+                except PermissionError:   # a running exe in that folder holds it open
+                    d = os.path.join(build, n)
+                    if not (os.path.exists(d) and os.path.getsize(d) == os.path.getsize(f)):
+                        raise
+    pgo = os.environ.get("PORT_PGO", "")
+    cmd = [sys.executable, "-I", os.path.join(ROOT, "tools", "build_module.py"), "--port", PORT, "--engine", TK,
+           "--out", os.path.join(build, "module-obj"), "--dll-dir", build,
+           "--jobs", os.environ.get("PORT_JOBS", "8")]
+    if pgo:
+        cmd += ["--pgo", pgo]
+    logf = os.path.join(LOGS, "module%s.log" % (("-" + os.path.basename(os.environ["PORT_BUILD"])) if os.environ.get("PORT_BUILD") else ""))
+    os.makedirs(LOGS, exist_ok=True)
+    log0 = os.path.getsize(logf) if os.path.exists(logf) else 0
+    with open(logf, "a", encoding="utf-8", errors="replace") as lf:
+        lf.write("\n$ " + " ".join(cmd) + "\n")
+        lf.flush()
+        t0 = time.time()
+        p = run_beating(cmd, PORT, lf, None, logf, log0)
+        lf.write(f"[exit {p.returncode} after {time.time() - t0:.1f}s]\n")
+    with open(logf, encoding="utf-8", errors="replace") as lf:
+        lf.seek(log0)
+        for ln in lf:
+            if ln.startswith(("[module]", "build_module:")):
+                print("  " + ln.rstrip())
+    if p.returncode != 0:
+        raise StepError(f"build_module.py exited {p.returncode} (see {logf})")
+    if pgo.startswith("use:"):
+        pgo_mismatch_summary(os.path.join(build, "module-obj", "compile.log"), 0)
+
+
+def step_engine():
+    if os.environ.get("PORT_ENGINE_EXE"):
+        print("  prebuilt engine:", os.environ["PORT_ENGINE_EXE"])
+        return
+    if not IS_WIN:
+        return step_engine_linux()
     clamp_future_times()   # (GitHub #21/#22) before CMake: no input dated after build.ninja
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from vsenv import vs_env, rc_compiler
+    from vsenv import vs_env, rc_compiler, cmake_cache_fits
     env = dict(vs_env(), PS3RECOMP=TK)
     cmake = port_paths.get("cmake")     # tools-cache, config.local.json, or this PC's
     rc = rc_compiler()                  # the portable SDK's rc.exe (None: Visual Studio's, found by CMake)
-    build = os.environ.get("PORT_BUILD") or os.path.join(PORT, "build")   # PORT_BUILD: a separate build tree
+    build = engine_build_dir()
     toolset_check(build)
-    jobs = os.environ.get("PORT_JOBS", "8")   # each lifted TU is ~150k lines: bound the RAM
-    # PORT_PGO=gen | use:<profdata>: clang PGO over every C/C++ TU (lifted PPU/SPU/firmware +
-    # runtime). gen = instrumented build (the port's PS3_PGO_DUMP_AT writes the counters: the
-    # scripted runs end in a kill); train with tools/combat.ps1, llvm-profdata merge, then build
-    # with use:<file>. Unset = the normal build (every flag below then has its old value).
-    pgo = os.environ.get("PORT_PGO", "")
+    cmake_cache_fits(build)   # (GitHub #34: a folder built through a plain-named link from now on)
+    jobs = os.environ.get("PORT_JOBS", "8")
+    # PORT_ENGINE_PGO=gen | use:<profdata>: clang PGO over the engine's TUs (ours, at release; the
+    # player's "Optimise for this PC" is PORT_PGO, the game module's). Unset = the normal build.
+    pgo = os.environ.get("PORT_ENGINE_PGO", "")
     # /GS- (ppu2, 2026-11-08): no stack-cookie checks in the lifted code (147 -> 128 MB, part of city +14%).
     lift_opt = os.environ.get("PORT_LIFT_OPT", "/clang:-O2;/arch:AVX2;/GS-")
     # The lifted SPU modules' extra flags. PORT_SPU_ARCH="/arch:AVX2;-DSPU_FLOAT_RZ_CHECK"
@@ -648,7 +911,20 @@ def step_compile():
         cache = os.path.join(build, "thinlto-cache").replace("\\", "/")
         cache = '"%s"' % cache if " " in cache else cache
         link_rel += " /opt:lldltojobs=%s /lldltocache:%s /lldltocachepolicy:cache_size_bytes=8g" % (jobs, cache)
+    # The C/C++ runtime inside the exe (/MT), so a PC without the Visual C++ 2015-2022 runtime starts the game
+    # (MSVCP140.dll, VCRUNTIME140.dll and VCRUNTIME140_1.dll were needed and are not part of Windows). One runtime
+    # in the process either way: the game module links none (/NODEFAULTLIB, it calls the engine's) and SDL2.dll
+    # has none. glslang must be built the same way (tools/build_deps.py -> deps/glslang-install-mt); a checkout
+    # that only has the older /MD glslang keeps the DLL runtime, and says so (tools/make_slim_assets.py refuses
+    # such an engine for a release).
+    gl_mt = os.path.join(DEPS, "glslang-install-mt", "lib", "cmake", "glslang")
+    static_crt = os.path.isdir(gl_mt) and os.environ.get("PORT_ENGINE_CRT", "static") != "dll"
+    gl_dir = gl_mt if static_crt else os.path.join(DEPS, "glslang-install", "lib", "cmake", "glslang")
+    if not static_crt:
+        print("  note: this engine needs the Visual C++ runtime DLLs (no deps/glslang-install-mt: run "
+              "tools/build_deps.cmd for an engine that needs none)")
     for cmd in ([cmake, "-S", PORT, "-B", build, "-G", "Ninja"] + (["-DCMAKE_RC_COMPILER=" + rc] if rc else []) + [
+                 "-DCMAKE_MSVC_RUNTIME_LIBRARY=" + ("MultiThreaded" if static_crt else "MultiThreadedDLL"),
                  "-DCMAKE_MAKE_PROGRAM=" + port_paths.get("ninja"),
                  "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl",
                  "-DCMAKE_BUILD_TYPE=Release", "-DPS3RECOMP_DIR=" + TK, "-DPython3_EXECUTABLE=" + PY,
@@ -657,7 +933,7 @@ def step_compile():
                  "-DPS3RECOMP_VULKAN_INCLUDE_DIR=" + os.path.join(DEPS, "Vulkan-Headers", "include"),
                  "-DPS3RECOMP_SDL2_INCLUDE_PARENT=" + os.path.join(DEPS, "sdl2-inc"),
                  "-DSDL2_DIR=" + os.path.join(DEPS, "SDL2-2.30.10", "cmake"),
-                 "-Dglslang_DIR=" + os.path.join(DEPS, "glslang-install", "lib", "cmake", "glslang"),
+                 "-Dglslang_DIR=" + gl_dir,
                  # The lifted PPU + firmware TUs: -O2 and AVX2 (FMA3). At the old
                  # -O1/baseline every AltiVec vmaddfp lane was a software fmaf()
                  # call and the main thread was CPU-bound in vector math (2026-11-07).
@@ -676,13 +952,14 @@ def step_compile():
                  # build's flags never linger in the cache of a later normal build.
                  "-DCMAKE_C_FLAGS_RELEASE=" + c_rel, "-DCMAKE_CXX_FLAGS_RELEASE=" + cxx_rel],
                 [cmake, "--build", build, "-j", jobs, "--", "-k", "0"]):
-        logf = os.path.join(LOGS, "compile%s.log" % (("-" + os.path.basename(os.environ["PORT_BUILD"])) if os.environ.get("PORT_BUILD") else ""))
+        logf = os.path.join(LOGS, "compile%s.log" % (("-" + os.path.basename(build)) if os.environ.get("PORT_ENGINE_BUILD") else ""))
         log0 = os.path.getsize(logf) if os.path.exists(logf) else 0
+        os.makedirs(LOGS, exist_ok=True)   # (--only engine in a fresh checkout: no step made it yet)
         with open(logf, "a", encoding="utf-8", errors="replace") as lf:
             lf.write("\n$ " + " ".join(cmd) + "\n")
             lf.flush()
             t0 = time.time()
-            p = subprocess.run(cmd, cwd=PORT, stdout=lf, stderr=subprocess.STDOUT, env=env)
+            p = run_beating(cmd, PORT, lf, env, logf, log0)
             lf.write(f"[exit {p.returncode} after {time.time() - t0:.1f}s]\n")
         if p.returncode != 0:
             raise StepError(f"{cmd[1]} exited {p.returncode} (python -I tools/build_errors.py work/logs/compile.log)")
@@ -695,7 +972,7 @@ def step_compile():
     except PermissionError:   # a running build (e.g. a check exe in this dir) holds it open
         if not (os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(sdl)):
             raise
-    print("  built:", os.path.join(build, "Infamous2Recomp.exe"))
+    print("  engine built:", os.path.join(build, "Infamous2Recomp.exe"))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -783,31 +1060,45 @@ def linux_configure_cmd(build, tools, flags, port=None, tk=None, python=None):
                   "-DCMAKE_C_FLAGS_RELEASE=" + c_rel, "-DCMAKE_CXX_FLAGS_RELEASE=" + cxx_rel]
 
 
-def step_compile_linux():
-    spu_rewrites()
+def step_engine_linux():
     clamp_future_times()
     tools = linux_tools()
     env = dict(os.environ, PS3RECOMP=TK)
-    build = os.environ.get("PORT_BUILD") or os.path.join(PORT, "build")
+    build = engine_build_dir()
     jobs = os.environ.get("PORT_JOBS", "8")
-    pgo = os.environ.get("PORT_PGO", "")
+    pgo = os.environ.get("PORT_ENGINE_PGO", "")
     flags = linux_compile_flags(build, jobs, pgo, os.environ.get("PORT_LIFT_LTO", "0"), tools["profdata"])
-    for cmd in (linux_configure_cmd(build, tools, flags),
+    # REQUIRE_GUEST_PROGRAMS: no glslang = the configure stops (a game built without it draws nothing: #61, #69)
+    for cmd in (linux_configure_cmd(build, tools, flags) + ["-DPS3RECOMP_REQUIRE_GUEST_PROGRAMS=ON"],
                 [tools["cmake"], "--build", build, "-j", jobs, "--", "-k", "0"]):
-        logf = os.path.join(LOGS, "compile%s.log" % (("-" + os.path.basename(os.environ["PORT_BUILD"])) if os.environ.get("PORT_BUILD") else ""))
+        logf = os.path.join(LOGS, "compile%s.log" % (("-" + os.path.basename(build)) if os.environ.get("PORT_ENGINE_BUILD") else ""))
         log0 = os.path.getsize(logf) if os.path.exists(logf) else 0
         os.makedirs(LOGS, exist_ok=True)
         with open(logf, "a", encoding="utf-8", errors="replace") as lf:
             lf.write("\n$ " + " ".join(cmd) + "\n")
             lf.flush()
             t0 = time.time()
-            p = subprocess.run(cmd, cwd=PORT, stdout=lf, stderr=subprocess.STDOUT, env=env)
+            p = run_beating(cmd, PORT, lf, env, logf, log0)
             lf.write(f"[exit {p.returncode} after {time.time() - t0:.1f}s]\n")
         if p.returncode != 0:
+            if cmd[1] == "-S" and linux_log_has(logf, log0, "glslang was not found"):
+                raise StepError("the game's shader translator (glslang) was not found by the build, so the game would "
+                                "show a blank picture. Delete the folders deps/glslang-install-linux and "
+                                "deps/glslang-build-linux and run setup again; if it stops here again, send "
+                                f"{logf} and deps/glslang-build.log")
             raise StepError(f"{cmd[1]} exited {p.returncode} (python -I tools/build_errors.py {logf})")
         if pgo.startswith("use:") and cmd[1] == "--build":
             pgo_mismatch_summary(logf, log0)
-    print("  built:", os.path.join(build, "Infamous2Recomp"))
+    print("  engine built:", os.path.join(build, "Infamous2Recomp"))
+
+
+def linux_log_has(logf, log0, text):
+    try:
+        with open(logf, "rb") as f:
+            f.seek(log0)
+            return text.encode() in f.read()
+    except OSError:
+        return False
 
 
 # The three SPU code bodies libsre's SPURS kernel DMAs into local store (system service,
@@ -910,6 +1201,14 @@ def step_ppu():
     # PS3_TOC_FOLD=0 turn the page map / the folding off in the same exe.
     if fast:
         fast.update({"PPU_ST_PMAP": "1", "PPU_MOVBE": "1", "PPU_TOC_FOLD": "1"})
+    # Track A, lean guest memory (2026-11-16; toolkit tools/ppu_fastpath.py + runtime/memory/vm_guard.c,
+    # work/native/TRACK_A.md): a guest load is one host load (no range test, no gcm poll compare: guard
+    # pages and the live gcm ref word instead), no trampoline drain after calls (the runtime drains on
+    # its way out), indirect calls through the lift's own target table first. Each =0 in the
+    # environment = the old form; PORT_TRACK_A=0 turns all three off. The module tells the engine which
+    # (ppu_lean_mem_register), so one engine runs either lift.
+    if fast and os.environ.get("PORT_TRACK_A", "1") != "0":
+        fast.update({"PPU_LEAN_MEM": "1", "PPU_DRAIN_NONE": "1", "PPU_ICALL_INLINE": "1"})
     run("ppu", [PY, T("ppu_lifter.py"), ELF,
                 "--functions", "out/EBOOT.functions.json", "--hle-stubs", "out/EBOOT.imports.json",
                 "--code-end", "0x742e18", "--max-chunk-lines", "150000",
@@ -966,18 +1265,29 @@ def main():
     if a.start:
         steps = steps[steps.index(a.start):]
     if a.only:
-        steps = [s for s in steps if s in a.only.split(",")]
+        want = a.only.split(",")
+        steps = [s for s in steps if s in want]
+        steps += [s for s in want if s in SUBSTEPS and s not in steps]
     if not REUSE and os.path.isdir(HELD):   # held by a PORT_LIFT_REUSE run that stopped: not this build's
         shutil.rmtree(HELD, ignore_errors=True)
     for s in steps:
         t0 = time.time()
         print(f"[{s}]", flush=True)
+        step_announce(s)
         try:
-            if not lift_skip(s):
+            if s in SUBSTEPS or not lift_skip(s):
                 globals()["step_" + s]()
-                lift_done(s)
+                if s not in SUBSTEPS:
+                    lift_done(s)
         except StepError as e:
             print(f"  FAILED: {e}")
+            if s == "firmware":
+                odd = [m for m in FIRMWARE if os.path.isfile(os.path.join(FW, m + ".prx"))
+                       and sha256(os.path.join(FW, m + ".prx")) != TESTED_FW_PRX_SHA256[m]]
+                if odd:
+                    print(f"  hint: {', '.join(odd)} {'is' if len(odd) == 1 else 'are'} not the PS3 firmware 4.93 module(s) the "
+                          "port is made with. Delete the port's game/dev_flash and work/fw folders and run Setup again: it "
+                          "then gets firmware 4.93 from Sony's servers (RPCS3's firmware is used only when it is 4.93)")
             sys.exit(1)
         print(f"  done in {time.time() - t0:.1f}s", flush=True)
     lift_restore_times()   # (lift steps run without the compile step)

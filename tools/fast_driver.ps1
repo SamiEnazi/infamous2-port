@@ -25,6 +25,10 @@
 #   say   <text>                                  speak it (and print it)
 #   threads <name> <seconds>                      per-thread CPU % over the next <seconds> -> threads_<name>.tsv
 #   fail  <text>                                  give up: stop.flag + reason
+#   key   <name> [hold_ms]                        a key into the game window (WM_KEYDOWN / WM_KEYUP, as a keyboard's:
+#                                                 F1..F12, Esc, Enter, Space, Tab, Up, Down, Left, Right, Delete, A-Z, 0-9)
+#   winsize <w> <h>                               the window's client area to w x h (the game re-makes its swapchain)
+#   click <x> <y>                                 a left click at x, y (1280x720 units of the client area)
 # A step that times out writes "TIMEOUT" and ends the run (driver.tsv says where).
 param(
     [Parameter(Mandatory = $true)][string]$Rec,
@@ -124,6 +128,54 @@ function ScreenDiff([string]$ref, [int[]]$r) {
     $d / 576
 }
 function Region([string]$s) { , ([int[]]($s -split ',')) }
+# [menu-e] keys and the window's size, posted to the game's window (no focus needed: SDL reads WM_KEYDOWN)
+if (-not ('DrvKey' -as [type])) {
+    Add-Type -Namespace '' -Name DrvKey -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool PostMessage(System.IntPtr h, uint m, System.IntPtr w, System.IntPtr l);
+[DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint type);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(System.IntPtr h, System.IntPtr after, int x, int y, int cx, int cy, uint flags);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(System.IntPtr h, out RECT r);
+[DllImport("user32.dll")] public static extern bool GetClientRect(System.IntPtr h, out RECT r);
+public struct RECT { public int L, T, R, B; }
+'@
+}
+function GameWindow { $gp.Refresh(); $gp.MainWindowHandle }
+function KeyPress([string]$name, [int]$hold) {
+    $n = $name.ToUpper()
+    $vk = switch ($n) {
+        'ESC' { 0x1B } 'ESCAPE' { 0x1B } 'ENTER' { 0x0D } 'RETURN' { 0x0D } 'SPACE' { 0x20 } 'TAB' { 0x09 }
+        'UP' { 0x26 } 'DOWN' { 0x28 } 'LEFT' { 0x25 } 'RIGHT' { 0x27 } 'DELETE' { 0x2E } 'BACKSPACE' { 0x08 }
+        default { if ($n -match '^F(\d+)$') { 0x6F + [int]$Matches[1] } else { [int][char]$n[0] } }
+    }
+    $sc = [DrvKey]::MapVirtualKey([uint32]$vk, 0)
+    $ext = if ($vk -in 0x25, 0x26, 0x27, 0x28, 0x2E) { 0x01000000 } else { 0 }
+    $down = [long](1 -bor ([long]$sc -shl 16) -bor $ext)
+    $up = $down -bor 0xC0000000L
+    $h = GameWindow
+    [void][DrvKey]::PostMessage($h, 0x0100, [IntPtr]$vk, [IntPtr]$down)
+    Start-Sleep -Milliseconds $hold
+    [void][DrvKey]::PostMessage($h, 0x0101, [IntPtr]$vk, [IntPtr]$up)
+}
+function MouseClick([double]$x, [double]$y) {   # x, y in 1280x720 units of the client area
+    $h = GameWindow
+    $cr = New-Object DrvKey+RECT; [void][DrvKey]::GetClientRect($h, [ref]$cr)
+    $px = [int]($x * ($cr.R - $cr.L) / 1280.0); $py = [int]($y * ($cr.B - $cr.T) / 720.0)
+    $lp = [IntPtr][long](($py -shl 16) -bor ($px -band 0xFFFF))
+    [void][DrvKey]::PostMessage($h, 0x0200, [IntPtr]::Zero, $lp)   # WM_MOUSEMOVE
+    Start-Sleep -Milliseconds 150
+    [void][DrvKey]::PostMessage($h, 0x0200, [IntPtr]::Zero, $lp)
+    Start-Sleep -Milliseconds 100
+    [void][DrvKey]::PostMessage($h, 0x0201, [IntPtr]1, $lp)        # WM_LBUTTONDOWN (MK_LBUTTON)
+    Start-Sleep -Milliseconds 90
+    [void][DrvKey]::PostMessage($h, 0x0202, [IntPtr]::Zero, $lp)   # WM_LBUTTONUP
+}
+function WinSize([int]$w, [int]$hh) {
+    $h = GameWindow
+    $wr = New-Object DrvKey+RECT; $cr = New-Object DrvKey+RECT
+    [void][DrvKey]::GetWindowRect($h, [ref]$wr); [void][DrvKey]::GetClientRect($h, [ref]$cr)
+    $bw = ($wr.R - $wr.L) - ($cr.R - $cr.L); $bh = ($wr.B - $wr.T) - ($cr.B - $cr.T)
+    [void][DrvKey]::SetWindowPos($h, [IntPtr]::Zero, 0, 0, $w + $bw, $hh + $bh, 0x0016)   # NOMOVE|NOZORDER|NOACTIVATE
+}
 $stepsTxt = Get-Content $Steps | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") }
 Note "start" "steps=$Steps"
 foreach ($raw in $stepsTxt) {
@@ -224,6 +276,9 @@ foreach ($raw in $stepsTxt) {
             Write-Host $rest; Note "say" $rest
         }
         "fail" { Stop "fail: $rest"; exit 3 }
+        "key" { $a = $rest -split '\s+'; $hold = if ($a.Count -gt 1) { [int]$a[1] } else { 60 }; KeyPress $a[0] $hold; Note "key" $rest }
+        "winsize" { $a = $rest -split '\s+'; WinSize ([int]$a[0]) ([int]$a[1]); Note "winsize" $rest }
+        "click" { $a = $rest -split '\s+'; MouseClick ([double]$a[0]) ([double]$a[1]); Note "click" $rest }
         default { Note "error" "unknown step: $s" }
     }
 }

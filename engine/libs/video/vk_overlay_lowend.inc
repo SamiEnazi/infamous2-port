@@ -92,10 +92,14 @@ extern "C" int vk_overlay_lowend_auto(unsigned vram_mb, int integrated, const ch
 static void lowend_attach(void)
 {
     if (s_le_auto != 1 || s_le_changed <= 0) return;
-    char b[160];
-    if (s_le_integrated) snprintf(b, sizeof b, "Integrated graphics: lighter settings (F2 > Graphics > Low-end PC)");
-    else snprintf(b, sizeof b, "%.1f GB graphics card: lighter settings (F2 > Graphics > Low-end PC)", (double)s_le_mb / 1024.0);
-    notice_for(b, 8.0);
+    /* what it means for the picture, and where to change it (GitHub #73: "the game uses 1920x1080", the
+     * resolution row not found) */
+    char b[200], what[40];
+    if (vk_postfx_render_scale() <= 1.01f) snprintf(what, sizeof what, "lighter settings, 720p picture");
+    else snprintf(what, sizeof what, "lighter settings");
+    if (s_le_integrated) snprintf(b, sizeof b, "Integrated graphics: %s (F2 > Graphics to change)", what);
+    else snprintf(b, sizeof b, "%.1f GB graphics card: %s (F2 > Graphics to change)", (double)s_le_mb / 1024.0, what);
+    notice_for(b, 10.0);
 }
 
 /* 1 = every setting has the low-end value, 2 = the standard one, 0 = neither */
@@ -129,39 +133,3 @@ static void lowend_preset(bool low)
 }
 
 extern "C" int rsx_vk_vram_now(unsigned* use_mb, unsigned* budget_mb, unsigned* card_mb);
-
-static void lowend_section(void)
-{
-    section("Presets");
-    const int st = lowend_state();
-    if (ImGui::Button("Low-end PC")) lowend_preset(true);
-    ImGui::SameLine();
-    if (ImGui::Button("Standard")) lowend_preset(false);
-    ImGui::SameLine();
-    ImGui::TextColored(kGrey, "now: %s", st == 1 ? "Low-end PC" : st == 2 ? "Standard" : "your own mix");
-    hint("Low-end PC: 720p, fire and smoke at the PS3's size, the PS3's ambient occlusion and shadow edges, and a "
-         "texture cache that lets go of textures not seen for a while. Less GPU time and video memory: for 4 GB "
-         "graphics cards, older laptops and integrated graphics. Standard: the port's usual look (1080p, full-size "
-         "effects and ambient occlusion, soft shadows). Each button sets these on this page and the Lighting and "
-         "Effects pages at once; you can still change any of them. The internal resolution changes at the next start. "
-         "On a slow processor a 30 fps cap (Display page) also keeps the frame rate even.");
-    static unsigned use, bud, card;            /* the driver's numbers, asked twice a second at most */
-    static int have;
-    static double asked = -1.0;
-    const double t = now_s();
-    if (asked < 0.0 || t - asked >= 0.5) { asked = t; have = rsx_vk_vram_now(&use, &bud, &card); }
-    char b[320];
-    if (card) {
-        int k = snprintf(b, sizeof b, "This PC: %s, %.1f GB of video memory%s.", s_gpu_name[0] ? s_gpu_name : "graphics card",
-                         (double)card / 1024.0, s_le_integrated ? " (integrated: shared with the system)" : "");
-        if (s_le_auto == 1 && s_le_changed > 0 && k > 0 && k < (int)sizeof b)
-            k += snprintf(b + k, sizeof b - (size_t)k, " %s, so the game started with the Low-end PC values for the "
-                          "settings you had not set yourself.",
-                          s_le_integrated ? "Integrated graphics" : card <= LOWEND_VRAM_MB ? "That is little"
-                                                                   : "PS3RECOMP_LOWEND=1 asks for it");
-        if (have && k > 0 && k < (int)sizeof b)
-            snprintf(b + k, sizeof b - (size_t)k, " In use now: %.1f GB of the %.1f GB %s lets the game have.",
-                     (double)use / 1024.0, (double)bud / 1024.0, kHostOs);
-        hint(b);
-    }
-}

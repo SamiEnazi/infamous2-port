@@ -352,6 +352,31 @@ int ps3_aspect_game(unsigned* w, unsigned* h)
     if (h) *h = s_asp_gh;
     return 1;
 }
+/* [menu-e] the compare line (vk_postfx.h): window and frame fractions, x 1e6 */
+static volatile int s_cmp_win1e6, s_cmp_frame1e6;
+void vk_postfx_set_compare(float f)
+{
+    const int v = f > 0.0f && f < 1.0f ? (int)(f * 1e6f) : 0;
+    if (v != PFX_LOAD(s_cmp_win1e6)) {
+        static int said;
+        if (!said || !v) { said = v != 0; PFX_LOG("compare line %s\n", v ? "on (left of it: no post passes, no tone)" : "off"); }
+    }
+    PFX_STORE(s_cmp_win1e6, v);
+}
+float vk_postfx_compare(void) { return (float)PFX_LOAD(s_cmp_win1e6) / 1e6f; }
+float vk_postfx_compare_frame(int x0, int x1, int win_w)
+{
+    const int v = PFX_LOAD(s_cmp_win1e6);
+    float f = 0.0f;
+    if (v && x1 > x0 && win_w > 0) {
+        f = ((float)v / 1e6f * (float)win_w - (float)x0) / (float)(x1 - x0);
+        if (f <= 0.0f) f = 0.0f;            /* the line left of the picture: all "yours" */
+        else if (f > 1.0f) f = 1.0f;        /* right of it: all PS3 */
+    }
+    PFX_STORE(s_cmp_frame1e6, (int)(f * 1e6f));
+    return f;
+}
+float vk_postfx_compare_frac(void) { return (float)PFX_LOAD(s_cmp_frame1e6) / 1e6f; }
 void vk_postfx_aspect_active(float k) { PFX_STORE(s_asp_k1000, (int)(k * 1000.0f + 0.5f)); }
 float vk_postfx_aspect_k(void) { return (float)PFX_LOAD(s_asp_k1000) / 1000.0f; }
 void vk_postfx_set_upscale(int mode)
@@ -502,7 +527,10 @@ static const char kPfxSmaaBlendFS[] =
     "layout(location = 0) in vec2 v_uv;\n"
     "layout(location = 1) in vec4 v_off;\n"
     "layout(location = 0) out vec4 o;\n"
-    "void main() { o = SMAANeighborhoodBlendingPS(v_uv, v_off, colorTex, blendTex); }\n";
+    "void main() {\n"
+    "    if (v_uv.x < pc.p.w) { o = textureLod(colorTex, v_uv, 0.0); return; }   /* [menu-e] compare: the PS3 side */\n"
+    "    o = SMAANeighborhoodBlendingPS(v_uv, v_off, colorTex, blendTex);\n"
+    "}\n";
 
 /* FXAA 3.11: rt = (1/w, 1/h, w, h). The quality defaults of FXAA3_11.h's
  * integration notes: subpix 0.75, edge threshold 0.166, min 0.0833. */
@@ -518,6 +546,7 @@ static const char kPfxFxaaFS[] =
     "layout(location = 0) out vec4 o;\n"
     "void main() {\n"
     "    vec2 uv = gl_FragCoord.xy * pc.rt.xy;\n"
+    "    if (uv.x < pc.p.w) { o = vec4(textureLod(colorTex, uv, 0.0).rgb, 1.0); return; }   /* [menu-e] compare */\n"
     "    o = FxaaPixelShader(uv, vec4(0.0), colorTex, colorTex, colorTex, pc.rt.xy,\n"
     "                        vec4(0.0), vec4(0.0), vec4(0.0), 0.75, 0.166, 0.0833,\n"
     "                        0.0, 0.0, 0.0, vec4(0.0));\n"
@@ -538,6 +567,10 @@ static const char kPfxCasMid[] =
 #define VK_PFX_CAS_MAIN(noscale) \
     "layout(location = 0) out vec4 o;\n" \
     "void main() {\n" \
+    "    if (gl_FragCoord.x * pc.rt.x < pc.p.w) {   /* [menu-e] compare: the PS3 side, unsharpened (bilinear when scaling) */\n" \
+    "        vec2 q = gl_FragCoord.xy * pc.p.yz * pc.rt.xy - 0.5; ASU2 i = ASU2(floor(q)); vec2 f = fract(q);\n" \
+    "        o = vec4(mix(mix(CasLoad(i), CasLoad(i + ASU2(1, 0)), f.x), mix(CasLoad(i + ASU2(0, 1)), CasLoad(i + ASU2(1, 1)), f.x), f.y), 1.0);\n" \
+    "        return; }\n" \
     "    AU4 c0, c1;\n" \
     "    CasSetup(c0, c1, pc.p.x, pc.p.y, pc.p.z, pc.rt.z, pc.rt.w);\n" \
     "    AF3 c;\n" \
@@ -563,6 +596,8 @@ static const char kPfxEasuFS[] =
     "AF4 FsrEasuBF(AF2 p) { return textureGather(srcTex, p, 2); }\n"
     "layout(location = 0) out vec4 o;\n"
     "void main() {\n"
+    "    if (gl_FragCoord.x * pc.rt.x < pc.p.w) {   /* [menu-e] compare: the PS3 side, a bilinear stretch */\n"
+    "        o = vec4(textureLod(srcTex, gl_FragCoord.xy * pc.rt.xy, 0.0).rgb, 1.0); return; }\n"
     "    AU4 c0, c1, c2, c3;\n"
     "    FsrEasuCon(c0, c1, c2, c3, pc.p.y, pc.p.z, pc.p.y, pc.p.z, pc.rt.z, pc.rt.w);\n"
     "    AF3 c;\n"
@@ -577,6 +612,7 @@ static const char kPfxRcasFS[] =
     "void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}\n"
     "layout(location = 0) out vec4 o;\n"
     "void main() {\n"
+    "    if (gl_FragCoord.x * pc.rt.x < pc.p.w) { o = texelFetch(srcTex, ivec2(gl_FragCoord.xy), 0); return; }   /* [menu-e] */\n"
     "    AU4 con;\n"
     "    FsrRcasCon(con, pc.p.x);\n"
     "    AF3 c;\n"
@@ -1170,7 +1206,9 @@ int vk_postfx_apply(VkCommandBuffer cmd, VkImage src, VkImageView src_view, uint
         /* bottom of pipe: once the frame's own work is done, so the pair times the passes */
         qvkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, P.qp, 2u * P.qframe);
     }
-    pfx_pc pc = { { 1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h }, { 0.0f, 0.0f, 0.0f, 0.0f } };
+    /* [menu-e] p.w = the compare line (frame fraction, 0 = off): the passes leave the left of it alone */
+    const float cmp = vk_postfx_compare_frac();
+    pfx_pc pc = { { 1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h }, { 0.0f, 0.0f, 0.0f, cmp } };
     VkImage cur = src;
     int from_aa = 0;
     if (aa == VK_POSTFX_AA_SMAA) {
@@ -1188,7 +1226,7 @@ int vk_postfx_apply(VkCommandBuffer cmd, VkImage src, VkImageView src_view, uint
     }
     uint32_t ow = w, oh = h;
     const pfx_pc wc = { { 1.0f / (float)dst_w, 1.0f / (float)dst_h, (float)dst_w, (float)dst_h },
-                        { sharp, (float)w, (float)h, 0.0f } };
+                        { sharp, (float)w, (float)h, cmp } };
     if (smaller) {                              /* [res] area downsample, then CAS at the window's size */
         uint32_t nx = (w + dst_w - 1u) / dst_w, ny = (h + dst_h - 1u) / dst_h;
         if (nx > 8u) nx = 8u;
@@ -1198,7 +1236,7 @@ int vk_postfx_apply(VkCommandBuffer cmd, VkImage src, VkImageView src_view, uint
         pfx_pass(cmd, PS_DOWN, P.rp_rgba8, cas ? &P.down : &P.out, P.ds[from_aa ? DS_DOWN_AA : DS_DOWN_SRC], &dc);
         if (cas) {
             const pfx_pc cp = { { 1.0f / (float)dst_w, 1.0f / (float)dst_h, (float)dst_w, (float)dst_h },
-                                { sharp, (float)dst_w, (float)dst_h, 0.0f } };
+                                { sharp, (float)dst_w, (float)dst_h, cmp } };
             pfx_pass(cmd, PS_CAS, P.rp_rgba8, &P.out, P.ds[DS_CAS_DOWN], &cp);
         }
         cur = P.out.img; ow = dst_w; oh = dst_h;
@@ -1215,7 +1253,7 @@ int vk_postfx_apply(VkCommandBuffer cmd, VkImage src, VkImageView src_view, uint
         pfx_pass(cmd, PS_CAS_SCALE, P.rp_rgba8, &P.out, P.ds[from_aa ? DS_CAS_AA : DS_CAS_SRC], &wc);
         cur = P.out.img; ow = dst_w; oh = dst_h;
     } else if (cas) {
-        pfx_pc cp = { { 1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h }, { sharp, (float)w, (float)h, 0.0f } };
+        pfx_pc cp = { { 1.0f / (float)w, 1.0f / (float)h, (float)w, (float)h }, { sharp, (float)w, (float)h, cmp } };
         pfx_pass(cmd, PS_CAS, P.rp_rgba8, &P.out, P.ds[from_aa ? DS_CAS_AA : DS_CAS_SRC], &cp);
         cur = P.out.img;
     }

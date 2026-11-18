@@ -1,0 +1,142 @@
+# F2 > About (2026-11-17): the last icon of the rail, reached with Q (L1) from Display, wrapping. The run's
+# launcher stand-in gives the game PS3_UPDATE_DIR (a status.txt with the version; supporters.json is put there
+# and changed while the game runs: the page follows within 3 s) and PS3_SUPPORTERS_FILE (the shipped copy).
+#   shipped copy only -> a fetched list -> a hostile file (control characters, %s %n, 600 names, an http link)
+# Enter on "Project page" opens the browser. Keys are posted to the window; shots are the game's own image.
+# Run: tools\fast.ps1 -Tag about1 -Steps tools\menu_about.steps -NoPictureCheck -Extra "PS3_UPDATE_DIR=...;PS3_SUPPORTERS_FILE=..."
+#! seconds 300
+#! savefrom work\saves\first-save\gamedata
+#! fastmovies 1
+wait v_02_city_intro 150
+sleep 25
+anchor
+key F2
+sleep 1.2
+key Q
+sleep 1.2
+shot about_shipped
+key Down
+sleep 0.4
+key Down
+sleep 0.6
+shot about_page
+key Enter
+sleep 1.5
+key Down
+sleep 0.8
+shot about_support
+sleep 8
+shot about_list
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.3
+key Down
+sleep 0.8
+shot about_list_scrolled
+click 300 330
+sleep 0.8
+shot about_list_mouse
+sleep 8
+shot about_hostile
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+key Up
+sleep 0.3
+sleep 0.5
+shot about_hostile_top
+key E
+sleep 1.0
+shot about_wrap_display
+key Q
+sleep 1.0
+key Q
+sleep 1.0
+shot about_cheats_before
+key Esc
+sleep 1.0
+close

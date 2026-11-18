@@ -36,6 +36,13 @@ void rsx_split_act(u32 kind, u32 a, u32 b, u32 c);
 /* Before the walker reads a label (semaphore acquire): every queued action
  * that may write one has run. */
 void rsx_split_wait_labels(void);
+/* (track C) ...the label at guest address `la` (PS3_RSX_LBLWAIT=1: only as far as the
+ * last queued action that writes it, or one whose target is unknown; 0 = as above). */
+void rsx_split_wait_label(u32 la);
+/* (track C) PS3_RSX_WALKON: 1 = the exec thread has run everything queued;
+ * rsx_split_publish = make everything queued visible to it now. */
+int  rsx_split_idle(void);
+void rsx_split_publish(void);
 /* Everything queued has run (the end of a drain). */
 void rsx_split_sync(void);
 

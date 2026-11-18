@@ -36,3 +36,17 @@
 00093B34   # [fov]   mode 0x00938ADC (the aim camera 0x00098A00 has its slot above)
 0008BEB4   # [fov] camera mode starts (vtable slot 2; r3 the mode, r4 the camera taken over): mode 0x00938DBC
 00099B68   # [fov]   the aim camera's start (keeps C+0x29C at A+0x25C)
+# [jobs] the native job runner (engine/libs/spurs/wws_runner.c, PS3_NATIVE_JOBS; work/native/B1_CONTRACT.md)
+0038AC78   # [jobs] ring_buffer_flush(r3 manager): cellSpursReadyCountStore(spurs, wid, count) -- the publish point
+0038B43C   # [jobs] token wait(r3 manager, r4 -> token {pool slot, seq, u16 index}): spins until done, then byte0 = 0xFF
+0038ABF8   # [jobs] token test(r3 manager, r4 -> token): 1 = done (or an older generation); never writes the token
+0038AA14   # [jobs] array wait(r3 manager, r4 array 0/1): spins until 0x54CE30 says the array is drained
+0038AAB8   # [jobs] arena wait(r3 manager, r4 -> token): token done, and the other array drained if the token is current
+0038BA78   # [jobs] reset(r3 manager): 38AA14 on both arrays, then the descriptor arena back to empty
+0029A8EC   # [jobs] the completion drain: finished nodes of the pending list run their callbacks (0x38ABF8 per node)
+# [dlogic] Track D (engine/libs/game/inf2_dlogic.c, PS3_D_*; work/native/TRACK_D.md): the game's own main-thread logic, natively
+0032E030   # [dlogic] the world tick (r3 world, r4 1 = the full tick): entity lists' parent-before-child order + the tick loop
+006AB340   # [dlogic] array_copy_resize(r3 dst array, r4 src array): the TICK check reads the game's order at its call from 0x32E5C0
+00629138   # [dlogic] qsort(r3 base, r4 n, r5 size, r6 comparator descriptor): the draw-item sort (comparator 0x000CD174)
+00626900   # [dlogic] memcpy(r3 dst, r4 src, r5 n) -> the engine's ppu_native_memcpy (declines run the body)
+00630538   # [dlogic] memset(r3 dst, r4 byte, r5 n) -> ppu_native_memset

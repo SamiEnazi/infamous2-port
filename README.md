@@ -1,402 +1,268 @@
 <div align="center">
 
-![inFAMOUS 2 native PC port: native 1080p up to 4K, 2x the fps of RPCS3, any controller, cheats menu, enhanced lighting, HD fire and smoke, save manager](docs/social-preview.png)
+![inFAMOUS 2 native PC port for Windows and Linux: 3.4x RPCS3 at the same spot, no RPCS3 needed](docs/social-preview.png)
 
-# ⚡ inFAMOUS 2: native PC port
+# inFAMOUS 2: native PC port
 
 **Your own PS3 copy of inFAMOUS 2, recompiled into a real PC program for Windows and Linux.**<br>
-No emulator while you play.
+No emulator while you play, and no emulator to install it.
 
 [![Latest release](https://img.shields.io/github/v/release/SamiEnazi/infamous2-port?label=latest&color=f2b200)](../../releases/latest)
-[![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)](#-what-you-need)
-[![Linux and Steam Deck](https://img.shields.io/badge/Linux-Steam%20Deck-FCC624?logo=linux&logoColor=black)](#-linux-and-steam-deck)
-[![Renderer: Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C?logo=vulkan&logoColor=white)](#-how-it-works)
-[![Native 1080p, up to 4K](https://img.shields.io/badge/native-1080p%20%E2%80%A2%20up%20to%204K-6250d6)](#%EF%B8%8F-native-1080p-and-up)
-[![2.3x the frame rate of RPCS3](https://img.shields.io/badge/vs%20RPCS3-2.3%C3%97%20the%20fps-2a78d6)](#-performance-native-vs-rpcs3)
-[![Any controller](https://img.shields.io/badge/controllers-plug%20%26%20play-1baf7a?logo=steamdeck&logoColor=white)](#-full-controller-support)
-[![Status: released](https://img.shields.io/badge/status-released-1baf7a)](#-status)
+[![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)](#what-you-need)
+[![Linux and Steam Deck](https://img.shields.io/badge/Linux-Steam%20Deck-FCC624?logo=linux&logoColor=black)](#linux-and-steam-deck)
+[![Renderer: Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C?logo=vulkan&logoColor=white)](#how-it-works)
+[![Native 1080p, up to 4K](https://img.shields.io/badge/native-1080p%20%E2%80%A2%20up%20to%204K-6250d6)](#what-you-get)
+[![3.4x the frame rate of RPCS3](https://img.shields.io/badge/vs%20RPCS3-3.4%C3%97%20the%20fps-2a78d6)](#performance)
+[![Any controller](https://img.shields.io/badge/controllers-plug%20%26%20play-1baf7a?logo=steamdeck&logoColor=white)](#what-you-get)
 [![License: MIT](https://img.shields.io/badge/license-MIT-1baf7a)](LICENSE)
-[![Made with Claude Code](https://img.shields.io/badge/made%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](#-made-with-claude-code)
+[![Made with Claude Code](https://img.shields.io/badge/made%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](#made-with-claude-code)
 [![Visitors](https://komarev.com/ghpvc/?username=SamiEnazi-infamous2-port&label=visitors&color=3fa9ff&style=flat)](https://github.com/SamiEnazi/infamous2-port)
 
 <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
 
 </div>
 
-> ▶️ **How to play:** you need your own PS3 copy of inFAMOUS 2 (the Europe or US disc with the 1.04 update,
-> or the digital version 01.03) set up in [RPCS3](https://rpcs3.net) with the PS3 firmware. Download
-> **Setup.exe** from the [latest release](../../releases/latest), run it and press **Install**: it builds the
-> game from your copy once (20–60 minutes), then **Play**. Details: [What you need](#-what-you-need) ·
-> [Install](#-install). On **Linux** and the **Steam Deck**: [Linux and Steam Deck](#-linux-and-steam-deck).
+## What this is
 
-## 🆕 What's new
+Setup translates the game's PS3 code into PC code **on your machine**, from your own copy, and compiles it. The
+game then runs directly on your CPU, with its graphics drawn through Vulkan: native 1080p up to 4K, any
+controller or keyboard and mouse, an in-game settings menu, mods, cheats, a save manager and trophies.
 
-**v0.5.7**
-- 🐧 **Linux:** installing from a launcher (RecompLauncher and others) no longer stops with "unknown option --prepare" ([#44](../../issues/44)). Nothing changes in the game itself.
+> **No game content is included, and none is downloaded.** You need your own copy of the game. Builds of the
+> game (the `.exe`) are never shared, because they contain the game's code. Each player builds their own.
 
-**v0.5.6**
-- 🔴 **AMD Radeon RX 7000 / 780M:** a new fix for the flickering black spots on faces in cutscenes ([#27](../../issues/27)): on AMD cards the game's shaders now handle invalid numbers (NaN) the way the PS3 does. Other graphics cards are unchanged. To turn it off, add `PS3RECOMP_AMD_NAN_FIX=0` to `settings.ini`.
+## Install in 3 steps
 
-**v0.5.5**
-- 🌃 **Shadowed streets no longer turn pitch black after a long session.**
-- 🔴 **AMD Radeon RX 7000 / 780M:** a fix for the black spots on faces in cutscenes ([#27](../../issues/27)). To
-  turn it off, add `RSX_FP_OWNPX=0` to `settings.ini`.
+1. Download **`Setup.exe`** from the [latest release](../../releases/latest) and put it in a folder on a local
+   drive, for example `C:\Games\inFAMOUS2`.
+2. Run it and pick **your game**: its folder, a disc image (`.iso`) or a PSN package (`.pkg`). Use the button or
+   drop it on the window. Setup says which game it is before anything is downloaded.
+3. Press **Install**, wait, press **Play**.
 
-**v0.5.4**
-- 🧊 **Far fewer freezes the first time you play:** new graphics shaders are now built in the background instead
-  of stopping the game. In first-session tests, freezes over 50 ms dropped from 13–25 per scene to one (the first
-  frame after loading). While a shader is being built, the last picture can stay on screen for a moment; the game,
-  sound and controls keep running.
+That's all. No RPCS3, no Git, no Python, no Visual Studio, no admin rights, and nothing is installed into Windows.
+Setup downloads about 85 MB from GitHub (the port and its own tools) and 433 MB from Sony's servers (the game's
+1.04 update and the PS3 system software, the same files a PS3 downloads), copies your game into the port's folder
+and builds it once. On the test PC the whole install took 12 to 15 minutes.
 
-**v0.5.3**
-- 🎥 **Field of view slider:** F2 → Display → Camera → *Field of view*, 70–130% of the game's. Aiming, the mouse
-  and widescreen stay right, and cutscenes keep their framing.
-- 🌫️ **Depth of field setting:** F2 → Graphics → Game effects → *Depth of field*: On (the PS3 look), Off in
-  gameplay (cutscenes keep their focus effects), or Off everywhere.
-- 🖥️ **Ultrawide:** at 21:9 and 32:9 the red "hurt" overlay now covers the whole screen, not just the middle.
-- ⚡ **Faster again on 4–6 core CPUs:** the heaviest view at the cathedral spire runs about 14% faster on 4 cores
-  than in v0.5.2, with smoother slow frames (27 → 20 ms).
-- 🎮 **Steam Deck:** confirmed working by a player ([#24](../../issues/24)).
+![Setup: pick your game, one progress bar, then Play](docs/setup.png)
 
-**v0.5.2**
-- ⚡ **Faster on every PC:** native versions of the game's heaviest SPU jobs (+13–19% on 4-core CPUs, up to +26%
-  on fast ones), six job workers on CPUs with 10 or more cores, and less wasted waiting on 4–6 core CPUs.
-- 🚀 **Optimise for this PC:** Setup can train the build on your own PC for a few minutes, then build a faster game
-  (+5–11% more). It's a checkbox in Setup, on by default; it adds 10–25 minutes to the first install.
-- 🎮 **Steam, Playnite and other launchers:** add the game's own `Infamous2Recomp.exe`; Steam Input and the Steam
-  overlay work ([#29](../../issues/29)). [More](#-playing)
-- 🖱️ **Mouse:** "look up" in the opening tutorial works with the direct mouse camera ([#27](../../issues/27)).
-- 📁 Setup accepts game folders with `[ ]` in their name ([#19](../../issues/19)), and the Turkey disc (BCES01229) is tested.
+Linux and the Steam Deck: [see below](#linux-and-steam-deck). More detail on copies and keys: [FAQ](#faq).
 
-**v0.5.1**
-- ⚡ **Black lightning works:** F2 → Cheats → *Black lightning* now turns Cole's bolts black. Before, it was on but
-  changed nothing.
-- 📁 **Renaming or moving the port's folder is fine:** the game finds your game folder again instead of showing a
-  black screen after the intro logos ([#13](../../issues/13)).
+## What's new in v0.6.2
 
-**v0.5.0**
-- 🔄 **Updates from inside the game:** a notice says when a new version is out, and **F2 → Update** installs it.
-  Later updates rebuild only what changed, so they take minutes. [More](#-updates)
-- 🐧 **Linux and Steam Deck:** builds and runs natively: unzip, run `./setup.sh`. [More](#-linux-and-steam-deck)
-- 🏆 **Trophies in Playnite and RecompLauncher:** the port writes its trophies the way RPCS3 does, and reports
-  them to Recomp Achievements. [More](#-trophies-in-playnite-and-recomplauncher)
-- ✨ **Glow at high resolutions fixed:** no more blocky or doubled glow around lightning and lamps above 720p
-  ([#12](../../issues/12)).
-- 🎥 **No more stutter at cutscene cuts and loading:** the graphics card's drawing programs are made in the
-  background and prepared ahead at the title screen.
-- 🗺️ **Minimap icons and world objects:** the map's icons show again, and objects no longer pop in and out
-  as the camera turns ([#7](../../issues/7)).
-- 🎮 **The right button pictures:** the game shows Xbox or keyboard prompts when you play with those
-  ([#10](../../issues/10)).
-- 💾 **The "save game error" of the digital (PSN) version is fixed.**
-- 📦 **One repository:** the engine and the port base are folders of this repository now, so Setup downloads one
-  thing instead of three.
+A stability update.
+
+- **Windows: no Visual C++ runtime needed.** On a PC without it the game did not start ("MSVCP140.dll was not
+  found"). The game now carries what it needs.
+- **Linux: the game's window opens on Wayland** ([#54](../../issues/54), [#44](../../issues/44)); Setup's folder
+  question no longer becomes the folder; and Setup stops, and says what to do, when the game would be built
+  without its shader translator and draw nothing ([#61](../../issues/61), [#69](../../issues/69)).
+- **Direct mouse: a fast flick turns the camera 1:1** ([#59](../../issues/59)): the whole turn at once, nothing
+  after the mouse stops. And the **Alt keys can be bound** ([#68](../../issues/68)).
+- **Low-end PCs:** the start notice names the 720p picture it chose ([#73](../../issues/73)).
+
+## What's new in v0.6.1
+
+- **Windows 10: Setup installs again.** v0.6.0 stopped on Windows 10 with *"unpacking llvm-22.1.8-slim-win-x64.7z
+  failed: tar.exe: LZMA codec is unsupported"* ([#62](../../issues/62), [#70](../../issues/70)): it used Windows'
+  own tar.exe, and only Windows 11's can read that file. Setup now unpacks its compiler with its own Python and
+  needs nothing from Windows for it. If v0.6.0 stopped there for you: get this `Setup.exe` and run it in the
+  same folder, or just press **Try again**.
+- **DLC is picked up** ([#56](../../issues/56), [#48](../../issues/48)): Setup copies your DLC's unlock files
+  from RPCS3 when it has them, and files you put in the port's `dlc` folder are used at the next start
+  ([FAQ](#faq)).
+
+## What's new in v0.6.0
+
+**Install**
+- **One small Setup, one pick.** About 85 MB from GitHub instead of 1.3 GB of build tools, and no Microsoft
+  license to accept.
+- **No RPCS3 needed.** The update and firmware come from Sony's servers.
+- **PSN copies and encrypted disc images are supported,** new in this version: a PSN copy with your `.rap`
+  license, an encrypted disc image with its disc key file.
+- **A progress display that always moves:** each long step says in plain words what it is, how far it is and
+  about how many minutes are left.
+- **Fully portable.** Your game is copied into the port's folder (about 9 GB), and settings, saves, mods and the
+  shader cache live there too. Copy the folder to another drive or PC and it plays.
+- **Any folder name works:** `&`, `%`, `!`, `'`, `( )`, `[ ]`, other alphabets, very long paths
+  ([#34](../../issues/34), [#19](../../issues/19), [#41](../../issues/41)).
+
+**In the game**
+- **A new F2 menu** over the live game: [see below](#the-f2-menu).
+- **Sharper shadows:** the sun's shadows are drawn at twice the PS3's resolution by default, with a 4x option.
+- **MSAA 2x / 4x** as an option. Off by default: it costs a lot of GPU time (4x: about 40% of the frame rate at
+  1080p on the test PC).
+- **Mesh trimming is off by default:** whole meshes are drawn, so nothing small goes missing.
+- **Faster, most of all on small CPUs:** [Performance](#performance).
+
+**Linux**
+- `./setup.sh` now works on distributions that keep their libraries in `lib64` (Fedora, openSUSE), stops with a
+  clear message when glslang could not be built, and NixOS has its own environment file
+  ([#64](../../pull/64), the first community pull request, thanks to [ANewJanuary](https://github.com/ANewJanuary)).
+
+**Fixed**
+- The digital (PSN) version's own folder is taken directly ([#40](../../issues/40)).
+- 16:9 on an ultrawide screen keeps its shape with black bars ([#35](../../issues/35)); the wide picture no longer
+  flickers to 16:9 ([#47](../../issues/47)).
+- The window can be resized, and F2 → Display → *Capture-friendly window* helps Lossless Scaling and OBS
+  ([#51](../../issues/51)).
+- The game's first-start HDD install finishes properly (it was made again at every start).
+- AMD Radeon RX 7000 / 9000 with an Adrenalin driver older than 26.6.1: the game says so once.
+
+**Known limits of this version**
+- **AMD graphics cards** keep the earlier, conservative graphics path: the new GPU-side optimisations are off
+  there until they are tested on AMD hardware. The CPU-side gains apply.
+- **Linux:** this version was built and run by us on one Linux PC only (Ubuntu 22.04, Radeon RX 550, RADV). Other
+  distributions and graphics cards: please [report](../../issues).
+- **`Setup.exe` is not code-signed,** so Windows or an antivirus may warn about it ([FAQ](#faq)).
 
 Every version and its changes: [Releases](../../releases).
 
-## 🚀 Performance: native vs RPCS3
+## The F2 menu
+
+![The new F2 menu over the live game, with the PS3 | YOURS compare line](docs/menu.jpg)
+
+Press **F2** (or hold L3+R3) while you play:
+
+- The game stays visible behind a panel on the left.
+- One icon per page: Display, Graphics, Audio, Controls, HUD, Lighting, Effects, Mods, Update, Cheats, About.
+  Change page with L1 / R1, Q / E, or a click.
+- **Presets** on the Graphics page: *Standard* and *Low-end PC*. Change anything and it becomes *Your mix*.
+- **One line of help per setting:** what it does, what it costs, and whether it applies at once or after a restart.
+- **A PS3 | YOURS compare line** for the picture settings: drag it across the screen to see the PS3's picture
+  beside yours. Hold **F3** for the whole PS3 look.
+- **About:** the version, the project page, and the people who support the port.
+- Two themes: Hero (blue) and Infamous (red).
+
+## Performance
+
+Everything here was measured on one test PC on 17 Nov 2026: i5-13600K, RTX 2070 Super, 32 GB, Windows 11. The game
+drew at 720p internal (the PS3's own resolution) on both sides, uncapped, with the build Setup makes.
+
+**Against RPCS3**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/perf-dark.svg">
-  <img alt="Frames per second at the same spot in the city: RPCS3 0.0.42 42.9 fps, this port 99 fps" src="docs/perf-light.svg" width="760">
+  <img alt="Frames per second at the same spot in the city: RPCS3 0.0.42 43 fps, this port 147 fps" src="docs/perf-light.svg" width="760">
 </picture>
 
-![The same spot from the same save: this port at 99 fps (left), RPCS3 at 43 fps (right)](docs/same-spot.jpg)
+Same PC, same save, same spot (the city dock right after loading): RPCS3 0.0.42 ran at **43 fps**, this port at
+**147 fps: 3.4x**. In the three lighter views from the same spot it is 3.6x to 4.9x (up to 251 fps against 51).
+RPCS3 ran with its default settings (LLVM recompilers, Vulkan, 100% resolution scale), with its frame limit and
+VSync off so it is uncapped too; the settings RPCS3's own database recommends for this game were slower (31 fps),
+so they were not used. Medians of 3 runs.
 
-| Same PC, same save, same spot | RPCS3 0.0.42 | **This port** |
-|---|:-:|:-:|
-| 🏙️ City: the dock right after loading (720p) | 43 fps (39–46) | **99 fps** |
-| 🎥 Camera turned to three more views (720p) | not measured | **104 / 132 / 139 fps** |
-| 🖥️ The same four views at **native 1080p** with every picture extra on | | **99 / 103 / 133 / 140 fps** |
-| 🔧 With profile-guided optimisation (*Optimise for this PC*) and the native SPU jobs, the same four views at 1080p with every extra | | 116 / 126 / 161 / 166 fps |
+![The same spot from the same save: this port (left), RPCS3 (right)](docs/same-spot.jpg)
 
-<sub>
-This port: measured on 10 Nov 2026 with the build Setup makes today. RPCS3: measured on 9 Nov 2026. Both on an
-i5-13600K, RTX 2070 Super and 32 GB RAM, Windows 11. The PC was a normal desktop with a browser open in the
-background. RPCS3 ran with its default settings: LLVM recompilers, Vulkan, 100% resolution (720p). Here the CPU
-sets the pace, so native 1080p with every extra runs as fast as 720p. Story videos and cutscenes run at 30 fps in
-both, as on the PS3. "Picture extras" means soft shadows, full-resolution ambient occlusion, smooth light
-gradients and full-resolution effects.
-</sub>
+**On a smaller CPU**
 
-**v0.5.2 is faster again.** The build Setup makes now has native versions of the game's heaviest SPU jobs. In the same kind of player build on the test PC: **+14% to +26%** across the city, the dock, the opening fight and the cathedral spire, and **+13% to +19%** with the game held to 4 cores (in that fight, frames slower than 60 fps went from 770 to 121). Setup's *Optimise for this PC* adds about **5–11%** more. The table above is from the 10 Nov build, before these gains.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/perf-cpu-dark.svg">
+  <img alt="The same spot with the test PC held to fewer cores: RPCS3, the previous version and v0.6.0" src="docs/perf-cpu-light.svg" width="760">
+</picture>
 
-## ✨ What you get
+The same spot with the test PC held to fewer cores, average fps:
 
-### 🖥️ Native 1080p and up
+| CPU limit | RPCS3 0.0.42 | Previous version | v0.6.0 | v0.6.0 against the previous version |
+|---|:-:|:-:|:-:|:-:|
+| Whole CPU (20 threads) | 43 | 120 | **147** | +23% |
+| 4 cores / 8 threads | 28 | 84 | **109** | +30% |
+| 4 cores / 4 threads | 6 | 63 | **110** | **+75%** |
+| 2 cores / 4 threads | 7 | not measured | **74** | |
 
-The game draws natively at **1080p** instead of stretching the PS3's 720p, with sharper edges, a crisp HUD and finer
-detail everywhere. F2 → Graphics → *Internal resolution*: 720p / **1080p** / 1440p / 4K. Players play at 1440p too, and native
-4K runs at about 66 fps on the test PC's RTX 2070 Super. The game's glow and background blur keep the PS3's look
-at every resolution (F2 → Effects → *Glow and blur*).
+- On 4 cores / 4 threads the port went from 63 to 110 fps. RPCS3 is not playable there on this PC (6 fps).
+- These rows are the i5-13600K held to its fast cores by process affinity, **not a real old 4-core PC**. No real
+  low-end PC was measured: if you play on one, your numbers in an [issue](../../issues) are welcome.
+- "Previous version" is v0.6.0's Setup with the engine of v0.5.7.
+- A browser and other programs were open during the runs (0.2 to 0.5 cores); the runs repeat within 1-3%.
+- The average is higher everywhere, but the slowest 1% of frames at the whole CPU is not better than before (84
+  fps against 95), so this version does not claim to be smoother.
+
+At native 1080p with the default picture settings, where the graphics card does more of the work, v0.6.0 is 9%
+and 12% faster than the previous version in the two heaviest city views, and 2.5% to 19% in the opening fight.
+
+Story videos and cutscenes run at 30 fps in both, as on the PS3.
+
+## What you get
+
+- **Native 1080p and up:** F2 → Graphics → *Internal resolution*: 720p / 1080p / 1440p / 4K, with SMAA, FXAA or
+  MSAA, FSR 1 upscaling and sharpening.
+- **Any controller, plug and play:** Xbox, DualShock 4, DualSense, Switch Pro, 8BitDo and every pad in the
+  community [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB). The button pictures follow what
+  you play with. Every button and key can be remapped in F2 → Controls.
+- **Direct mouse aiming:** the mouse turns the camera directly, as in a PC game, with separate sensitivity for
+  aiming.
+- **Enhanced lighting:** soft, sharper sun shadows, full-resolution ambient occlusion, smooth light gradients.
+  F3 flips to the original PS3 look.
+- **HD fire, smoke and effects:** drawn at full resolution instead of the PS3's 512×288, plus texture packs.
+- **Widescreen:** 21:9, 32:9 and 16:10. You see more at the sides, nothing is stretched.
+- **Cheats (F2 → Cheats):** invincibility, infinite energy, super jump, karma rank, unlock all powers, one-hit
+  kills, longer glide, black lightning, saved spots (F7) and more.
+- **Mods:** [see below](#mods).
+- **Save manager:** every save with its picture, mission, completion and date; New Save Data, overwrite, delete.
+- **Trophies:** the game's 52 trophies unlock as on a PS3, and Playnite and RecompLauncher can read them.
+- **Languages:** F2 → Audio → Language picks voice and text separately, from what your disc has.
+- **Field of view slider, depth of field switch, a frame rate cap, an fps counter (F1).**
 
 ![720p upscaled (left) vs native 1080p (right)](docs/feat-1080p.jpg)
 
-### 🎮 Full controller support
-
-**Plug in any controller and play.**
-- Xbox, DualShock 4, DualSense, Switch Pro, 8BitDo and every pad in the community
-  [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB) work out of the box.
-- Turn it on before or during the game: it's picked up while you play.
-- Buttons work by position, as on a PlayStation pad (bottom = ✕, right = ○).
-- The game's button pictures follow what you play with: PlayStation, Xbox, or keyboard and mouse (F2 → Controls
-  says which one it shows).
-- **Remap any button in the game:** F2 → Controls → *Buttons and keys* lists every PS3 control, each with two
-  keys, a mouse button and a controller button. Click a cell (✕ on a controller) and press the new one;
-  right-click (□) clears it. An input that is already used asks first: *Swap* or *Cancel*. A change applies at
-  once and is saved in `input.toml`. *Reset to defaults* puts everything back.
-
-### 🖱️ Direct mouse aiming
-
-The mouse turns the camera **directly**, by how far you move it, as in a PC game. Before, the mouse moved a
-pretend stick, and the game's stick speed limit made quick turns and aiming feel slow.
-- F2 → Controls → *Mouse camera*: **Direct** (the default) or *Like a stick*
-- *Mouse sensitivity*, and a separate *Aiming sensitivity* for while you aim
-- in menus, the map and cutscenes the mouse still works like a stick; a controller plays as before
-
-### 💡 Enhanced lighting
-
-Soft sun shadows instead of stair-stepped ones, contact shadows (ambient occlusion) at full resolution instead
-of half, and smooth light gradients without banding. Every option is in F2 → Lighting, and **F3** flips
-between your picture and the original PS3 look.
-
-The fine stripes on faces and clothes in the Kuo cutscene at the dock are fixed: the game's shadow offset now
-reaches the graphics card, as on the PS3.
-
 ![The original PS3 look (left) vs the new lighting (right)](docs/feat-lighting.jpg)
 
-### 🔥 HD fire, smoke and effects
-
-The PS3 drew every fire, smoke, spark and explosion into a tiny 512×288 image and stretched it over the screen,
-which gave blocky edges and blobby flames. Here they're drawn at full resolution (F2 → Effects). The port also
-keeps the glow around lightning, lamps and fire as the PS3 made it at any resolution (F2 → Effects → *Glow and blur*), and it
-loads **texture packs** (PNG/DDS), so the community can make HD versions of any texture. Packs are made from your
-own game's textures, so none are included.
+![Sun shadows: PS3 (1024), High (2048, the default), Ultra (4096)](docs/shadows.jpg)
 
 ![Fire and smoke: as the PS3 drew them (top), at full resolution (middle), plus an HD texture pack (bottom)](docs/feat-effects.jpg)
 
-### 🧪 In-game cheats menu
-
-F2 → Cheats:
-- **Invincibility**, **infinite energy**, **max battery**
-- **super jump** (2× to 10×)
-- **karma rank**: pick any of the game's seven ranks (Hero to Infamous) and karma is set inside it when you close the menu, through the game's own karma setter
-- **karma lock** (blue/red only), a karma multiplier, **XP for karma**, *Add karma* / *Add XP* buttons
-- **unlock all powers**: every power in the game is Cole's at once (rockets, Kinetic Pulse, the Ionic powers, every upgrade, hero and evil together), through the game's own power code, and the story can't take them back while it's on; *karma powers of both sides* alone lets hero and evil karma powers work together. The game saves the powers: try it in a New Save Data slot
-- **infinite ionic charges**: Cole always has 3, the game's most, and they refill the moment one is used
-- **one-hit kills**, enemy speed, enemies hold fire
-- **longer glide**: Cole sinks more slowly while gliding (R1, the Static Thrusters), so a glide lasts up to 3× as long and goes further
-- L_'s patches, re-made for the port: **black lightning** (electric arcs drawn with the game's evil-lightning shader), **Static Thrusters flight** (while gliding, Cross climbs, Circle dives, neither hovers; needs the Improved Static Thrusters upgrade) and a faster glide
-- **saved spots**: *Save this spot* remembers where Cole stands, which way he faces and the camera; *Go to saved spot* (or **F7**, menu open or closed) puts him back there, through the game's own placing code (two places in New Marais come with it)
-
-Cheats can be remembered between sessions, with a short reminder at start.
-
-![The Cheats page](docs/feat-cheats.jpg)
-
-### 🧩 Mods
-
-The community's inFAMOUS 2 mods work as they are: the ones made for tiffsomniac's **inFAMOUS Mod Manager**
-(whole files, texture patches, xpps patches, and mods with options).
-- **F2 → Mods → Add a mod from a zip**: the zips in your Downloads folder, checked first (only mod files are
-  taken out, never a program), installed into the **`mods`** folder next to the game; or unzip a mod there yourself
-  (`mods\<mod>\mod.json`)
-- **no Unlocker** and nothing to install: your game files are never changed, the port hands the game the mod's
-  files in their place
-- **F2 → Mods**: every mod with its preview picture and what it changes, turn each on or off, pick its options;
-  the page shows at once what the next start will use, and **Restart to apply** restarts the game to its title
-  screen (Continue there to go on from your last save)
-- options that all change the same texture (a T-shirt in seven designs) are one at a time, as radio buttons;
-  options that change different things (a skin for the sword, the amp and the outfit) are check boxes
-- two mods that change the same file: **Use this one instead** picks the one that wins (the page says first what
-  the other loses), else the first by folder name
-- a texture patch made for another version of the game is never written beside its texture: the mod is left out
-  and the page says which option to untick (for example *"15 textures were made for another version of
-  cole_gold_amp.xpps: untick Solid Gold Amp"*)
-
-How it works and the mod format: [`engine/docs/MODS.md`](engine/docs/MODS.md).
-
-### 💾 Save manager
-
-The PS3's own "choose a save" screen, which the port didn't have before:
-- every save with its picture, mission, completion and date
-- **New Save Data**, so you never overwrite by accident
-- overwrite and delete, each asking first
-- real Yes/No answers to the game's questions, like "save before loading?"
-
 ![The Load Game screen](docs/feat-saves.jpg)
 
-### 🏆 Trophies, in Playnite and RecompLauncher
+<details>
+<summary>Trophies in Playnite and RecompLauncher</summary>
 
-The game's 52 trophies unlock as on a PS3, the platinum with the last of the others, with a notice in your
-language. The port keeps them in `game\gamedata\trophies\NPWR01730.json` and also writes them the way RPCS3 does,
-in `game\gamedata\dev_hdd0\home\00000001\trophy\NPWR01730_00\` (the names, the icons and `TROPUSR.DAT` with the
-unlock times), so trophy trackers made for RPCS3 can read them.
+The port keeps its trophies in `game\gamedata\trophies\NPWR01730.json` and also writes them the way RPCS3 does,
+in `game\gamedata\dev_hdd0\home\00000001\trophy\NPWR01730_00\`, so trophy trackers made for RPCS3 can read them.
 
 **Playnite** ([Playnite Achievements](https://github.com/justin-delano/PlayniteAchievements) or
 [SuccessStory](https://github.com/Lacro59/playnite-successstory-plugin)). Both look for an emulator with RPCS3 in
 its name, so the port gets one:
 1. Library → Configure Emulators → Add: name it `RPCS3 inFAMOUS 2 port`, installation folder
    `<port folder>\game\gamedata`, and one custom profile whose executable is `<port folder>\Play inFAMOUS 2.cmd`.
-2. Add the game by hand: installation folder `<port folder>\game\disc\PS3_GAME` (the plugins find the game's
-   `TROPHY.TRP` there), and a play action of the Emulator type with that emulator and profile.
+2. Add the game by hand: installation folder `<port folder>\game\disc\PS3_GAME`, and a play action of the Emulator
+   type with that emulator and profile.
 3. Playnite Achievements: turn on its RPCS3 source. SuccessStory: Settings → RPCS3 → turn it on and add
    `<port folder>\game\gamedata\dev_hdd0\home\00000001` as a home user folder.
 4. Start the game once (the folder is made then), then refresh the game's achievements.
 
 Already set up for RPCS3? Add `PS3_TROPHY_RPCS3_DIR=<your RPCS3 folder>` to `settings.ini` and the port also
 copies its unlocks into RPCS3's own trophy folder for the game. It never locks anything or moves a date later
-there, and it keeps a copy of RPCS3's file once (`TROPUSR.DAT.port-backup`). With Playnite Achievements, the
-game's Manage Achievements → Overrides → Platform Override: RPCS3, `NPWR01730_00` then finds them.
+there, and it keeps a copy of RPCS3's file once (`TROPUSR.DAT.port-backup`).
 
 **RecompLauncher:** started from RecompLauncher, the port reports each trophy to
-[Recomp Achievements](https://github.com/elripalda/RecompAchievements). A cheat that changes play (F2 → Cheats)
-makes the session's later unlocks Casual. Picking or saving a spot and Black lightning don't.
-
-### 🎨 A menu that looks like the game
-
-The settings menu, the save list and the game's questions share an inFAMOUS-style theme: **Hero** (electric blue)
-or **Infamous** (ember red), in F2 → Display.
-
-![The menu in Hero and Infamous themes, the save list, and a Yes/No question](docs/feat-menu.jpg)
-
-### ⚡ Smoother, too
-
-Looking out over the city from a rooftop used to drop the game to **4–10 fps**: the texture cache was too small
-and every frame rebuilt hundreds of textures. With a 4× larger cache and buffers that grow instead of stalling,
-the same overflow, forced on purpose, went from **13 to 40 fps**. With normal settings the busy street in our
-test ran at **75 fps with no frame over 37 ms**. That rooftop view now runs at **80–91 fps** at native 1080p with
-every extra on.
-
-Cutscene camera cuts and loading used to stutter while the graphics card's drawing programs (pipelines) were
-made on the spot. They are made on helper threads now, and the ones the game used before are prepared ahead at
-the title screen (`pipelines.rcp`), so the cuts stay smooth.
-
-Every session also watches itself: a frame that takes longer than 80 ms is recorded together with what each
-of the game's threads was doing at that moment (`play\<date-time>\hitches.tsv`, summed up in `summary.txt`), so a
-stutter you report comes with its cause.
-
-### 🎮 In the city on this port
-
-![Four camera views in the city at native 1080p with every picture extra on: 99, 103, 133 and 140 fps](docs/city-views.jpg)
-
-## 🧭 What this is
-
-Setup translates the game's PS3 code into PC code **on your machine** and compiles it. The game then
-runs directly on your CPU, with its graphics drawn through Vulkan.
-
-> ✅ **Ready to play.** It boots, plays and saves, and players run it on Windows 10 and 11 PCs, on Linux and on the Steam Deck.
-> Found a bug? Please [report it](../../issues) with the session's `play\<date-time>` folder.
-
-> 🔒 **No game content is included, and none is downloaded.** You need your own copy of the game,
-> and RPCS3 for Setup. Builds of the game (the `.exe`) are never shared, because they contain the
-> game's code. Each player builds their own.
-
-## 📋 Status
-
-| | |
-|---|---|
-| ✅ Tested copies | Played and confirmed by players: the **Europe** disc (**BCES01143**), the **Turkey** disc (**BCES01229**) and the **US** disc (**BCUS98125**), each with the **1.04** update, and the **digital (PSN)** version 01.03. |
-| 🖥️ Tested PCs | The test PC: i5-13600K, RTX 2070 Super, 32 GB, Windows 11, 1080p to 4K. Players: Windows 10 and 11 PCs, up to an RTX 5070 at 1440p. Linux: Ubuntu 22.04 with an AMD GPU, and the Steam Deck ([#24](../../issues/24)). |
-| ⚠️ Known issues | • Views over a big part of the city (the top of the cathedral spire) are the heaviest: about 83 fps there on the test PC with v0.5.2 (it was 67). On 4- and 6-core CPUs the game's SPU jobs set the pace there.<br>• In one long session (about 90 minutes), a big fight had a few freezes of up to one second; the hitch catcher now records what causes them.<br>• On AMD graphics cards, close-up faces in cutscenes could show black spots ([#27](../../issues/27)): v0.5.6 has a new fix. If you still see them, please report it in #27. |
-
-## 🧰 What you need
-
-- 💿 **Your copy of inFAMOUS 2**
-  - The disc's files: the folder that holds `PS3_GAME`.
-  - The **1.04 update**, installed in RPCS3.
-  - 🛒 **Digital (PSN) copy** (NPUA80638 / NPEA00318, version 01.03, the same code as 1.04; works, tested
-    by players): install the game and its license in RPCS3. Then make a folder with a
-    `PS3_GAME` folder inside, copy the game's `PARAM.SFO`, `ICON0.PNG` and `USRDIR` from RPCS3's
-    `dev_hdd0\game\<ID>` into `PS3_GAME`, and choose that folder in Setup. No update is needed.
-- 🕹️ **[RPCS3](https://rpcs3.net)** with the **PS3 firmware** installed (*File > Install Firmware*, using
-  `PS3UPDAT.PUP` from playstation.com).
-  - It is needed **only during Setup**. Setup uses it to decrypt your game, then copies into the port's
-    folder the update, the firmware files the game reads (fonts, system data) and the game's HDD install.
-  - After Setup you can remove RPCS3. Keep your game disc folder where it is.
-  - Start the game once in RPCS3 until the main menu: that installs 2.4 GB of data that Setup copies.
-- 💻 **A PC with:**
-  - Windows 10/11 64-bit (or Linux / Steam Deck: [see below](#-linux-and-steam-deck))
-  - a CPU with AVX2 (Intel 4th gen / AMD Ryzen or newer)
-  - a Vulkan graphics card
-  - 16 GB RAM
-  - about 15 GB free disk space while it builds (about 7 GB after: the game, and the build files Setup keeps so
-    updates take minutes)
-- 🌐 **Internet.** Setup downloads its build tools once (about 1.3 GB) and keeps them for updates.
-  **Nothing is installed on Windows**, nothing needs admin rights, and you need no Git, Python or Visual Studio.
-
-## 📦 Install
-
-1. ⬇️ Download **`Setup.exe`** from the [latest release](../../releases/latest) and run it. Put it in a folder on
-   your PC's internal drive, for example `C:\Games\inFAMOUS2`. A USB stick or an exFAT/FAT32 external disk can't
-   hold the link Setup makes to your game folder; Setup then installs into `%LOCALAPPDATA%\inFAMOUS2-port` instead.
-2. ▶️ Press **Install**. That's all. Setup:
-   - 📥 downloads the port's files (about 40 MB) into a folder next to itself
-   - 🔎 finds RPCS3 and your game by itself (it asks only if it can't)
-   - 🛠️ downloads the build tools into that folder: Python, CMake, Ninja, LLVM and Microsoft's C++ headers and
-     libraries (portable copies, about 1.3 GB)
-   - 🏗️ builds the game from your copy: 20–60 minutes, one time only (about 15 minutes on the test PC)
-   - with **Optimise for this PC** ticked (the default), it then trains the build on your PC: the game opens and
-     plays by itself for about 6 minutes (sound off, don't touch it) and is compiled once more with what it
-     learned. That adds 10–25 minutes and gave 5–11% more fps in the city on the test PC. If it doesn't work
-     out, you get the normal build and Setup says why.
-   - 🧹 cleans up, keeps the build tools and build files for quick updates, and leaves a desktop shortcut. Its
-     icon is taken from your own copy.
-3. 🎮 Press **Play**.
-
-![Setup: one Install button, one progress bar, then Play](docs/setup.png)
-
-> ⚠️ Windows may say *"Windows protected your PC"* the first time, more so while Setup.exe is not signed
-> (see [Code signing policy](#-code-signing-policy)): click **More info**, then **Run anyway**. A signed Setup.exe
-> names **SignPath Foundation** as its publisher (right-click > Properties > Digital Signatures).
-
-> 📜 Pressing Install accepts Microsoft's [Visual Studio Build Tools license](https://go.microsoft.com/fwlink/?LinkId=2179911)
-> for the C++ headers and libraries Setup downloads from Microsoft.
-
-<details>
-<summary>🧰 Without Setup.exe (git)</summary>
-
-```
-git clone https://github.com/SamiEnazi/infamous2-port
-```
-
-(One repository since v0.5.0: the engine and the port base are its `engine/` and `base/` folders, no submodules.)
-
-Then run **`Setup.cmd`** (the PowerShell window), or straight from PowerShell:
-
-```
-tools\setup_build.ps1 -Disc <your game folder> -Rpcs3 <your RPCS3 folder> -AcceptMsvcLicense -Cleanup
-```
-
-Updating later is the same (`git pull` first), and quick: `-Cleanup` keeps the build tools
-and build files, so only what changed is built again. `-NoBuildCache` deletes them too.
+[Recomp Achievements](https://github.com/elripalda/RecompAchievements). A cheat that changes play makes the
+session's later unlocks Casual. Picking or saving a spot and Black lightning don't.
 </details>
 
-<details>
-<summary>🔓 Your own decryption tool (advanced)</summary>
+## What you need
 
-The port never decrypts anything itself. Setup hands the game's 1.04 `EBOOT.BIN` and three firmware modules to
-a decryptor, by default RPCS3 (run hidden, nothing to do), and checks that what comes back is a decrypted
-program. To use another tool, put a line like this in `config.local.json` in the port's folder:
+- **Your copy of inFAMOUS 2.** Confirmed by players: the Europe disc (BCES01143), the Turkey disc (BCES01229) and
+  the US disc (BCUS98125), and the digital (PSN) version 01.03 (NPUA80638 / NPEA00318). In one of these forms:
+  - the game's **folder** (the one that holds `PS3_GAME`, or the PSN version's own folder)
+  - a **disc image** (`.iso`)
+  - a **PSN package** (`.pkg`)
+- **A PC with:** Windows 10/11 64-bit (or [Linux](#linux-and-steam-deck)), a CPU with AVX2 (Intel 4th gen / AMD
+  Ryzen or newer), a Vulkan graphics card, 16 GB RAM, about 16 GB free disk space on a local drive (not a network
+  drive).
+- **Internet for the install:** about 85 MB from GitHub and 433 MB from Sony.
 
-```
-"decryptor": "\"C:\\Tools\\mydecrypt.exe\" \"{in}\" \"{out}\""
-```
+Tested PCs: the test PC above at 1080p to 4K; players on Windows 10 and 11 up to an RTX 5070 at 1440p; Linux on
+Ubuntu 22.04 with a Radeon RX 550 (RADV), and a player's Steam Deck ([#24](../../issues/24)).
 
-`{in}` is the encrypted file and `{out}` where the decrypted one must go. A file that is already decrypted
-is passed through as it is.
-</details>
+## Linux and Steam Deck
 
-## 🐧 Linux and Steam Deck
+The port builds and runs natively on Linux, with no Wine or Proton. There is no Setup.exe on Linux: `./setup.sh`
+does the same job, and needs no RPCS3 either.
 
-The port also builds and runs natively on Linux, with no Wine or Proton (tested on Ubuntu 22.04 with an AMD GPU).
-There is no Setup.exe on Linux: `./setup.sh` does the same job. **It runs on the Steam Deck**: a player
-built it inside an Ubuntu Distrobox container in Desktop Mode and plays it in Game Mode ([#24](../../issues/24));
-in Desktop Mode, start it from that container.
-
-**One script does everything:** download `inFAMOUS2-port-v…-Linux-x64.zip` from the
-[latest release](../../releases/latest) (launchers such as Quiver pick it by itself), unpack it, and run
-`./setup.sh`. The first time, it finds your game folder in RPCS3's game list (or asks you), builds the game from
-your copy (15–60 minutes), then starts it; after that, `./setup.sh` just plays. Or from a `git clone`:
+Download `inFAMOUS2-port-v…-Linux-x64.zip` from the [latest release](../../releases/latest), unpack it and run
+`./setup.sh`. The first time it asks for your game folder, gets the update and firmware from Sony's servers,
+copies the game into the port's folder, builds it, then starts it. After that, `./setup.sh` just plays. Or from git:
 
 ```
 git clone https://github.com/SamiEnazi/infamous2-port
@@ -404,133 +270,186 @@ cd infamous2-port
 ./setup.sh                      # or: ./setup.sh --disc <your game folder>
 ```
 
-(`tools/setup.sh` and `tools/play.sh` still work on their own, with the same options as before.)
+- `tools/setup.sh` lists what it needs from your distribution (a C/C++ toolchain, python3 with venv, the Vulkan
+  loader, SDL2). Unlike Windows, it downloads its build tools (LLVM 22.1.8, CMake / Ninja when the system has none)
+  and builds the engine itself: there are no prebuilt Linux tools yet.
+- **Fedora, openSUSE** and other `lib64` distributions work since v0.6.0 ([#64](../../pull/64)).
+- **NixOS:** build and play inside the FHS environment in [`tools/nixos/fhs-env.nix`](tools/nixos/fhs-env.nix)
+  (the commands are at the top of that file). Tested by its author on NixOS 26.05 with a Radeon 780M.
+- **Steam Deck:** a player built it inside an Ubuntu Distrobox container in Desktop Mode and plays it in Game Mode
+  ([#24](../../issues/24)).
+- **v0.6.0 on Linux was built and run by us on Ubuntu 22.04 with a Radeon RX 550 (RADV)**: it installs, starts and
+  plays there (slowly: that card is the limit). No Linux frame rate is claimed. Please [report](../../issues) how it runs on
+  your distribution and GPU.
 
-`tools/setup.sh` lists what it needs from your distribution (a C/C++ toolchain, python3 with venv, the
-Vulkan loader, SDL2) and puts everything else in the port's own folder. Please [report](../../issues) how it
-runs on your distribution and GPU.
+## Updates
 
-## 🔄 Updates
-
-- When the game starts it asks GitHub whether a new version is out: in the background, at most every 6 hours,
-  and offline it just starts. If there is one, a notice says *Update available: v0.5.1 - F2 > Update*.
-- **F2 → Update** shows your version, the new one and what's new. Press **Update when I quit** or **Quit and update
-  now**: Setup opens, gets the new version and builds it from your copy, then press **Play**. Your saves,
-  settings, mods and controls are kept (the saves are also copied to `%LOCALAPPDATA%\inFAMOUS2-port\save-backups`
-  first).
-- ⚡ An update that changes a few files takes minutes, not the 20-60 of an install: Setup keeps its build tools and
-  build files (about 2.6 GB), downloads no tools and compiles only what changed. `tools\setup_cleanup.ps1` frees
-  that space (the next update then takes as long as an install).
-- **Check for updates automatically** (F2 → Update) turns the check off; **Check now** asks at once. Running
-  `Setup.exe` and choosing *Update to the latest version* still works too.
+- When the game starts it asks GitHub whether a new version is out (in the background, at most every 6 hours;
+  offline it just starts). **F2 → Update** shows what's new and installs it. Your saves, settings, mods and
+  controls are kept, and the saves are copied to `saves-backup\` first.
+- An update rebuilds only what changed, so it takes minutes.
+- **From v0.5.x:** F2 → Update (or `Setup.exe` on your folder) moves the install to the new layout. It deletes the
+  old 2 GB of build tools and copies your game folder into the port's folder (it asks once and shows the size;
+  your folder is not changed).
+- F2 → Update → *Check for updates automatically* turns the check off, and with it the supporters list of the
+  About page. Nothing about you or your PC is sent.
 - A copy installed by RecompLauncher is updated by RecompLauncher.
 
-## 🎮 Playing
+## Playing
 
-- **Start:** `Play inFAMOUS 2.cmd`, or the desktop shortcut. It starts at native 1080p with all the picture
-  extras on; F2 changes anything, and your choices are kept.
-- **Steam, Playnite and other launchers:** add the game itself, `work\port\build\Infamous2Recomp.exe` in the
-  port's folder (in Steam: *Add a Non-Steam Game* → Browse). Started that way, it sets itself up exactly like
-  `Play inFAMOUS 2.cmd`, and Steam Input (the Steam Controller, or any controller set up in Steam) and the Steam
-  overlay work.
-- **Keys:**
+Start with `Play inFAMOUS 2.cmd` or the desktop shortcut. For Steam, Playnite and other launchers, add
+`work\port\build\Infamous2Recomp.exe` from the port's folder; Steam Input and the Steam overlay work.
 
-  | Key | Action |
-  |---|---|
-  | **F1** | fps counter |
-  | **F2** (or hold L3+R3) | PC settings: Display, Graphics (resolution, anti-aliasing, upscaling, sharpening), Audio (volume, language), Controls (mouse, buttons and keys), HUD, Lighting, Effects, Mods, Update, Cheats |
-  | **F3** | your picture vs the original PS3 look |
-  | **F7** | go to your saved spot (F2 → Cheats → Saved spots) |
-  | **F9** | mark a moment in the session log (a stutter, a glitch, an enemy missing from the minimap) |
-  | **Alt+Enter** | fullscreen |
+| Key | Action |
+|---|---|
+| **F1** | fps counter |
+| **F2** (or hold L3+R3) | the settings menu |
+| **F3** | your picture vs the original PS3 look |
+| **F7** | go to your saved spot |
+| **F9** | mark a moment in the session log (a stutter, a glitch) |
+| **Alt+Enter** | fullscreen |
 
-- **Keyboard and mouse:**
-  - WASD to move, mouse for the camera (direct by default; F2 → Controls → *Mouse camera*)
-  - right button to aim, left button to shoot
-  - Space = ✕, Shift = ○, F = □, Q = △
-  - To remap keys, mouse buttons or controller buttons: F2 → Controls → *Buttons and keys*.
-- **Language:** the game follows your Windows display language (English if the game doesn't have it).
-  F2 → Audio → Language picks another one, with the voice and the text set separately, from what your disc
-  has: the US disc also has a Latin-American Spanish dub, the Europe disc BCES01143 has English voices with
-  menus and subtitles in 16 languages. It applies at the next start.
-- **Widescreen:** F2 → Display → Aspect ratio: *Auto* follows your screen's shape, or pick 21:9, 32:9 or
-  16:10. 32:9 at 1440p draws 5120×1440 for a super-ultrawide monitor. You see more on the sides (nothing is stretched); the HUD stays in the middle 16:9 and movies get
-  black bars. It applies at the next start. 16:9 is the default.
-- **Your saves:** `game\gamedata\dev_hdd0\home\00000001\savedata`, backed up to `saves-backup\` before every session.
-- **Your settings:** F2's choices go to `%APPDATA%\inFAMOUS2-port\settings.ini` (with `mods.ini` and the saved spots
-  in `spots.ini`); your controls are in `input.toml` in the game's folder. With an empty `portable.txt` in the game's
-  folder, the settings stay in the game's folder too.
-- **Session logs:** each session writes `play\<date-time>\`: frame times every second, your F9 marks, and every
-  frame over 80 ms with what the game was doing. Please attach the folder to bug reports.
+Keyboard and mouse: WASD to move, mouse for the camera, right button to aim, left button to shoot,
+Space = ✕, Shift = ○, F = □, Q = △. Remap anything in F2 → Controls → *Buttons and keys*.
 
-## 🗑️ Uninstall
+## Mods
 
-Setup installs nothing into Windows: no admin rights, no registry entries, no services. To remove the port:
+The community's inFAMOUS 2 mods made for tiffsomniac's **inFAMOUS Mod Manager** work as they are (whole files,
+texture patches, xpps patches, and mods with options).
 
-1. Copy your saves somewhere first if you want to keep them (`game\gamedata\dev_hdd0\home\00000001\savedata`).
-2. Delete the desktop shortcut **inFAMOUS 2 (PC port)**.
-3. Delete the port's folder (the one with `Play inFAMOUS 2.cmd`). `game\disc` inside it is only a link to your
-   game folder: Windows deletes the link, not your game.
-4. Delete `%APPDATA%\inFAMOUS2-port` (the F2 settings) and `%LOCALAPPDATA%\inFAMOUS2-port` (Setup's save backups,
-   and the port itself when Setup put it there).
+- **F2 → Mods → Add a mod from a zip** takes the zips in your Downloads folder (only mod files are taken out,
+  never a program), or unzip a mod into the `mods` folder yourself (`mods\<mod>\mod.json`).
+- No Unlocker and nothing to install: your game files are never changed.
+- Turn each mod on or off and pick its options in F2 → Mods, then **Restart to apply**.
+- When two mods change the same file, **Use this one instead** picks the winner.
 
-RPCS3 and your game are left as they were.
+How it works and the mod format: [`engine/docs/MODS.md`](engine/docs/MODS.md).
 
-## 🔬 How it works
+## FAQ
+
+**Do I need RPCS3?**
+No. Since v0.6.0 Setup gets the game's update and the PS3 system software from Sony's servers itself. If RPCS3 is on
+your PC and already has them, Setup copies them from there instead, and that is all it is used for.
+
+**I have the PSN (digital) version.**
+Pick its folder (`NPUA80638` / `NPEA00318`) or its `.pkg`. It is unlocked with your own license, the `.rap` file:
+put `<CONTENT_ID>.rap` beside the game and it is found by itself, otherwise Setup asks for it. No license is
+shipped with the port. PSN support is new in this version and was made without a real PSN copy on the test PC, so
+if Setup stops, please [report](../../issues) it with Setup's log (Details → Copy log).
+
+**My disc image (`.iso`) is encrypted.**
+A decrypted image is read directly. An encrypted one (a raw copy of the disc) needs its disc key, a `.dkey` or
+`.ird` file: put it beside the image with the same name (`game.iso` + `game.dkey`), otherwise Setup asks for it. A
+3K3Y image carries its key. No key is shipped with the port. New in this version.
+
+**Windows or my antivirus warns about Setup.exe.**
+`Setup.exe` is not code-signed, because signing a program costs money. So Windows SmartScreen or an antivirus may
+warn about it, as they can for any new, unsigned file. On the Windows message, click **More info**, then **Run
+anyway**. The source is open (`tools/setup_exe/` in this repository), and here is the VirusTotal scan of this
+release's `Setup.exe`: https://www.virustotal.com/gui/file/756d6f24fa0eba885f12a8d5993db466578f3189bf7674d09b9aae9372f5e233
+
+**Does DLC work?**
+Yes, when its unlock files are in the port's folder. inFAMOUS 2's DLC (the extra skins, amps and powers) is a set
+of small unlock files, `dev_hdd0\game\<your game's ID>\USRDIR\dlc\ulf\unlock_*.edat`; the content itself is
+already in the game. A game copy that carries them (a PSN folder with the DLC installed) brings them along. From
+v0.6.1 Setup also copies them from RPCS3 when it is on your PC and has the DLC installed, on install and on every
+update (added DLC to RPCS3 later? run Setup again). And there is a `dlc` folder in the port's folder: put the
+`.edat` files there and they are picked up the next time the game starts. The DLC must be for the same version
+(region) of the game as your copy. DLC that needs a license (`.rap`) is not supported yet.
+
+**Where are my saves and settings?**
+All in the port's folder. Saves: `game\gamedata\dev_hdd0\home\00000001\savedata`, backed up to `saves-backup\`
+before every session. Settings: `settings.ini`, `mods.ini`, `spots.ini`, and your controls in `input.toml`.
+
+**Can I move the folder?**
+Yes. Move or copy the whole port folder to another drive or PC and start `Play inFAMOUS 2.cmd`. The desktop
+shortcut is made again by itself.
+
+**How do I uninstall?**
+Delete the port's folder and the desktop shortcut (copy your saves out first). Nothing was installed into Windows.
+Your original game is never touched. Only if you used a version before v0.6.0: also delete
+`%APPDATA%\inFAMOUS2-port` and `%LOCALAPPDATA%\inFAMOUS2-port`.
+
+**The game looks or runs wrong.**
+Please [open an issue](../../issues) and attach the newest `play\<date-time>` folder: it holds the frame times,
+your F9 marks and every long frame with what the game was doing.
+
+## Contributing
+
+- **Bug reports** with the session's `play\<date-time>` folder are the most useful thing.
+- **Test reports** are wanted for: AMD graphics cards, Linux distributions, a real PSN copy, an encrypted disc
+  image, and old or small CPUs.
+- **Pull requests** are welcome and are reviewed by the owner before they are merged. The first one,
+  [#64](../../pull/64), is in v0.6.0.
+- Never post game files, keys, licenses or builds of the game.
+
+<a name="without-setupexe"></a>
+<details>
+<summary>Without Setup.exe (git)</summary>
+
+```
+git clone https://github.com/SamiEnazi/infamous2-port
+```
+
+Then run **`Setup.cmd`**, or from PowerShell:
+
+```
+tools\setup_build.ps1 -Source <your game folder, .iso or .pkg> [-Rpcs3 <your RPCS3 folder>] -Cleanup
+```
+
+Updating later is the same (`git pull` first). `-Cleanup` keeps the tools and build files, so only what changed
+is built again. `-NoBuildCache` deletes them too.
+</details>
+
+<details>
+<summary>Your own decryption tool (advanced)</summary>
+
+Setup hands the game's 1.04 `EBOOT.BIN` and three firmware modules to a decryptor, by default ps3tool
+(`tools/ps3tool.py`), and checks that what comes back is a decrypted program. To use another tool, put a line
+like this in `config.local.json` in the port's folder:
+
+```
+"decryptor": "\"C:\\Tools\\mydecrypt.exe\" \"{in}\" \"{out}\""
+```
+
+`{in}` is the encrypted file and `{out}` where the decrypted one must go.
+</details>
+
+## Supporters
+
+The port is free. If you'd like to support the work, you can here: [paypal.me/samiEnazi](https://paypal.me/samiEnazi).
+Supporters and contributors are listed in the game, in **F2 → About**.
+
+Contributors: [ANewJanuary](https://github.com/ANewJanuary) (Linux setup, [#64](../../pull/64)).
+
+## How it works
 
 - [ps3recomp](https://github.com/sp00nznet/ps3recomp) translates the game's PowerPC (PPU) and SPU code, and
-  three PS3 firmware modules taken from **your** RPCS3, into C/C++. clang-cl then compiles it.
-- The engine's runtime does the rest:
-  - stands in for the PS3 system: files, threads, audio, input, saves and the system dialogs
-  - draws the PS3 graphics chip's commands with Vulkan, at any internal resolution
-  - runs some SPU jobs on the GPU instead (the deferred lighting and SSAO)
-
-Everything is in this one repository (since v0.5.0; before, the engine and the port base were submodules):
+  three PS3 firmware modules from **your** download of the PS3 system software, into C/C++. The small clang + lld
+  compiler Setup brings then compiles it on your PC.
+- The engine is prebuilt: it is a release asset with no game code in it.
+- The engine's runtime stands in for the PS3 system (files, threads, audio, input, saves, system dialogs), draws
+  the PS3 graphics chip's commands with Vulkan at any internal resolution, and runs the game's heaviest PS3 helper
+  jobs as plain PC code on all cores.
 
 | Folder | What it is |
 |---|---|
-| [`engine/`](engine/) | The engine: the recompiler (`engine/tools/`) and the runtime (`engine/runtime/`, `engine/libs/`). It started as [sp00nznet's ps3recomp](https://github.com/sp00nznet/ps3recomp) and is maintained here now, with the Windows, Vulkan and performance work of this port. MIT, [`engine/LICENSE`](engine/LICENSE). |
-| [`base/`](base/) | The port base: [Erik Martins' infamous2-recomp](https://github.com/erikomis/infamous2-recomp) as he published it (commit 8077cda); the build uses its `infamous2-lle/` folder. MIT, [`base/LICENSE`](base/LICENSE). |
-| `patches/port/` | Our changes to the port base's files, applied to its copy in `work\port\` at build time (`base/` itself stays as Erik published it). |
+| [`engine/`](engine/) | The engine: the recompiler (`engine/tools/`) and the runtime (`engine/runtime/`, `engine/libs/`). It started as [sp00nznet's ps3recomp](https://github.com/sp00nznet/ps3recomp) and is maintained here now. MIT, [`engine/LICENSE`](engine/LICENSE). |
+| [`base/`](base/) | The port base: [Erik Martins' infamous2-recomp](https://github.com/erikomis/infamous2-recomp) as he published it (commit 8077cda). MIT, [`base/LICENSE`](base/LICENSE). |
+| `patches/port/` | Our changes to the port base's files, applied to its copy at build time. |
 | `port_src/` | Files we add to the port. |
 | `cheats/` | The game side of the cheats and of the mouse camera. |
-| [`natives/`](natives/) | Native versions of the game's heaviest SPU jobs, compiled into the game by default (each has an off switch). |
-| `tools/` | The build (`tools/rebuild_win.py`), Setup (`tools/setup_exe/`, `tools/setup_build.ps1`), `tools/play.ps1`, and the tools used to test it. |
+| [`natives/`](natives/) | Native versions of the game's heaviest SPU jobs. |
+| `tools/` | The build, Setup, `tools/play.ps1`, and the tools used to test it. |
 
-## 🤖 Made with Claude Code
+## Made with Claude Code
 
-This port was built in **2 days and 9 hours**, in one long conversation between **Sami** and
-**Claude** (Anthropic's Claude Opus 5.5, working in [Claude Code](https://claude.com/claude-code)).
-That's from the first message (6 Nov 2026, 22:42) to the first public release (9 Nov 2026, 07:15).
-The same day added native 1080p, the cheats, the lighting, the effects, the save manager and the freeze fix.
+This port was built in **2 days and 9 hours**, in one long conversation between **Sami** and **Claude**
+(Anthropic's Claude Opus 5.5, working in [Claude Code](https://claude.com/claude-code)): from the first message
+(6 Nov 2026, 22:42) to the first public release (9 Nov 2026, 07:15). Sami brought the idea, his own copy of the
+game, the direction, the playtesting and the feedback; Claude wrote the code, the tools, Setup and this README.
 
-| | |
-|---|---|
-| 🧑 **Sami** | The idea, his own copy of the game, the direction, the playtesting and the feedback. |
-| 🤖 **Claude** | The Windows build, the performance work on the main CPU code, the SPU jobs and the graphics thread, the renderer features, the cheats, the save manager, the test and profiling tools, Setup, and this README. The lead worked with up to five sub-agents in parallel. |
-| ⏱️ **Time** | 2 days 9 hours, from the first message to public |
-| 💬 **Messages** | About 190 from Sami, and 9,560 model responses from the lead plus 32 sub-agents, up to the first release |
-| 🔤 **Tokens** | 7.8 million generated, 3.55 billion processed in total up to the first release (3.51 billion of those were re-reads of the cached project context) |
-
-## 💡 Ideas for the community: offline user-created missions
-
-inFAMOUS 2 shipped with a mission editor: players built their own missions (UGC) and shared them online.
-The online service that stored and shared those missions is gone, so that part of the game is dead today.
-
-Because this port runs the game's own code on your PC, there is a chance to bring it back offline:
-- point the game's mission upload/download at **local files** instead of the old servers
-- save, load and play your own created missions without a network
-- share missions as plain files, for example in this repository
-
-This is an idea for the community; nothing is built for it. Open questions:
-- How does the game talk to the UGC service?
-- What format are created missions stored in?
-- How much of the editor works with no network at all?
-
-If you know how inFAMOUS 2's UGC worked, have notes or captures from back then, or want to think it
-through with us, please open an [issue](../../issues).
-
-## 🙏 Thanks and credits
+## Thanks and credits
 
 This port stands on other people's work:
 
@@ -564,11 +483,11 @@ This port stands on other people's work:
 - **tiffsomniac**: the **inFAMOUS Mod Manager** and its mod format (whole files, texture and xpps patches,
   options). The port reads these mods as they are (F2 → Mods); its own code, written from the format.
 - **Yahfz**: the RPCS3 community patch "Disable Mesh Trimming" (one instruction word in the game's Edge
-  geometry SPU program), which first showed why faces get holes above 720p. F2 → Graphics → Triangle culling:
-  *At the render resolution* (the default) keeps the game's culling but at the real picture size, so no holes
-  and a little faster; *Off: whole meshes* is Yahfz's patch; *The PS3's 720p culling* is the original.
-- **[RPCS3](https://github.com/RPCS3/rpcs3)** and its team. RPCS3 decrypts the game and firmware. It was
-  also our reference while building the port: we compared our output against it, and its research and
+  geometry SPU program), which first showed why faces get holes above 720p. F2 → Graphics → *Mesh trimming*:
+  *Off: whole meshes* (the default since v0.6.0) is Yahfz's patch; *At the render resolution* keeps the game's
+  culling but at the real picture size, so no holes and a little faster; *The PS3's 720p culling* is the original.
+- **[RPCS3](https://github.com/RPCS3/rpcs3)** and its team. Until v0.6.0, RPCS3 decrypted the game and
+  firmware for Setup. It was also our reference while building the port: we compared our output against it, and its research and
   wiki taught us much of what we know about the PS3. **No RPCS3 code is included** here (RPCS3 is GPL).
 - Third-party libraries used by the build, each under its own license:
   - [SDL2](https://libsdl.org) (zlib)
@@ -585,34 +504,7 @@ This port stands on other people's work:
 
   Their license files are in `engine/third_party/`.
 
-## 🔏 Code signing policy
-
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-
-- **What is signed:** `Setup.exe` only. GitHub Actions builds it from this repository
-  ([`.github/workflows/setup-exe.yml`](.github/workflows/setup-exe.yml) runs
-  [`tools/setup_exe/build.cmd`](tools/setup_exe/build.cmd)), and SignPath signs exactly that build after the
-  approver has approved it. The game itself is built on your PC from your own copy and is not signed.
-- **Committers and reviewers:** [SamiEnazi](https://github.com/SamiEnazi), the owner of this repository. Changes
-  from anyone else (pull requests) are reviewed by him before they are merged.
-- **Approvers:** [SamiEnazi](https://github.com/SamiEnazi). Every signing request is approved by hand.
-- **Privacy policy:** This program will not transfer any information to other networked systems unless
-  specifically requested by the user or the person installing or operating it.
-  - Setup.exe goes online only when you press **Install** or **Update** (or a launcher runs its setup step),
-    and only to download: the port's files from GitHub, the build tools from their GitHub releases (Python,
-    CMake, Ninja, LLVM, SDL), and Microsoft's C++ headers, libraries and Windows SDK from Microsoft. Those sites
-    see an ordinary download, under their own privacy statements:
-    [GitHub](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement),
-    [Microsoft](https://www.microsoft.com/privacy/privacystatement).
-  - The update check (see [Updates](#-updates)): when the game starts, `tools\play.ps1` asks GitHub's public API
-    which release is the newest (at most every 6 hours, in the background). That question carries no data about
-    you, your PC or your game; F2 → Update → *Check for updates automatically* turns it off. A copy installed by
-    RecompLauncher or from git never asks.
-  - Nothing about you, your PC or your game is sent anywhere: no accounts, no telemetry. The game itself makes
-    no network connections (its PSN stand-in stays offline unless you set `PS3_NET_ONLINE` and `PSNR_SERVER`
-    yourself). Your saves, settings and session logs stay on your PC; a bug report holds only what you attach.
-
-## ⚖️ Legal
+## Legal
 
 This is a fan project for people who own the game. It is not affiliated with or endorsed by Sony
 Interactive Entertainment or Sucker Punch Productions. *inFAMOUS* is a trademark of Sony Interactive

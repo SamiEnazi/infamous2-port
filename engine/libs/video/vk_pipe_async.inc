@@ -191,7 +191,10 @@ static u64 vk_pw_ctx(void)
     const u32 v[8] = { VK_PW_VERSION, (u32)s_vk_indep_blend, (u32)vk_mrt_mode(), (u32)s_vk.depth_format,
                        (u32)s_ropt.fbf_in, s_ropt.pl ? 1u : 0u, (u32)s_vk_depth_clamp_ok, (u32)sizeof(rsx_be_render_state) };
     h = vk_pw_mix(h, VK_SC_VERSION, strlen(VK_SC_VERSION));
-    return vk_pw_mix(h, v, sizeof v);
+    h = vk_pw_mix(h, v, sizeof v);
+    /* [aa] an MSAA run's recipes are its own (the 1x context stays as it was) */
+    if (s_ms.n > 1u) h = vk_pw_mix(h, &s_ms.n, sizeof s_ms.n);
+    return h;
 }
 
 /* The recipe's identity: everything vk_eng_variant_build reads (the render
@@ -557,7 +560,9 @@ static void vk_pa_unqueue_locked(vk_eng_pipe* P)
     P->pa_prev = P->pa_next = 0;
 }
 
-static u32 vk_pa_bit(u32 t, u32 k, int neg) { return (neg ? 20u : 0u) + t * 4u + k; }
+/* [aa] within its word: pa_want / pa_done for vk_idx 0..3, pa_want2 / pa_done2
+ * for the MSAA variants 4..7 (k & 3 there) */
+static u32 vk_pa_bit(u32 t, u32 k, int neg) { return (neg ? 20u : 0u) + t * 4u + (k & 3u); }
 
 static void vk_pa_commit_push(vk_sc_key key, const u32* w, u32 n)
 {
@@ -623,13 +628,15 @@ static void vk_pa_run(vk_eng_pipe* P, u32* spv, char* log, u32 log_size, int bg)
     __atomic_store_n(&P->pa_xl, 0u, __ATOMIC_RELEASE);
     for (;;) {
         vk_pa_lock();
-        const u64 todo = P->pa_want & ~P->pa_done;
-        if (!todo) { P->pa_job = 0; vk_pa_unlock(); return; }
+        const u64 todo1 = P->pa_want & ~P->pa_done, todo2 = P->pa_want2 & ~P->pa_done2;   /* [aa] */
+        if (!todo1 && !todo2) { P->pa_job = 0; vk_pa_unlock(); return; }
         vk_pa_unlock();
-        for (u32 b = 0; b < 40u; b++) {
+        for (u32 bb = 0; bb < 80u; bb++) {
+            const u32 wd = bb / 40u, b = bb % 40u;
+            const u64 todo = wd ? todo2 : todo1;
             if (!(todo & (1ull << b))) continue;
             const int neg = b >= 20u;
-            const u32 t = (b % 20u) / 4u, k = b % 4u;
+            const u32 t = (b % 20u) / 4u, k = b % 4u + 4u * wd;
             VkPipeline* slotp = neg ? &P->variant_neg[t][k] : &P->variant[t][k];
             if (!__atomic_load_n(slotp, __ATOMIC_ACQUIRE) && !__atomic_load_n(&P->pa_fail, __ATOMIC_ACQUIRE)) {
                 vk_ev_in in;
@@ -643,7 +650,7 @@ static void vk_pa_run(vk_eng_pipe* P, u32* spv, char* log, u32 log_size, int bg)
                     if (said++ < 8) VK_LOG("engine: vkCreateGraphicsPipelines failed%s\n", bg ? " (pipeline worker)" : "");
                 }
             }
-            __atomic_fetch_or(&P->pa_done, 1ull << b, __ATOMIC_ACQ_REL);
+            __atomic_fetch_or(wd ? &P->pa_done2 : &P->pa_done, 1ull << b, __ATOMIC_ACQ_REL);
         }
     }
 }
@@ -963,10 +970,12 @@ static VkPipeline vk_pa_variant(vk_eng_pipe* P, u32 t, u32 k, int neg, VkPipelin
     }
     if (__atomic_load_n(&P->pa_fail, __ATOMIC_ACQUIRE)) return VK_NULL_HANDLE;
     const u64 bit = 1ull << vk_pa_bit(t, k, neg);
+    volatile u64* const pa_done = k >= 4u ? &P->pa_done2 : &P->pa_done;   /* [aa] the MSAA variants' word */
+    volatile u64* const pa_want = k >= 4u ? &P->pa_want2 : &P->pa_want;
     const int skippable = vk_pa_skippable(P, neg);
     const int hold = !skippable && vk_pa_may_hold();      /* (freeze) left out, the frame not shown */
     vk_pa_lock();
-    if (__atomic_load_n(&P->pa_done, __ATOMIC_ACQUIRE) & bit) {      /* tried: it failed */
+    if (__atomic_load_n(pa_done, __ATOMIC_ACQUIRE) & bit) {          /* tried: it failed */
         vk_pa_unlock();
         return __atomic_load_n(slotp, __ATOMIC_ACQUIRE);
     }
@@ -978,13 +987,13 @@ static VkPipeline vk_pa_variant(vk_eng_pipe* P, u32 t, u32 k, int neg, VkPipelin
         if (r) vk_pw_note(P, t, k, neg);
         return r;
     }
-    P->pa_want |= bit;
+    *pa_want |= bit;
     if (hold) { if (P->pa_job <= 1) vk_pa_enqueue_front_locked(P); }
     else if (!P->pa_job) vk_pa_enqueue_locked(P);
     vk_pa_unlock();
     if (!skippable && !hold) vk_pa_steal(P);              /* still queued: run it here */
     for (;;) {
-        if (__atomic_load_n(&P->pa_done, __ATOMIC_ACQUIRE) & bit) {
+        if (__atomic_load_n(pa_done, __ATOMIC_ACQUIRE) & bit) {
             r = __atomic_load_n(slotp, __ATOMIC_ACQUIRE);
             vk_pa_waited(t0);
             return r;

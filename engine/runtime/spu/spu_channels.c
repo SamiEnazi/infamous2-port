@@ -364,25 +364,46 @@ void (*g_spu_out_mbox_hook)(uint32_t group_id, uint32_t spu_id,
  * a title whose SPUs build the command stream never tells libgcm where that
  * stream is, so the only evidence is the DMA that writes it. NULL until
  * installed, so a title with no SPU-built FIFO pays nothing. */
-void (*g_spu_put_hook)(uint32_t ea, uint32_t size) = 0;
+PS3_MV_DEF(ps3_mv_put_hook_fn, g_spu_put_hook, , = 0)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 /* (critic2) memory the RSX reads (spu_dma.h spu_put_copy); NULL = none. */
-int (*g_spu_put_rsx_hook)(uint32_t ea, uint32_t size) = 0;
+PS3_MV_DEF(ps3_mv_put_rsx_hook_fn, g_spu_put_rsx_hook, , = 0)
 /* (perf17) its interval, spu_dma.h spu_put_is_rsx; hi = 0 = none until cellGcmInit */
-uint32_t g_spu_put_rsx_lo = 0, g_spu_put_rsx_hi = 0;
-int g_spu_put_rsx_exact = 0;
+PS3_MV_DEF(uint32_t, g_spu_put_rsx_lo, , = 0)
+PS3_MV_DEF(uint32_t, g_spu_put_rsx_hi, , = 0)
+PS3_MV_DEF(int, g_spu_put_rsx_exact, , = 0)
 /* (edgevp) spu_dma.h spu_edge_viewport_scale: Edge Geometry's viewport copies
  * scaled to the render targets; set by the video backend once it knows them. */
 int g_spu_edge_vp_on = 0;
 float g_spu_edge_vp_sx = 1.0f, g_spu_edge_vp_sy = 1.0f;
 static int s_edge_vp_env = -1;                            /* PS3RECOMP_EDGE_VP: 1 unless "0" */
 static float s_edge_vp_bx = 1.0f, s_edge_vp_by = 1.0f;    /* the backend's raster scale */
+/* [shadow] spu_dma.h g_spu_edge_shadow_k: the shadow map's scale (side 0 = off) */
+int g_spu_edge_vp_screen = 0;
+float g_spu_edge_shadow_k = 1.0f;
+uint32_t g_spu_edge_shadow_side = 0;
+uint32_t g_spu_edge_shadow_hits = 0;
+static float s_edge_sh_k = 1.0f;
+static uint32_t s_edge_sh_side = 0;
 static void spu_edge_vp_update(void)
 {
     const float sx = s_edge_vp_bx, sy = s_edge_vp_by;
     const int on = s_edge_vp_env && (sx != 1.0f || sy != 1.0f) && sx >= 1.0f && sy >= 1.0f && sx <= 8.0f && sy <= 8.0f;
+    const uint32_t side = (s_edge_vp_env && s_edge_sh_k > 1.0f && s_edge_sh_k <= 8.0f) ? s_edge_sh_side : 0u;
     __atomic_store_n(&g_spu_edge_vp_on, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_spu_edge_shadow_side, 0u, __ATOMIC_RELEASE);
     g_spu_edge_vp_sx = sx; g_spu_edge_vp_sy = sy;
-    __atomic_store_n(&g_spu_edge_vp_on, on, __ATOMIC_RELEASE);
+    g_spu_edge_shadow_k = s_edge_sh_k;
+    __atomic_store_n(&g_spu_edge_vp_screen, on, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_spu_edge_shadow_side, side, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_spu_edge_vp_on, on || side != 0u, __ATOMIC_RELEASE);
+    { static uint32_t s_lside = 0; static float s_lk = 1.0f;
+      if (side != s_lside || s_edge_sh_k != s_lk) {
+          s_lside = side; s_lk = s_edge_sh_k;
+          fprintf(stderr, "[edgevp] [shadow] Edge viewports of the %ux%u shadow map %s\n", (unsigned)s_edge_sh_side,
+                  (unsigned)s_edge_sh_side, side ? "scaled with the map" : "as the game gives them");
+          if (side) fprintf(stderr, "[edgevp] [shadow]   x%.2f: %ux%u\n", (double)s_edge_sh_k,
+                            (unsigned)((float)side * s_edge_sh_k + 0.5f), (unsigned)((float)side * s_edge_sh_k + 0.5f));
+      } }
     static int s_last = -1; static float s_lx = 0.0f, s_ly = 0.0f;
     if (on != s_last || sx != s_lx || sy != s_ly) {
         s_last = on; s_lx = sx; s_ly = sy;
@@ -398,6 +419,42 @@ static int spu_edge_vp_setting(const char* v)
     s_edge_vp_env = !(v && v[0] == '0');
     spu_edge_vp_update();
     return 1;
+}
+/* [shadow] the draw engine's shadow-map scale (rsx_shadow_res.inc); k <= 1 or side 0 = off */
+void spu_edge_shadow_set(float k, uint32_t side)
+{
+    if (s_edge_vp_env < 0) {
+        const char* e = getenv("PS3RECOMP_EDGE_VP");
+        s_edge_vp_env = !(e && e[0] == '0');
+        ps3_setting_register("PS3RECOMP_EDGE_VP", spu_edge_vp_setting);
+    }
+    s_edge_sh_k = k > 1.0f ? k : 1.0f; s_edge_sh_side = k > 1.0f ? side : 0u;
+    spu_edge_vp_update();
+}
+/* [shadow] diagnostics: the first 12 distinct 128-byte Edge viewports that are
+ * neither the screen's nor the shadow map's, while the map is scaled */
+void spu_edge_vp_note_other(const uint8_t* p)
+{
+    static uint32_t seen[24]; static int n; static char lock;
+    if (__atomic_load_n(&n, __ATOMIC_RELAXED) >= 24) return;
+    const uint32_t key = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) | ((uint32_t)p[6] << 8) | p[7];
+    const uint32_t key2 = (key ^ (((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]) * 2654435761u)
+                        ^ ((((uint32_t)p[80] << 24) | ((uint32_t)p[81] << 16) | ((uint32_t)p[82] << 8) | p[83]) * 40503u)
+                        ^ ((((uint32_t)p[96] << 24) | ((uint32_t)p[97] << 16) | ((uint32_t)p[98] << 8) | p[99]) * 97u);
+    while (__atomic_test_and_set(&lock, __ATOMIC_ACQUIRE)) { }
+    int i = 0; while (i < n && seen[i] != key2) i++;
+    if (i == n && n < 24) {
+        seen[n++] = key2;
+        uint32_t u[4]; float f[4];
+        for (int k = 0; k < 4; k++) {
+            const uint8_t* q = p + (k < 2 ? 80 + 4 * k : 96 + 4 * (k - 2));
+            u[k] = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8) | q[3]; memcpy(&f[k], &u[k], 4);
+        }
+        fprintf(stderr, "[edgevp] [shadow] other Edge viewport: scissor %u,%u %ux%u, depth %02X%02X/%02X%02X, scales %g %g, offsets %g %g\n",
+                (unsigned)(((uint32_t)p[0] << 8) | p[1]), (unsigned)(((uint32_t)p[2] << 8) | p[3]),
+                (unsigned)(key >> 16), (unsigned)(key & 0xFFFFu), p[8], p[9], p[12], p[13], (double)f[0], (double)f[1], (double)f[2], (double)f[3]);
+    }
+    __atomic_clear(&lock, __ATOMIC_RELEASE);
 }
 void spu_edge_vp_set(float sx, float sy)
 {
@@ -637,7 +694,11 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
          * calls drain inside their own call brackets (see the lifter). */
         entry(ctx);
         { static int _e = 0;
-          if (getenv("SPU_ARGWATCH") && _e < 8) { _e++;
+          /* (Track B1) read once: this runs once per job on the native job runner, and getenv scans
+           * the whole environment */
+          static int s_argwatch = -1;
+          if (s_argwatch < 0) s_argwatch = getenv("SPU_ARGWATCH") ? 1 : 0;
+          if (s_argwatch && _e < 8) { _e++;
               fprintf(stderr, "[argwatch] after entry(): img=%d pc=0x%05X "
                       "r2=0x%08X r3=0x%08X r4=0x%08X\n", ctx->image_id,
                       (uint32_t)ctx->pc & SPU_LS_MASK, ctx->gpr[2]._u32[0],
@@ -714,7 +775,7 @@ static inline spu_mfc_slot* mfc_slot(int i)
 
 /* spu_dma.h: PS3_SPU_DMA_LEAN. 1 until the toggle is read (the first
  * spu_wrch reads it). */
-volatile int g_spu_dma_lean = 1;
+PS3_MV_DEF(volatile int, g_spu_dma_lean, , = 1)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 
 /* spu_dma.h: PS3_SPU_DMA_FAST. -1 until decided. On unless PS3_SPU_DMA_FAST=0
  * or any variable that gates a probe in mfc_do_transfer_raw / mfc_run_list /
@@ -1453,7 +1514,7 @@ static int channel_is_mfc(uint32_t ch)
  * ===========================================================================*/
 /* PS3_SPU_WRCH_INLINE (spu_helpers.h, lifted TUs): -1 until the first spu_wrch,
  * then 1 = the lifted code stores the MFC parameter channels inline. */
-int g_spu_wrch_inline = -1;
+PS3_MV_DEF(int, g_spu_wrch_inline, , = -1)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 static __attribute__((noinline, cold)) void spu_wrch_inline_init(void)
 {
     const char* e = getenv("PS3_SPU_WRCH_INLINE");
@@ -1477,7 +1538,7 @@ static __attribute__((noinline, cold)) void spu_wrch_inline_init(void)
  * another address) is one the MFC itself allows between unfenced commands of different tags
  * (CBEA: commands are unordered unless fenced/barriered). Every lock-line command keeps its
  * fences (spu_mfc_atomic), the PPU side keeps its own. =1 puts them back (A/B switch). */
-int g_spu_fastch = -1;
+PS3_MV_DEF(int, g_spu_fastch, , = -1)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 static int s_fastch_fence = 0;
 static __attribute__((noinline, cold)) int spu_fastch_init(void)
 {
@@ -2102,7 +2163,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
  * Channel read (returns value in the preferred word slot)
  * ===========================================================================*/
 /* PS3_SPU_RDCH_INLINE (spu_helpers.h, lifted TUs): -1 until the first spu_rdch. */
-int g_spu_rdch_inline = -1;
+PS3_MV_DEF(int, g_spu_rdch_inline, , = -1)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 static __attribute__((noinline, cold)) void spu_rdch_inline_init(void)
 {
     const char* e = getenv("PS3_SPU_RDCH_INLINE");
@@ -2484,16 +2545,34 @@ volatile uint32_t g_spu_reg_gen = 1;
  * (NULL when there is none). Registration appends, and lookups take the first
  * match, so registering an address again does not override it; a port that
  * replaces one routine of a lifted image (inFAMOUS 2's light job, whose
- * per-tile work moves to the GPU) needs this. Call before the SPUs run. */
+ * per-tile work moves to the GPU) needs this. Call before the SPUs run.
+ * (Track B1, 2026-11-16) The address also gets its byte in the dispatch hint table: a lifted
+ * constant-target `bi`/`bie` (SPU_CONST_BI_OK) jumps straight to the original code unless that byte is
+ * set or an interrupt is pending. Under the SPURS policy module an event was always pending at the
+ * light and SSAO jobs' `bie`, so their replacements ran; on the native job runner (no interrupts) the
+ * original tile work ran instead -- 219 at 0.8 ms and 226 at 4.9 ms a job instead of ~15 us. */
+static void spu_replaced_hint_note(uint32_t addr);
 spu_fn spu_replace_function(int image_id, uint32_t addr, spu_fn fn)
 {
     for (uint32_t i = 0; i < s_registry_count; i++)
         if (s_registry[i].addr == addr && s_registry[i].image_id == image_id) {
             spu_fn old = s_registry[i].fn;
             s_registry[i].fn = fn;
+            spu_replaced_hint_note(addr);
             __atomic_add_fetch(&g_spu_reg_gen, 1, __ATOMIC_RELEASE);
             return old;
         }
+    return NULL;
+}
+
+/* The function registered for exactly (image, addr), replaced or not (NULL: none): what the port's
+ * own code uses to find a lifted SPU routine of the game module (slim split, 2026-11-14; it used to
+ * name the lifted symbol). No wildcard images, no cross-image fallback: a registry question. */
+spu_fn spu_find_function(int image_id, uint32_t addr)
+{
+    for (uint32_t i = 0; i < s_registry_count; i++)
+        if (s_registry[i].addr == addr && s_registry[i].image_id == image_id)
+            return s_registry[i].fn;
     return NULL;
 }
 
@@ -2680,7 +2759,18 @@ int spu_have_function(uint32_t addr)
  * address: another slot whose bytes are there (the code that was streamed in)
  * or the resident overlay may, the base image may not, and with none of them
  * the code is interpreted as before. PS3_SPU_SLOT_VERIFY=0 turns it off. */
-int g_spu_slot_verify = 1;
+PS3_MV_DEF(int, g_spu_slot_verify, , = 1)
+/* (slim split) the engine's storage of the header-defined gates (ps3emu/ps3_module.h
+ * PS3_MODULE_HVARS; the headers' definitions are the game module's): their initial values */
+PS3_MV_DEF(int, g_spu_float_rz, , = 0)
+PS3_MV_DEF(volatile long long, g_spu_rz_ops, , = 0)
+PS3_MV_DEF(volatile long long, g_spu_rz_bad, , = 0)
+PS3_MV_DEF(int, g_spu_lifted_flags, , = 0)
+PS3_MV_DEF(int, g_spu_ls_probe, , = -1)
+PS3_MV_DEF(int, g_spu_smc_watch, , = -1)
+PS3_MV_DEF(int, g_wws_code_probe, , = 0)
+PS3_MV_DEF(int, g_wws_read_probe, , = 0)
+PS3_MV_DEF(int, g_spu_get_wide, , = -1)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 __attribute__((constructor)) static void spu_slot_verify_init(void)
 {
     const char* e = getenv("PS3_SPU_SLOT_VERIFY");
@@ -2832,12 +2922,14 @@ static unsigned s_stack_reset_count;
  * only on a hit. The call itself, on every dispatch and drain step, was the
  * single hottest SPU leaf in a New Marais profile (~6% of SPU samples) for a
  * check that almost never matches. */
-uint8_t g_spu_stack_reset_hint[1024];
+PS3_MV_DEF(uint8_t, g_spu_stack_reset_hint, [1024], )   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 /* PS3_SPU_STACK_HINT=0: every slot set, i.e. the full check on every dispatch
  * as before the hint table (for an A/B). Live from PS3_TOGGLE_FILE: the
  * dispatchers read the table while this rewrites it, so no byte a registered
  * entry owns is ever cleared, not even for a moment -- off only sets bytes,
  * on clears the others and (re)sets the owned ones. */
+static uint32_t s_replaced_pc[32];      /* spu_replace_function's addresses: their hint bytes stay set */
+static unsigned s_replaced_n;
 static void spu_stack_hint_set(int id, int on)
 {
     (void)id;
@@ -2845,7 +2937,15 @@ static void spu_stack_hint_set(int id, int on)
     uint8_t own[1024] = { 0 };
     for (unsigned i = 0; i < s_stack_reset_count; ++i)
         own[(s_stack_reset[i].entry >> 2) & 1023u] = 1;
+    for (unsigned i = 0; i < s_replaced_n; ++i)
+        own[(s_replaced_pc[i] >> 2) & 1023u] = 1;
     for (unsigned i = 0; i < 1024u; ++i) g_spu_stack_reset_hint[i] = own[i];
+}
+static void spu_replaced_hint_note(uint32_t addr)
+{
+    addr &= SPU_LS_MASK;
+    if (s_replaced_n < 32) s_replaced_pc[s_replaced_n++] = addr;
+    g_spu_stack_reset_hint[(addr >> 2) & 1023u] = 1;
 }
 void spu_register_stack_reset_entry(uint32_t entry, int image_id)
 {

@@ -488,7 +488,7 @@ static int clip_core(uint8_t* L, const u128* gpr)
 static int s_mode = -1, s_check, s_stats;
 static unsigned long long s_every = 20000, s_calls, s_decl, s_chk, s_bad;
 static _Thread_local int t_bypass;
-static _Thread_local uint8_t t_ls[SPU_LS_SIZE + 64];
+static _Thread_local uint8_t* t_ls;   /* (deck-merge) SPU_LS_SIZE + 64, made at the first check (module static TLS) */
 
 static int j218_clip(spu_context* ctx)
 {
@@ -506,6 +506,7 @@ static int j218_clip(spu_context* ctx)
     const uint32_t sp = ctx->gpr[1]._u32[0] & SPU_LS_MASK;
     int ok;
     if (s_check) {
+        if (!t_ls && !(t_ls = (uint8_t*)malloc(SPU_LS_SIZE + 64))) return 0;
         memcpy(t_ls, ctx->ls, SPU_LS_SIZE);
         ok = clip_core(t_ls, ctx->gpr);
         const u128 r0 = ctx->gpr[0];

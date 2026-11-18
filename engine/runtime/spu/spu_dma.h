@@ -65,6 +65,21 @@ extern int (*g_spu_put_rsx_hook)(uint32_t ea, uint32_t size);
 extern int g_spu_edge_vp_on;
 extern float g_spu_edge_vp_sx, g_spu_edge_vp_sy;
 void spu_edge_vp_set(float sx, float sy);
+/* [shadow] the same for the sun-shadow map the draw engine draws k times
+ * larger (PS3RECOMP_SHADOW_RES, libs/video/rsx_shadow_res.inc): an Edge
+ * viewport of scissor {0, 0, side, side} with viewport scales of +-side/2
+ * (the map's own) is scaled by k, so Edge's "covers no pixel centre" cull
+ * judges the larger map's pixels. Without it every caster triangle smaller
+ * than a 1024 texel's centre spacing is culled and the 2048 / 4096 map has
+ * holes: Cole's shadow turned into dots (sh2 run, 2026-11-16). side 0 = off.
+ * g_spu_edge_vp_screen: the screen scaling above is on (vp_on also carries
+ * the shadow one). */
+extern int g_spu_edge_vp_screen;
+extern float g_spu_edge_shadow_k;
+extern uint32_t g_spu_edge_shadow_side;
+extern uint32_t g_spu_edge_shadow_hits;   /* [shadow] viewports scaled so far (the draw engine reports them) */
+void spu_edge_shadow_set(float k, uint32_t side);
+void spu_edge_vp_note_other(const uint8_t* p);   /* [shadow] diagnostics: an unmatched viewport (first few) */
 static inline void spu_edge_vp_be_f32_scale(uint8_t* q, float k)
 {
     uint32_t u = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8) | q[3];
@@ -74,7 +89,40 @@ static inline void spu_edge_vp_be_f32_scale(uint8_t* q, float k)
 static inline void spu_edge_viewport_scale(uint8_t* p)
 {
     static const uint8_t sig[16] = { 0,0, 0,0, 0x05,0x00, 0x02,0xD0, 0xBF,0x80,0,0, 0x3F,0x80,0,0 };
-    if (memcmp(p, sig, 16)) return;
+    if (memcmp(p, sig, 16)) {
+        /* [shadow] the shadow map's viewport (see g_spu_edge_shadow_k) */
+        const uint32_t side = __atomic_load_n(&g_spu_edge_shadow_side, __ATOMIC_ACQUIRE);
+        if (!side) return;
+        /* the map's own viewport: x and y scales and offsets all +-side/2 (the four floats of an
+         * EdgeGeomViewportInfo at +80 / +84 / +96 / +100 that map clip space onto the whole map),
+         * scissor at 0, 0; any depth range (the shadow pass's is not the screen's) */
+        uint32_t f[4];
+        for (int i = 0; i < 4; i++) {
+            const uint8_t* q = p + (i < 2 ? 80 + 4 * i : 96 + 4 * (i - 2));
+            f[i] = (((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8) | q[3]) & 0x7FFFFFFFu;
+        }
+        const float half = (float)side * 0.5f;
+        uint32_t hb; memcpy(&hb, &half, 4);
+        if (f[0] != hb || f[1] != hb) {                            /* not the map's (nearly every GET) */
+            if (!p[0] && !p[1] && !p[2] && !p[3] && f[0] &&
+                ((f[0] == f[1] && f[1] == f[2] && f[2] == f[3]) ||   /* another square viewport */
+                 (p[12] == 0x3F && p[13] == 0x80 && !p[14] && !p[15] && !p[10] && !p[11] &&   /* any Edge viewport */
+                  ((p[8] == 0xBF && p[9] == 0x80) || (!p[8] && !p[9])))))
+                spu_edge_vp_note_other(p);                           /* logged once each (first 12) */
+            return;
+        }
+        if (f[2] != hb || f[3] != hb || p[0] || p[1] || p[2] || p[3]) { spu_edge_vp_note_other(p); return; }
+        __atomic_fetch_add(&g_spu_edge_shadow_hits, 1u, __ATOMIC_RELAXED);
+        const uint32_t vw = ((uint32_t)p[4] << 8) | p[5], vh = ((uint32_t)p[6] << 8) | p[7];
+        const float k = g_spu_edge_shadow_k;
+        const uint32_t s2 = (uint32_t)((float)side * k + 0.5f);
+        if (vw == side) { p[4] = (uint8_t)(s2 >> 8); p[5] = (uint8_t)s2; }   /* a scissor of the whole map */
+        if (vh == side) { p[6] = (uint8_t)(s2 >> 8); p[7] = (uint8_t)s2; }
+        spu_edge_vp_be_f32_scale(p + 80, k);  spu_edge_vp_be_f32_scale(p + 84, k);
+        spu_edge_vp_be_f32_scale(p + 96, k);  spu_edge_vp_be_f32_scale(p + 100, k);
+        return;
+    }
+    if (!__atomic_load_n(&g_spu_edge_vp_screen, __ATOMIC_ACQUIRE)) return;   /* [shadow] on for the map alone */
     const float sx = g_spu_edge_vp_sx, sy = g_spu_edge_vp_sy;
     const uint32_t w = (uint32_t)(1280.0f * sx + 0.5f), h = (uint32_t)(720.0f * sy + 0.5f);
     p[4] = (uint8_t)(w >> 8); p[5] = (uint8_t)w;
@@ -900,7 +948,9 @@ static inline int mfc_do_transfer_raw(spu_context* spu, uint32_t lsa, uint64_t e
  * head is brought to an 8-byte boundary byte by byte, after which every load covers whole aligned
  * doublewords, and an aligned doubleword lies in one cache line, so a concurrent 8-byte guest store is seen
  * whole or not at all. Short copies (under 32 bytes) and the tail go the old way. x86-64 only. */
-#if defined(_MSC_VER)
+#if defined(PS3_MODULE_VARS_H) || defined(PS3_MODULE_DATA_IMPORT)
+extern int g_spu_get_wide;   /* (slim split) the game module's (ps3emu/ps3_module.h PS3_MODULE_HVARS) */
+#elif defined(_MSC_VER)
 __declspec(selectany) int g_spu_get_wide = -1;
 #else
 __attribute__((weak)) int g_spu_get_wide = -1;

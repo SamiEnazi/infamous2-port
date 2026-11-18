@@ -8,7 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-volatile uint8_t g_spu_patch[SPU_PATCH_MAX];
+_Static_assert(SPU_PATCH_MAX == PS3_MODULE_SPU_PATCH, "ps3emu/ps3_module.h");
+PS3_MV_DEF(volatile uint8_t, g_spu_patch, [SPU_PATCH_MAX], )   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 volatile int g_spu_patch_ready;
 
 typedef struct {

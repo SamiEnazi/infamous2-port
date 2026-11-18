@@ -1,33 +1,36 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Linux Setup (tools/setup_build.ps1's counterpart): from your own copy of inFAMOUS 2 to a native
 # Linux build, in this folder only (nothing is installed system-wide, no root needed).
-#   tools/setup.sh --disc <folder holding PS3_GAME> --rpcs3 <RPCS3's folder> [--rpcs3-bin <rpcs3 AppImage>]
-#                  [--eboot <decrypted EBOOT.elf>] [--jobs N] [--no-desktop]
-#   --rpcs3      RPCS3's data folder: the one holding dev_hdd0/ and dev_flash/, with the game's 1.04 update
-#                installed (File > Install Packages) and the PS3 firmware (File > Install Firmware).
+#   tools/setup.sh --disc <folder holding PS3_GAME> [--rpcs3 <RPCS3's folder>] [--rpcs3-bin <rpcs3 AppImage>]
+#                  [--no-rpcs3] [--eboot <decrypted EBOOT.elf>] [--jobs N] [--no-desktop]
+# RPCS3 is not needed: the game's update (1.01 + 1.03 + 1.04, 236 MB) and the PS3 system software (197 MB, of
+# which three firmware modules are kept) come from Sony's own servers (tools/sony_files.py), unpacked and
+# decrypted with tools/ps3tool.py (downloaded from the port's GitHub when a zip came without it).
+#   --rpcs3      optional: RPCS3's data folder (holding dev_hdd0/ and dev_flash/). When it has the 1.04
+#                update and the firmware, they are copied from there instead (nothing to download).
 #                Default: ~/.config/rpcs3 (the AppImage, EmuDeck), else the Flatpak's
-#                ~/.var/app/net.rpcs3.RPCS3/config/rpcs3
-#   --rpcs3-bin  the RPCS3 AppImage (or rpcs3 program) that decrypts the update's EBOOT.BIN and three
-#                firmware modules (once; RPCS3 is not needed after Setup). Default: rpcs3 on PATH, an
-#                rpcs3*.AppImage in ~/Applications (EmuDeck), else the Flatpak net.rpcs3.RPCS3.
-#   --eboot      an already decrypted 1.04 EBOOT.elf instead (then RPCS3 is needed only for the firmware
-#                modules, unless work/fw holds liblv2.prx, libsysmodule.prx and libsre.prx)
+#                ~/.var/app/net.rpcs3.RPCS3/config/rpcs3, when it holds dev_hdd0/
+#   --rpcs3-bin  optional: the RPCS3 AppImage (or rpcs3 program), used to decrypt only when ps3tool cannot.
+#                Default: rpcs3 on PATH, an rpcs3*.AppImage in ~/Applications (EmuDeck), else the Flatpak.
+#   --no-rpcs3   do not look for RPCS3 at all
+#   --eboot      an already decrypted 1.04 EBOOT.elf instead
 #   --jobs       compile jobs (default: half the CPU threads, at most 8: each lifted file is large)
 # Steps:
 #   1. check this PC and the game                 6. Vulkan headers, SDL2 headers, glslang -> deps/
 #   2. the build tools -> tools-cache/            7. translate and compile the game (15-60 min)
 #      (LLVM 22.1.8, and CMake / Ninja             -> work/port/build/Infamous2Recomp
 #      when the system has none)                   8. a desktop launcher (~/.local/share/applications)
-#   3. your game linked/copied into game/
-#   4. the 1.04 EBOOT decrypted -> eboot/EBOOT_upd104.elf
-#   5. Python tools -> work/venv
+#      and the Python tools -> work/venv
+#   3. your game linked into game/, its update and the firmware files into game/ (RPCS3's or Sony's)
+#   4. the 1.04 EBOOT and the firmware modules decrypted -> eboot/EBOOT_upd104.elf, work/fw
+#   5. (the Python tools: made in step 2)
 # Needs (distribution packages): a C/C++ toolchain's headers and libraries (Debian/Ubuntu:
 # build-essential; Fedora: gcc-c++; Arch: base-devel), python3 with venv, curl, tar, xz, unzip, the
 # Vulkan loader (libvulkan1 / vulkan-loader) with your GPU's driver, and SDL2 (libsdl2-2.0-0 / SDL2).
 # Play with tools/play.sh (or the desktop launcher).
 set -eu   # (no pipefail: 'ldconfig -p | grep -q' would fail on grep's early exit)
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-disc=""; rpcs3=""; rpcs3bin=""; eboot=""; desktop=1
+disc=""; rpcs3=""; rpcs3bin=""; eboot=""; desktop=1; norpcs3=0
 jobs=$(( $(nproc) / 2 )); [ $jobs -gt 8 ] && jobs=8; [ $jobs -lt 1 ] && jobs=1
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,19 +40,63 @@ while [ $# -gt 0 ]; do
         --eboot) eboot="$2"; shift ;;
         --jobs) jobs="$2"; shift ;;
         --no-desktop) desktop=0 ;;
+        --no-rpcs3) norpcs3=1 ;;
         -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
         *) echo "unknown option $1 (--help)"; exit 2 ;;
     esac
     shift
 done
-if [ -z "$rpcs3" ]; then
+if [ $norpcs3 = 1 ]; then rpcs3=""; rpcs3bin=""
+elif [ -z "$rpcs3" ]; then
     rpcs3="${XDG_CONFIG_HOME:-$HOME/.config}/rpcs3"
     fp="$HOME/.var/app/net.rpcs3.RPCS3/config/rpcs3"
-    [ ! -d "$rpcs3/dev_hdd0" ] && [ -d "$fp/dev_hdd0" ] && rpcs3="$fp"
+    [ ! -d "$rpcs3/dev_hdd0" ] && [ ! -f "$rpcs3/config/vfs.yml" ] && [ -d "$fp" ] && rpcs3="$fp"
+    [ -d "$rpcs3/dev_hdd0" ] || [ -f "$rpcs3/config/vfs.yml" ] || rpcs3=""      # (RPCS3 is optional)
 fi
+# RPCS3's data folders to look in (GitHub #46, Bazzite: Flatpak RPCS3 and a dev_hdd0 moved by vfs.yml): the
+# one given/chosen above, then the AppImage/package folder, then the Flatpak's.
+rpcs3_dirs=()
+[ -n "$rpcs3" ] && rpcs3_dirs=("$rpcs3")
+if [ -n "$rpcs3" ]; then
+    for d in "${XDG_CONFIG_HOME:-$HOME/.config}/rpcs3" "$HOME/.var/app/net.rpcs3.RPCS3/config/rpcs3" "$HOME/.local/share/rpcs3"; do
+        if [ -d "$d" ] && [ "$d" != "$rpcs3" ]; then rpcs3_dirs+=("$d"); fi
+    done
+fi
+# vfs_dir <dev_hdd0|dev_flash> <a path inside it>: RPCS3's config/vfs.yml of each data folder may say where it
+# is ("/dev_hdd0/: $(EmulatorDir)dev_hdd0/", or a path on another disk); else <data folder>/<name>. The first
+# place that holds the probe path, else the first place.
+vfs_dir() {
+    local name="$1" probe="$2" d v first="" emu='$(EmulatorDir)'
+    for d in "${rpcs3_dirs[@]}"; do
+        v=""
+        if [ -f "$d/config/vfs.yml" ]; then
+            v=$(sed -nE "s#^[[:space:]]*[\"']?/?${name}/?[\"']?[[:space:]]*:[[:space:]]*(.*[^[:space:]])?[[:space:]]*\$#\1#p" "$d/config/vfs.yml" | head -1 | tr -d "\r\"'")
+            case "$v" in
+                "$emu"*) v="${d%/}/${v:${#emu}}" ;;
+                ""|/*) ;;
+                *) v="${d%/}/$v" ;;
+            esac
+        fi
+        for c in ${v:+"$v"} "$d/$name"; do
+            [ -z "$first" ] && first="$c"
+            [ -e "$c/$probe" ] && { printf '%s' "${c%/}"; return 0; }
+        done
+    done
+    printf '%s' "${first%/}"
+}
 t0=$(date +%s)
 step() { echo "== [$1/8] $2   ($(( ($(date +%s) - t0) / 60 )) min so far)"; }
-fail() { echo "== FAILED: $*"; exit 1; }
+# Something that moves while a long, silent command runs: a line every 5 seconds until tick_stop
+tick_pid=""
+tick_start() { ( s=0; while sleep 5; do s=$((s+5)); echo "  progress: $1, $((s/60)):$(printf '%02d' $((s%60))) so far"; done ) & tick_pid=$!; }
+tick_stop() { if [ -n "$tick_pid" ]; then kill "$tick_pid" 2>/dev/null || true; tick_pid=""; fi; return 0; }
+fail() { tick_stop; echo "== FAILED: $*"; exit 1; }
+# Folder names (GitHub #34): spaces, "&", "(", brackets, other alphabets build fine here (every path is quoted, and
+# CMake / Ninja take UTF-8), but CMake reads ";" as a list separator, and the desktop launcher can't hold a few others
+case "$root$disc" in
+    *';'*|*'"'*|*'\'*|*'`'*|*'$'*|*$'\n'*)
+        fail "a folder name with one of these characters: ; \" \\ \` \$ (or a line break) can't be built: rename the folder ($root) or your game folder, then run Setup again" ;;
+esac
 cache="$root/tools-cache"; deps="$root/deps"; dl="$cache/dl"
 mkdir -p "$cache" "$deps" "$dl"
 
@@ -107,7 +154,12 @@ else ok MISS Python "python3 3.10+ with venv (Debian/Ubuntu: python3-venv)"; fi
 gccdir=""
 for d in $(ls -d /usr/lib/gcc/x86_64-*linux-gnu/* /usr/lib/gcc/x86_64-*linux/* 2>/dev/null | sort -V -r); do
     v=$(basename "$d"); for inc in /usr/include/c++/"$v" /usr/include/c++/"${v%%.*}"; do
-        [ -f "$inc/vector" ] && [ -f "$d/libstdc++.so" -o -f "$d/libstdc++.a" ] && { gccdir="$d"; break 2; }; done
+        [ -f "$inc/vector" ] || continue
+        # libstdc++ sits next to GCC's crt files on Debian/Ubuntu, in the distro's lib dir on others (Fedora's
+        # /usr/lib64, NixOS FHS environments): clang's --gcc-install-dir finds it in either place
+        for lib in "$d" /usr/lib64 /usr/lib /usr/lib/x86_64-linux-gnu; do
+            [ -f "$lib/libstdc++.so" -o -f "$lib/libstdc++.a" ] && { gccdir="$d"; break 3; }
+        done; done
 done
 [ -n "$gccdir" ] && ok ok "C++ headers and libraries" "$gccdir" || ok MISS "C++ headers and libraries" "install them (Debian/Ubuntu: build-essential; Fedora: gcc-c++; Arch: base-devel)"
 for t in curl tar xz unzip; do command -v $t >/dev/null && ok ok $t found || ok MISS $t "install it"; done
@@ -122,31 +174,82 @@ else
         *) ok MISS "Game" "[$title] is not inFAMOUS 2" ;;
     esac
 fi
-upd="$rpcs3/dev_hdd0/game/$title"
+# The update and the firmware files: the port's own copies in game/ (an earlier setup), RPCS3's when it has them
+# (copied), else Sony's servers (tools/sony_files.py). RPCS3 is optional; only the digital version needs it.
+upd_ok() {   # upd_ok <folder>: the 1.04 update (the digital version: the game itself, 01.03)
+    local v=""; [ -f "$1/PARAM.SFO" ] && [ -f "$1/USRDIR/EBOOT.BIN" ] && v=$(sfo "$1/PARAM.SFO" APP_VER)
+    [ "$v" = "01.04" ] || { [ "${title:0:2}" = NP ] && [ "$v" = "01.03" ]; }
+}
+fw_ok() { [ -f "$1/sys/external/liblv2.sprx" ] && [ -f "$1/sys/external/libsysmodule.sprx" ] && [ -f "$1/sys/external/libsre.sprx" ]; }
+hdd0=""; flash=""
+if [ -n "$rpcs3" ]; then hdd0=$(vfs_dir dev_hdd0 "game/$title/PARAM.SFO"); flash=$(vfs_dir dev_flash sys/external/liblv2.sprx); fi
+upd="${hdd0:+$hdd0/game/$title}"
+[ -n "$rpcs3" ] && ok ok RPCS3 "$rpcs3 (optional: its update and firmware files are copied when it has them)" \
+                || ok note RPCS3 "not used (not needed: the game's update and the PS3 firmware files come from Sony's servers)"
 if [ -n "$title" ]; then
-    ver=""; [ -f "$upd/PARAM.SFO" ] && ver=$(sfo "$upd/PARAM.SFO" APP_VER)
-    if [ "$ver" = "01.04" ] || { [ "${title:0:2}" = NP ] && [ "$ver" = "01.03" ]; }; then ok ok "Game update in RPCS3" "$upd ($ver)"
-    else ok MISS "Game update in RPCS3" "${ver:+found $ver; }install the 1.04 update in RPCS3 (File > Install Packages), or give --rpcs3 <RPCS3's folder holding dev_hdd0>"; fi
+    if upd_ok "$root/game/dev_hdd0/game/$title"; then ok ok "Game update" "in game/dev_hdd0/game/$title"
+    elif [ -n "$upd" ] && upd_ok "$upd"; then ok ok "Game update" "copied from RPCS3 ($upd)"
+    elif [ "${title:0:2}" = NP ]; then ok MISS "Digital game in RPCS3" "the digital (PSN) version needs RPCS3 with the game and its license installed (File > Install Packages/Raps/Edats); give --rpcs3 <RPCS3's folder holding dev_hdd0>"
+    else ok note "Game update" "downloaded from Sony's servers during the setup: the updates 1.01, 1.03 and 1.04 (236 MB)"; fi
 fi
-[ -f "$rpcs3/dev_flash/sys/external/liblv2.sprx" ] && ok ok "PS3 firmware in RPCS3" "$rpcs3/dev_flash" \
-    || ok MISS "PS3 firmware in RPCS3" "install it in RPCS3: File > Install Firmware (PS3UPDAT.PUP from playstation.com)"
-[ -z "$rpcs3bin" ] && rpcs3bin=$(command -v rpcs3 || true)
-[ -z "$rpcs3bin" ] && rpcs3bin=$(ls -1 "$HOME"/Applications/rpcs3*.AppImage "$HOME"/Applications/RPCS3*.AppImage 2>/dev/null | head -1 || true)
-if [ -z "$rpcs3bin" ] && command -v flatpak >/dev/null && flatpak info net.rpcs3.RPCS3 >/dev/null 2>&1; then
-    rpcs3bin="$cache/rpcs3-flatpak.sh"   # one program path for rpcs3_decrypt
-    printf '#!/bin/sh\nexec flatpak run --filesystem=%s net.rpcs3.RPCS3 "$@"\n' "$root" > "$rpcs3bin"; chmod +x "$rpcs3bin"
+if fw_ok "$root/game/dev_flash"; then ok ok "PS3 firmware files" "in game/dev_flash"
+elif [ -n "$flash" ] && fw_ok "$flash"; then ok ok "PS3 firmware files" "copied from RPCS3 ($flash)"
+else ok note "PS3 firmware files" "downloaded from Sony's servers during the setup: the system software 4.93 (197 MB), of which 3 modules are kept"; fi
+# DLC (GitHub #48, #56; optional): the game's unlock files, <dev_hdd0>/game/<ID>/USRDIR/dlc/ulf/unlock_*.edat. RPCS3's
+# are copied into the port's folder in step 3 (on a first setup and on every later run), the dlc folder's too.
+dlc_files() { [ -d "$1" ] && find "$1" -type f -iname '*.edat' 2>/dev/null | sort; return 0; }
+dlc_count() { dlc_files "$1" | wc -l | tr -d ' '; }
+dlc_copy() {   # dlc_copy <from> <to> [flat]: missing or different files only, lower-case names; says how many
+    local f rel dst n=0
+    while IFS= read -r f; do
+        rel="${f#"$1"/}"; [ "${3:-}" = flat ] && rel="$(basename "$f")"
+        dst="$2/${rel,,}"
+        if ! cmp -s "$f" "$dst"; then
+            mkdir -p "$(dirname "$dst")" && rm -f "$dst" "$dst.dec" && cp "$f" "$dst" && chmod u+rw "$dst" && n=$((n + 1))
+        fi
+    done < <(dlc_files "$1")
+    printf '%s' "$n"
+}
+dlc_need_license() {   # how many of a folder's unlock files are bound to a license (.rap): header byte 11 is 1 or 2
+    local f n=0
+    while IFS= read -r f; do
+        if [ "$(head -c 3 "$f" 2>/dev/null)" = NPD ]; then
+            case "$(od -An -tu1 -j11 -N1 "$f" 2>/dev/null | tr -d ' ')" in 1|2) n=$((n + 1)) ;; esac
+        fi
+    done < <(dlc_files "$1")
+    printf '%s' "$n"
+}
+nfiles() { [ "$1" = 1 ] && printf '1 file' || printf '%s files' "$1"; }
+rpdlc=""
+if [ -n "$rpcs3" ] && [ -n "$title" ]; then rpdlc="$(vfs_dir dev_hdd0 "game/$title/USRDIR/dlc")/game/$title/USRDIR/dlc"; fi
+if [ -n "$title" ]; then
+    d_rp=0; [ -n "$rpdlc" ] && d_rp=$(dlc_count "$rpdlc")
+    d_drop=$(dlc_count "$root/dlc"); d_own=$(dlc_count "$root/game/dev_hdd0/game/$title/USRDIR/dlc")
+    d=""
+    [ "$d_rp" -gt 0 ] && d="$(nfiles "$d_rp") found in RPCS3 (copied into the port's folder during the setup)"
+    [ "$d_drop" -gt 0 ] && d="${d:+$d; }$(nfiles "$d_drop") in the dlc folder"
+    [ "$d_own" -gt 0 ] && d="${d:+$d; }$(nfiles "$d_own") in the port's folder already"
+    if [ -n "$d" ]; then ok ok DLC "$d"
+    else ok note DLC "none (optional: install your DLC in RPCS3 and run setup again, or put its unlock files, *.edat, in the port's dlc folder)"; fi
 fi
-needfw=0; for m in liblv2 libsysmodule libsre; do [ -f "$root/work/fw/$m.prx" ] || needfw=1; done
-if [ -z "$eboot" ] && [ ! -f "$root/eboot/EBOOT_upd104.elf" ] || [ $needfw = 1 ]; then
-    [ -n "$rpcs3bin" ] && [ -x "$rpcs3bin" ] && ok ok "RPCS3 program" "$rpcs3bin" || ok MISS "RPCS3 program" "--rpcs3-bin <the rpcs3 AppImage> (it decrypts the game's code once)"
+# RPCS3's program decrypts only when ps3tool cannot (step 4)
+if [ $norpcs3 = 0 ]; then
+    [ -z "$rpcs3bin" ] && rpcs3bin=$(command -v rpcs3 || true)
+    [ -z "$rpcs3bin" ] && rpcs3bin=$(ls -1 "$HOME"/Applications/rpcs3*.AppImage "$HOME"/Applications/RPCS3*.AppImage 2>/dev/null | head -1 || true)
+    if [ -z "$rpcs3bin" ] && command -v flatpak >/dev/null && flatpak info net.rpcs3.RPCS3 >/dev/null 2>&1; then
+        rpcs3bin="$cache/rpcs3-flatpak.sh"   # one program path for rpcs3_decrypt
+        printf '#!/bin/sh\nexec flatpak run --filesystem=%s net.rpcs3.RPCS3 "$@"\n' "$root" > "$rpcs3bin"; chmod +x "$rpcs3bin"
+    fi
 fi
+[ -f "$root/tools/ps3tool.py" ] && ok note ps3tool "tools/ps3tool.py (unpacks and decrypts your game's files)" \
+                                || ok note ps3tool "downloaded from GitHub during the setup (tools/ps3tool.py: unpacks and decrypts your game's files)"
 for sub in engine/CMakeLists.txt base/infamous2-lle/CMakeLists.txt; do   # (one repository since v0.5.0)
     [ -f "$root/$sub" ] && ok ok "${sub%%/*}" present || ok MISS "${sub%%/*}" "missing: download or git clone the port again"
 done
 [ $miss = 0 ] || fail "fix the MISS items first"
 
 # ------------------------------------------------------------------------------------------------
-step 2 "the build tools (into tools-cache/, nothing is installed)"
+step 2 "the build tools (into tools-cache/, nothing is installed) and the Python tools"
 LLVM_TOP=LLVM-22.1.8-Linux-X64
 if [ ! -f "$cache/llvm/.ready" ]; then
     download "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_TOP.tar.xz" "$dl/$LLVM_TOP.tar.xz" \
@@ -231,22 +334,67 @@ else
     export PORT_NINJA="$cache/ninja/ninja"
 fi
 echo "  cmake $PORT_CMAKE, ninja $PORT_NINJA"
+# work/venv: the build's Python packages, and pycryptodome for tools/ps3tool.py (steps 3 and 4: much faster with it)
+venv="$root/work/venv"
+[ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import sys" 2>/dev/null || { rm -rf "$venv"; python3 -m venv "$venv"; }
+"$venv/bin/python" -m pip install --disable-pip-version-check -q -r "$root/engine/requirements.txt" || fail "pip install failed"
+echo "  Python tools: work/venv"
 
 # ------------------------------------------------------------------------------------------------
-step 3 "your game: the disc folder linked, the update, firmware files and HDD install copied into game/"
+step 3 "your game: the disc folder linked; the game's update and the PS3 firmware files (from RPCS3 when it has them, else from Sony's servers)"
 game="$root/game"
 mkdir -p "$game/dev_hdd0/game" "$game/gamedata"
-if [ -L "$game/disc" ] && [ "$(readlink -f "$game/disc")" != "$disc" ]; then rm -f "$game/disc"; fi
-[ -e "$game/disc" ] || ln -s "$disc" "$game/disc"
-echo "  $game/disc -> $disc (keep your disc folder where it is)"
+# (v0.6.0) the game's files are copied INTO the port's folder, so the folder can be moved or copied anywhere and
+# still plays; an older setup's link (game/disc -> your folder) is replaced by the copy. Your folder is not changed.
+if [ "$(readlink -f "$disc")" = "$(readlink -f "$game/disc" 2>/dev/null)" ] && [ ! -L "$game/disc" ]; then
+    echo "  your game: in game/disc"
+else
+    need=$(du -sb "$disc" 2>/dev/null | cut -f1); need=${need:-0}
+    have=$(df -P -B1 "$root" | awk 'NR==2{print $4}')
+    [ "$have" -gt $(( need + 3221225472 )) ] || fail "not enough free space to copy your game into the port's folder: it needs $(( need / 1073741824 + 1 )) GB and about 3 GB more"
+    [ -L "$game/disc" ] && rm -f "$game/disc"
+    echo "  copying your game into the port's folder ($(( need / 1073741824 )) GB): from then on the port needs nothing outside its folder"
+    mkdir -p "$game/disc"
+    cp -a --no-preserve=ownership "$disc/." "$game/disc/" || fail "copying your game into game/disc failed"
+    echo "  your game: game/disc (a copy of $disc)"
+fi
 copy_tree() {   # copy_tree <src> <dst> <what>
     echo "  copying $3"; mkdir -p "$2"; cp -a --no-preserve=ownership "$1/." "$2/"
 }
-[ -f "$game/dev_hdd0/game/$title/USRDIR/EBOOT.BIN" ] || copy_tree "$upd" "$game/dev_hdd0/game/$title" "the 1.04 update (0.2 GB)"
-[ -d "$game/dev_flash/sys" ] || copy_tree "$rpcs3/dev_flash" "$game/dev_flash" "the PS3 firmware files the game reads (0.2 GB)"
-inst="$rpcs3/dev_hdd0/game/${title}_INSTALL"
-if [ -d "$inst" ] && [ ! -d "$game/dev_hdd0/game/${title}_INSTALL" ]; then copy_tree "$inst" "$game/dev_hdd0/game/${title}_INSTALL" "the game's HDD install (2.4 GB)"
-elif [ ! -d "$game/dev_hdd0/game/${title}_INSTALL" ]; then echo "  note: no ${title}_INSTALL in RPCS3 -- the port's first boot installs it"; fi
+sony=""
+if upd_ok "$game/dev_hdd0/game/$title"; then echo "  the 1.04 update: already in game/dev_hdd0/game/$title"
+elif [ -n "$upd" ] && upd_ok "$upd"; then copy_tree "$upd" "$game/dev_hdd0/game/$title" "the 1.04 update from RPCS3 (0.2 GB)"
+else sony="update"; fi
+if fw_ok "$game/dev_flash"; then echo "  the PS3 firmware files: already in game/dev_flash"
+elif [ -n "$flash" ] && fw_ok "$flash"; then copy_tree "$flash" "$game/dev_flash" "the PS3 firmware files from RPCS3 (0.2 GB)"
+else if [ -n "$sony" ]; then sony=all; else sony=firmware; fi; fi
+# tools/sony_files.py: Sony's files when needed, and tools/ps3tool.py in any case (a zip comes without it: from
+# GitHub); ps3tool also decrypts in step 4
+if [ -n "$sony" ]; then [ -n "$rpcs3" ] && echo "  from Sony's servers: $sony (RPCS3 does not have it)" || echo "  from Sony's servers: $sony (RPCS3 is not used)"; fi
+if ! "$venv/bin/python" -I "$root/tools/sony_files.py" "${sony:-ps3tool}" --root "$root" --disc "$disc"; then
+    [ -n "$sony" ] && fail "getting the game's files from Sony's servers failed (the reason is above). Check your internet connection and run setup again: it goes on where it stopped. (Only if Sony's servers can't be reached from your network at all: an RPCS3 that has the 1.04 update and firmware 4.93 installed works too, give --rpcs3 <its folder>.)"
+    echo "  note: no ps3tool: step 4 decrypts with RPCS3 instead"
+fi
+# DLC: RPCS3's unlock files and the dlc folder's, copied in (wherever the update came from; nothing is ever deleted)
+dlcdst="$game/dev_hdd0/game/$title/USRDIR/dlc"; n_rp=0
+if [ -n "$rpdlc" ] && [ -d "$rpdlc" ]; then n_rp=$(dlc_copy "$rpdlc" "$dlcdst"); fi
+mkdir -p "$root/dlc"
+[ -f "$root/dlc/README.txt" ] || cp "$root/tools/dlc_readme.txt" "$root/dlc/README.txt" 2>/dev/null || true
+n_drop=$(dlc_copy "$root/dlc" "$dlcdst/ulf" flat)
+n_dlc=$(dlc_count "$dlcdst")
+if [ "$n_dlc" -gt 0 ]; then
+    from=""
+    [ "$n_rp" -gt 0 ] && from="$n_rp copied from RPCS3 ($rpdlc)"
+    [ "$n_drop" -gt 0 ] && from="${from:+$from, }$n_drop copied from the dlc folder"
+    echo "  DLC: $n_dlc unlock file(s) in game/dev_hdd0/game/$title/USRDIR/dlc${from:+ ($from)}"
+    n_lic=$(dlc_need_license "$dlcdst")
+    [ "$n_lic" -gt 0 ] && echo "  note: $n_lic of the DLC files need their license (.rap): not supported yet (the game will not show that DLC)"
+else
+    echo "  DLC: none found (optional: install it in RPCS3 and run setup again, or put its unlock files, *.edat, in the port's dlc folder)"
+fi
+inst="${hdd0:+$hdd0/game/${title}_INSTALL}"
+if [ -n "$inst" ] && [ -d "$inst" ] && [ ! -d "$game/dev_hdd0/game/${title}_INSTALL" ]; then copy_tree "$inst" "$game/dev_hdd0/game/${title}_INSTALL" "the game's HDD install from RPCS3 (2.4 GB)"
+elif [ ! -d "$game/dev_hdd0/game/${title}_INSTALL" ]; then echo "  the game's HDD install (2.4 GB): the game makes it itself at its first start"; fi
 
 # ------------------------------------------------------------------------------------------------
 # RPCS3 decrypts one file per start, without a window (Qt offscreen). An AppImage is unpacked once and its
@@ -310,14 +458,26 @@ rpcs3_decrypt() {
     fi
     return 0
 }
-step 4 "the game's 1.04 EBOOT decrypted"
-mkdir -p "$root/eboot"
+# ps3tool_decrypt <in> <out>: tools/ps3tool.py as a program (Setup's venv Python: pycryptodome), an ELF out
+ps3tool_decrypt() {
+    [ -f "$root/tools/ps3tool.py" ] || return 1
+    rm -f "$2"
+    "$venv/bin/python" -I "$root/tools/ps3tool.py" decrypt "$1" "$2" > "$root/work/logs/ps3tool_decrypt.last" 2>&1 || { cat "$root/work/logs/ps3tool_decrypt.last" | tail -n 5 | sed 's/^/    ps3tool: /'; return 1; }
+    [ "$(head -c 4 "$2" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]
+}
+step 4 "the game's 1.04 EBOOT and the firmware modules decrypted (tools/ps3tool.py, else RPCS3)"
+mkdir -p "$root/eboot" "$root/work/logs"
 elf="$root/eboot/EBOOT_upd104.elf"
 if [ -n "$eboot" ]; then cp -f "$eboot" "$elf"
 elif [ ! -f "$elf" ]; then
     bin="$root/eboot/EBOOT_upd104.BIN"
-    cp -f "$upd/USRDIR/EBOOT.BIN" "$bin"
-    rpcs3_decrypt "$bin"
+    cp -f "$game/dev_hdd0/game/$title/USRDIR/EBOOT.BIN" "$bin"
+    if ! ps3tool_decrypt "$bin" "$elf"; then
+        rm -f "$elf"
+        [ -n "$rpcs3bin" ] || fail "decrypting the game's EBOOT failed (ps3tool, above) and there is no RPCS3 to try instead (--rpcs3-bin <the rpcs3 AppImage>)"
+        echo "  ps3tool could not decrypt it: trying RPCS3"
+        rpcs3_decrypt "$bin"
+    fi
     if [ ! -f "$elf" ]; then
         echo "  RPCS3's last words (work/logs/rpcs3_decrypt.log):"; tail -n 15 "$root/work/logs/rpcs3_decrypt.log" 2>/dev/null | sed 's/^/    /'
         fail "RPCS3 did not write $elf. Please post work/logs/rpcs3_decrypt.log in a GitHub issue. (Or decrypt it yourself: RPCS3 > Utilities > Decrypt PS3 Binaries on $bin, then run setup.sh again with --eboot <the .elf it wrote>)"
@@ -328,8 +488,12 @@ echo "  $elf"
 mkdir -p "$root/work/fw"
 for m in liblv2 libsysmodule libsre; do
     [ -f "$root/work/fw/$m.prx" ] && continue
-    cp -f "$rpcs3/dev_flash/sys/external/$m.sprx" "$root/work/fw/$m.sprx"
-    rpcs3_decrypt "$root/work/fw/$m.sprx"
+    cp -f "$game/dev_flash/sys/external/$m.sprx" "$root/work/fw/$m.sprx"
+    if ! ps3tool_decrypt "$root/work/fw/$m.sprx" "$root/work/fw/$m.prx"; then
+        rm -f "$root/work/fw/$m.prx"
+        [ -n "$rpcs3bin" ] || fail "decrypting $m.sprx failed (ps3tool, above) and there is no RPCS3 to try instead (--rpcs3-bin <the rpcs3 AppImage>)"
+        rpcs3_decrypt "$root/work/fw/$m.sprx"
+    fi
     [ -f "$root/work/fw/$m.elf" ] && mv -f "$root/work/fw/$m.elf" "$root/work/fw/$m.prx"
     [ -f "$root/work/fw/$m.prx" ] || { tail -n 15 "$root/work/logs/rpcs3_decrypt.log" 2>/dev/null | sed 's/^/    /'; fail "decrypting $m.sprx gave no work/fw/$m.prx (RPCS3's output: work/logs/rpcs3_decrypt.log)"; }
     echo "  work/fw/$m.prx"
@@ -337,9 +501,7 @@ done
 
 # ------------------------------------------------------------------------------------------------
 step 5 "Python tools (work/venv)"
-venv="$root/work/venv"
-[ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import sys" 2>/dev/null || { rm -rf "$venv"; python3 -m venv "$venv"; }
-"$venv/bin/python" -m pip install --disable-pip-version-check -q -r "$root/engine/requirements.txt" || fail "pip install failed"
+echo "  ready (made in step 2)"
 
 # ------------------------------------------------------------------------------------------------
 step 6 "Vulkan headers, SDL2 headers and glslang (download, then build glslang: a few minutes)"
@@ -375,19 +537,24 @@ printf 'set(PACKAGE_VERSION "2.30.10")\nset(PACKAGE_VERSION_COMPATIBLE TRUE)\n' 
 export PORT_SDL2_DIR="$deps/sdl2-cmake"
 if [ ! -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ]; then
     rm -rf "$deps/glslang-build-linux"   # (a failed try leaves CMake's compiler checks cached)
+    tick_start "building glslang (a few minutes)"
     "$PORT_CMAKE" -S "$deps/glslang-src" -B "$deps/glslang-build-linux" -G Ninja -DCMAKE_MAKE_PROGRAM="$PORT_NINJA" \
         -DCMAKE_C_COMPILER="$PORT_LLVM/bin/clang" -DCMAKE_CXX_COMPILER="$PORT_LLVM/bin/clang++" -DCMAKE_BUILD_TYPE=Release \
-        -DPython3_EXECUTABLE="$venv/bin/python" -DCMAKE_INSTALL_PREFIX="$deps/glslang-install-linux" -DBUILD_SHARED_LIBS=OFF \
+        -DPython3_EXECUTABLE="$venv/bin/python" -DCMAKE_INSTALL_PREFIX="$deps/glslang-install-linux" -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF \
         -DBUILD_EXTERNAL=OFF -DENABLE_OPT=OFF -DENABLE_GLSLANG_BINARIES=OFF -DGLSLANG_TESTS=OFF -DENABLE_HLSL=ON \
         -DENABLE_SPIRV=ON -DGLSLANG_ENABLE_INSTALL=ON -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld > "$deps/glslang-build.log" 2>&1 \
         && "$PORT_CMAKE" --build "$deps/glslang-build-linux" -j "$jobs" >> "$deps/glslang-build.log" 2>&1 \
         && "$PORT_CMAKE" --install "$deps/glslang-build-linux" >> "$deps/glslang-build.log" 2>&1 \
         || fail "building glslang failed (see $deps/glslang-build.log)"
+    tick_stop
 fi
+# without glslang the build still succeeds, but the game draws nothing (no guest programs): stop here instead
+[ -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ] \
+    || fail "glslang is not where the build looks for it ($deps/glslang-install-linux/lib/cmake/glslang); see $deps/glslang-build.log"
 echo "  deps ready"
 
 # ------------------------------------------------------------------------------------------------
-step 7 "translating and compiling the game (the long part: 15-60 minutes)"
+step 7 "translating and compiling the game (the long part: 15-60 minutes; each part says what it is and how far it is)"
 export PORT_JOBS="$jobs" PORT_LIFT_JOBS="$jobs"
 "$venv/bin/python" -I "$root/tools/rebuild.py" || fail "the build failed: see work/logs/ (python3 -I tools/build_errors.py work/logs/compile.log)"
 exe="$root/work/port/build/Infamous2Recomp"
@@ -403,7 +570,7 @@ if [ $desktop = 1 ]; then
 Type=Application
 Name=inFAMOUS 2 (PC port)
 Comment=inFAMOUS 2, natively on Linux (your own copy, recompiled)
-Exec="$root/tools/play.sh"
+Exec="${root//%/%%}/tools/play.sh"
 Path=$root
 ${icon:+Icon=$icon}
 Terminal=false
@@ -411,4 +578,4 @@ Categories=Game;
 EOF
     echo "  $apps/infamous2-port.desktop"
 else echo "  skipped (--no-desktop)"; fi
-echo "== done in $(( ($(date +%s) - t0) / 60 )) min: play with tools/play.sh (or the desktop launcher). RPCS3 is no longer needed."
+echo "== done in $(( ($(date +%s) - t0) / 60 )) min: play with tools/play.sh (or the desktop launcher). RPCS3 is not needed (the game's update and firmware files are in game/)."

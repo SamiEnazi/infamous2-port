@@ -309,6 +309,23 @@ def main():
         else:
             kind = "other"
         jobs.append((kind, f, e))
+    # The game module (slim split, 2026-11-14): the lifted TUs are no longer the port's CMake targets
+    # but tools/build_module.py's, with its Linux flags (the same ones a Linux build compiles with).
+    if src:
+        import types
+        import build_module
+        ma = types.SimpleNamespace(lift_opt=rebuild_win.LINUX_LIFT_OPT, spu_arch=rebuild_win.LINUX_SPU_ARCH,
+                                   pgo="", kit="syncheck", msvc_env=False)
+        cross = ["--target=x86_64-linux-gnu", "--sysroot=" + fwd(a.sysroot)] if IS_WIN else []
+        for group, f in build_module.sources(src, tk, "linux"):
+            args = build_module.linux_flags(group, src, tk, ma, f)
+            cmdl = subprocess.list2cmdline([cc] + cross + args + ["-c", f]) if IS_WIN else \
+                " ".join(shlex.quote(x) for x in [cc] + cross + args + ["-c", f])
+            e = {"directory": src, "file": f, "command": cmdl}
+            if group == "ppu" and under(f, os.path.join(src, "recompiled")):
+                ppu.append((f, e))
+            else:
+                jobs.append(({"ppu": "lle", "spu": "spu", "mod": "module"}[group], f, e))
     ppu.sort(key=lambda x: x[0])
     if a.ppu == "all":
         pick = ppu

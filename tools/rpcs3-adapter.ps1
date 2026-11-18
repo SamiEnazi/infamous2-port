@@ -15,6 +15,8 @@ $ErrorActionPreference = "Stop"
 
 function Find-Rpcs3 {
     $root = Split-Path -Parent $PSScriptRoot
+    # PORT_RPCS3: the RPCS3 folder Setup found for this build (v0.6.0 keeps no path of the PC in config.local.json)
+    if ($env:PORT_RPCS3 -and (Test-Path -LiteralPath (Join-Path $env:PORT_RPCS3 "rpcs3.exe"))) { return (Join-Path $env:PORT_RPCS3 "rpcs3.exe") }
     $cfg = Join-Path $root "config.local.json"
     if (Test-Path -LiteralPath $cfg) {
         try {

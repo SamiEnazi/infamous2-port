@@ -182,6 +182,7 @@ u32 rsx_fp_texture_units(const u8* ucode, u32 max_bytes);
  * 2 the user's RSX_FP_OWNPX list, 3 off by the user (RSX_FP_OWNPX=0/empty),
  * -1 programs were translated before the vendor was known (already decided). */
 int rsx_fp_set_host_vendor(u32 vendor_id);
+u32 rsx_fp_host_vendor(void);   /* (track C) 0 = not known yet */
 /* GitHub #27: the translator's NaN rules as one line for the startup log
  * (RSX_FP_NAN_MODE, RSX_FP_NRM_SAFE, RSX_FP_POW_EXP2; on by default for an
  * AMD vendor only, decided after rsx_fp_set_host_vendor). Returns 1 when any
@@ -216,6 +217,35 @@ u64 rsx_fp_literal_source_hash(
  * against fp_alpha.x from PSConstants instead of embedding a numeric value. */
 int rsx_fp_apply_alpha_test_buffered(
     char* hlsl, u32 out_size, u32 func);
+
+/* [aa] Thin alpha-tested things (ropes, wires, fences, leaves) at a distance.
+ * Applied to a program rsx_fp_apply_alpha_test_buffered has just tested:
+ *   mip  (GREATER / GEQUAL) the alpha the test compares is scaled up by the
+ *        mip level the program's 2D textures are read at (1 + 0.25 per level:
+ *        Ben Golus' "mip scale", the coverage a box-filtered mip chain loses),
+ *        so a rope two texels wide stays a line instead of breaking into dots;
+ *   cov  (GREATER / GEQUAL / LESS / LEQUAL) in an MSAA pass (specialisation
+ *        constant 200 = the pass's sample count; 1 = the plain test) the test
+ *        becomes a coverage mask (SV_Coverage) from the alpha's distance to
+ *        the reference in pixels: anti-aliased edges, alpha to coverage
+ *        without touching the alpha the program writes.
+ * Set once, before the first decompile (the Vulkan backend, from
+ * PS3RECOMP_ALPHA_AA and its MSAA). Both 0 (the default) = every program
+ * byte-identical. */
+void rsx_fp_alpha_aa_set(int mip, int cov);
+int  rsx_fp_alpha_aa_mip(void);
+int  rsx_fp_alpha_aa_cov(void);
+/* The epilogue: 1 when it was rewritten, 0 when nothing applies (off, another
+ * comparison), -1 when the text is not the test's own. no_cov: the program
+ * also exports depth (its signature changes later): mip only. A mip epilogue
+ * reads `_rsx_alod`, which rsx_fp_alpha_aa_lod defines. */
+int rsx_fp_apply_alpha_aa(char* hlsl, u32 out_size, u32 func, int no_cov);
+/* The mip level `_rsx_alod` the epilogue reads: each 2D Sample of the
+ * finished program goes through a helper that keeps the largest level seen.
+ * Run on the final text (after every other rewrite that looks for Sample
+ * calls); a no-op without `_rsx_alod`. 1 applied, 0 nothing to do, -1 no room
+ * (the text is unchanged: the caller must not build it). */
+int rsx_fp_alpha_aa_lod(char* hlsl, u32 out_size);
 
 /* Plan one 256-byte-aligned allocation in a fence-retired PS constant ring.
  * Returns 1 when it fits, 0 when the caller must submit/wait/reset first, and

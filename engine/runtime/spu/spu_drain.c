@@ -76,10 +76,10 @@ static void spu_tlc_plain_init(void)
 /* spu_context.h: SPU_DIRECT skips the per-step work of the loop below, so
  * the diagnostics that watch every step (lockstep, the step/exit traces, the
  * PM flow trace) keep it off. */
-volatile int g_spu_direct = -1;
+PS3_MV_DEF(volatile int, g_spu_direct, , = -1)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 /* SPU_CONST_BI_OK (spu_context.h): constant-target `bi` gotos in --const-bi lifts.
  * PS3_SPU_CONST_BI=0 makes every one take the indirect branch again (no re-lift). */
-volatile int g_spu_const_bi = 1;
+PS3_MV_DEF(volatile int, g_spu_const_bi, , = 1)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
 __attribute__((constructor)) static void spu_const_bi_init(void)
 {
     const char* e = getenv("PS3_SPU_CONST_BI");
@@ -598,8 +598,8 @@ static __attribute__((noinline, cold)) int spu_drain_fast_init(void)
 /* PS3_SPU_DRAIN_INLINE (spu_helpers.h, lifted TUs; default 1): the front case above,
  * inline at every lifted call site. Published once DRAIN_FAST, g_spu_direct and the
  * depth limit are known: 1 = the inline path may take it, 0 = always call. */
-int g_spu_drain_inline = -1;
-uint32_t g_spu_depth_max_pub;
+PS3_MV_DEF(int, g_spu_drain_inline, , = -1)   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
+PS3_MV_DEF(uint32_t, g_spu_depth_max_pub, , )
 static __attribute__((noinline, cold)) void spu_drain_inline_init(int fast)
 {
     const char* e = getenv("PS3_SPU_DRAIN_INLINE");

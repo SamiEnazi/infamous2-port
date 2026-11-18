@@ -32,6 +32,9 @@
  *                                     [res]); read at start. A frame larger than
  *                                     the window is area-downsampled here.
  *   PS3RECOMP_POSTFX_PROF=1           log the passes' GPU time every 5 s
+ * [aa] Not this module's, read at start by the backend: PS3RECOMP_MSAA=off|2|4|8
+ * (the screen targets multisampled, vk_msaa.inc) and PS3RECOMP_ALPHA_AA=off|mip|
+ * cov|on (the alpha test of thin cut-outs, rsx_fp_apply_alpha_aa).
  * All four at their "off" values (AA=off, SHARPEN=0, ANISO=1) give exactly
  * the old picture: the present blits the frame unchanged.
  */
@@ -85,6 +88,19 @@ int   vk_postfx_set(const char* name, const char* value);
 /* The last measured GPU time of the post passes in ms (PS3RECOMP_POSTFX_PROF=1;
  * -1 when not measured). */
 float vk_postfx_gpu_ms(void);
+/* [menu-e] The F2 menu's "PS3 | YOURS" compare line: its x as a fraction of the window's
+ * width, 0 = off. The post passes here (SMAA / FXAA, CAS and RCAS sharpening, FSR / CAS
+ * upscaling: bilinear instead) and the backend's [light] tone pass (tone, clarity) leave
+ * every pixel left of it as it came -- the PS3 look of those settings; the area downsample
+ * of a frame larger than the window is not split (it is the resolution, not an effect).
+ * Any thread; the next present takes it. */
+void  vk_postfx_set_compare(float window_frac);
+float vk_postfx_compare(void);
+/* The backend, before vk_postfx_apply: the frame goes to [x0, x1) of a window win_w wide.
+ * Returns the line as a fraction of the frame's width (0 = off) and keeps it for the post
+ * passes; vk_postfx_compare_frac() gives the last one (the tone pass, one frame earlier). */
+float vk_postfx_compare_frame(int x0, int x1, int win_w);
+float vk_postfx_compare_frac(void);
 
 /* ---- backend hooks (rsx_vulkan_backend.c) ------------------------------- */
 #ifdef VK_VERSION_1_0

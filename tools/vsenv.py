@@ -86,13 +86,56 @@ def _vcvars_env():
     return env
 
 
+def _plain(p):
+    """A path every build tool takes as is (tools/safe_paths.ps1 Test-PlainPath)."""
+    return bool(p) and len(p) <= 80 and all(c.isascii() and (c.isalnum() or c in " _.-\\:()") for c in p)
+
+
 def vs_env():
     pm = port_paths.portable_msvc()
     env = portable_env(*pm) if pm else _vcvars_env()
     llvm_bin = os.path.join(port_paths.get("llvm"), "bin")
     pk = _path_key(env)
     env[pk] = llvm_bin + os.pathsep + env.get(pk, "")
+    # The compilers' temporary files: a user name in another alphabet or with "&" in it ("C:\Users\J&J\AppData\Local
+    # \Temp") is a path some of them (rc.exe, ninja's subprocesses through cmd) can't take: then the build's own
+    # folder (GitHub #34; Setup builds through a plain path, tools/safe_paths.ps1 Get-BuildRoot).
+    tmp = env.get("TEMP") or env.get("TMP") or ""
+    if not _plain(tmp):
+        own = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "work", "tmp")
+        if _plain(own):
+            os.makedirs(own, exist_ok=True)
+            for k in [k for k in env if k.upper() in ("TEMP", "TMP")]:
+                env.pop(k)
+            env["TEMP"] = env["TMP"] = own
     return env
+
+
+def cmake_cache_fits(build):
+    """False when build/CMakeCache.txt was made for another folder (the port moved, or it is built through a
+    plain-named link now: GitHub #34); CMake then stops with "does not match the directory where it was created".
+    Such a cache and CMake's own files are deleted here, so the folder is configured again (everything compiles
+    again once)."""
+    cache = os.path.join(build, "CMakeCache.txt")
+    if not os.path.isfile(cache):
+        return True
+    made = None
+    with open(cache, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("CMAKE_CACHEFILE_DIR:INTERNAL="):
+                made = line.split("=", 1)[1].strip()
+                break
+    norm = lambda p: os.path.normcase(os.path.normpath(p.replace("/", os.sep)))
+    if made is None or norm(made) == norm(os.path.abspath(build)):
+        return True
+    print(f"  {os.path.basename(build)}: its build files were made in {made}: configured again here", flush=True)
+    for n in ("CMakeCache.txt", "build.ninja", ".ninja_log", ".ninja_deps", "cmake_install.cmake"):
+        p = os.path.join(build, n)
+        if os.path.isfile(p):
+            os.remove(p)
+    import shutil
+    shutil.rmtree(os.path.join(build, "CMakeFiles"), ignore_errors=True)
+    return False
 
 
 if __name__ == "__main__":

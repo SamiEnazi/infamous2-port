@@ -1,0 +1,22 @@
+# F2 menu, design E at 21:9 (menu-e, 2026-11-16): PS3RECOMP_ASPECT=21:9 in a 1920x823 window -- the
+# panel keeps its proportion and more of the game shows on the right. Display and Graphics (the
+# compare line on Anti-aliasing).
+# Run: tools\fast.ps1 -Tag menuB -Steps tools\menu_e219.steps -NoPictureCheck
+#      -Extra "PS3RECOMP_VK_WINDOW_SIZE=1920x823;PS3RECOMP_RENDER_SCALE=1.5;PS3RECOMP_ASPECT=21:9;PS3RECOMP_VK_PRESENT_DARK=1"
+#! seconds 300
+#! savefrom work\saves\first-save\gamedata
+#! fastmovies 1
+wait v_02_city_intro 150
+sleep 25
+anchor
+key F2
+sleep 1.5
+shot e219_display
+press 0x0800 3
+sleep 1.2
+press 0x0040 3
+sleep 1.0
+shot e219_graphics_split
+key Esc
+sleep 0.8
+close
