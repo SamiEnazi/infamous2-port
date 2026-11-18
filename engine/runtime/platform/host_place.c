@@ -386,6 +386,16 @@ static void* pl_sweeper(void* arg)
 void ps3_host_place_self(int role)
 {
     pthread_once(&s_pl_once, pl_init);
+    /* (deck) a name per role for profilers and work/bench/budget.py (the first placement only). Never the
+     * process's own thread: its name is the process name tools look the game up by (pgrep -x). */
+    if (!t_placed && (role == PS3_PLACE_MAIN || role == PS3_PLACE_RSX || role == PS3_PLACE_SPU) &&
+        (pid_t)syscall(SYS_gettid) != getpid()) {
+        static int s_spu_n;
+        char nm[16];
+        if (role == PS3_PLACE_SPU) snprintf(nm, sizeof nm, "ps3-spu%d", __atomic_fetch_add(&s_spu_n, 1, __ATOMIC_RELAXED));
+        else snprintf(nm, sizeof nm, "%s", role == PS3_PLACE_MAIN ? "ps3-main" : "ps3-rsx");
+        pthread_setname_np(pthread_self(), nm);
+    }
     t_placed = 1;
     if (!s_pl_mode) return;
     if (role == PS3_PLACE_RSX) {

@@ -840,13 +840,27 @@ static int j204_main(spu_context* ctx)
     job_init(j, ctx);
     run(j);
     if (s_dbg) fprintf(stderr, "[j204] D draws %u items %u ranges %u lastcnt %u type %u fb %X\n", j->rec[2], j->nitems, j->nrange, j->lastcnt, R32(j->IN1 + 4), j->fallback);
+    /* (deck) J204_STATS=<n>: every n calls, how many the native declined and why (the FB_* bits) */
+    static int s_stats = -1;
+    static unsigned s_why[16], s_calls, s_decl;
+    if (__builtin_expect(s_stats < 0, 0)) { const char* e = getenv("J204_STATS"); s_stats = e ? atoi(e) : 0; }
+    if (s_stats) {
+        const unsigned n = __atomic_add_fetch(&s_calls, 1, __ATOMIC_RELAXED);
+        if (j->fallback) {
+            __atomic_add_fetch(&s_decl, 1, __ATOMIC_RELAXED);
+            for (int i = 0; i < 16; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_why[i], 1, __ATOMIC_RELAXED);
+        }
+        if (n % (unsigned)s_stats == 0) {
+            fprintf(stderr, "[j204] %u calls, declined %u:", n, s_decl);
+            for (int i = 0; i < 16; i++) if (s_why[i]) fprintf(stderr, " bit%d=%u", i, s_why[i]);
+            fputc('\n', stderr);
+        }
+    }
     if (j->fallback) {
-        static unsigned s_why[16]; static int nl;
-        for (int i = 0; i < 16; i++) if (j->fallback >> i & 1) s_why[i]++;
+        static int nl;
         if ((j->fallback & FB_EA) && nl++ < 6)
             fprintf(stderr, "[j204] EA fallback: 0x%08X size 0x%X (type %u)\n", j->bad_ea, j->bad_size, R32(j->IN1 + 4));
         if (s_dbg && nl++ < 40) fprintf(stderr, "[j204] declined: reasons 0x%X type %u\n", j->fallback, R32(j->IN1 + 4));
-        (void)s_why;
         return 0;
     }
     const uint32_t out = j->out;

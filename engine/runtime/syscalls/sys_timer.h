@@ -31,6 +31,10 @@ extern "C" {
 /* The guest mftb/mftbu clock: one global monotonic counter, host time scaled
  * to the PS3 timebase. Called from every lifted mftb site (ppu_lifter.py). */
 uint64_t ppu_timebase_now(void);
+/* (deck) PS3_TB_FRAMESTEP_US: the frame-stepped benchmark clock (sys_timer.c) */
+int      ppu_timebase_framestep_arm(void);    /* 1 = armed (or already), 0 = the variable is unset */
+void     ppu_timebase_frame_tick(void);       /* a flip request: one step on */
+uint64_t ppu_timebase_framestep_us(void);     /* the virtual clock in us once armed, else 0 */
 
 #ifdef _WIN32
 /* Sub-millisecond timed-wait support for the lv2 sync primitives.

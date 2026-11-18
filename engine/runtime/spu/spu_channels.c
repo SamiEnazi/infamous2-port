@@ -1525,9 +1525,46 @@ static inline void spu_mfc_tagupd_do(spu_context* ctx, uint32_t v)
     }
 }
 void spu_wrch(spu_context* ctx, uint32_t channel, u128 value);
+/* (deck) PS3_SPU_DMASTAT=<seconds>: DMA commands, bytes and TSC cycles in this function, per resident job
+ * overlay (job module id; 0 = none), printed every <seconds>. Off: one load and a branch. */
+static int s_dmastat = -1;
+static unsigned long long s_ds_n[256], s_ds_b[256], s_ds_c[256], s_ds_t0;
+static __attribute__((noinline, cold)) void spu_dmastat_print(unsigned long long now)
+{
+    static int lk;
+    if (__atomic_exchange_n(&lk, 1, __ATOMIC_ACQUIRE)) return;
+    if (!s_ds_t0 || now - s_ds_t0 < (unsigned long long)s_dmastat * 2400000000ull) {
+        if (!s_ds_t0) s_ds_t0 = now;
+        __atomic_store_n(&lk, 0, __ATOMIC_RELEASE); return;
+    }
+    s_ds_t0 = now;
+    unsigned long long tn = 0, tc = 0;
+    for (int i = 0; i < 256; i++) { tn += s_ds_n[i]; tc += s_ds_c[i]; }
+    fprintf(stderr, "[dmastat] %llu cmds, %llu Mcyc:", tn, tc / 1000000ull);
+    for (int i = 0; i < 256; i++)
+        if (s_ds_c[i] > tc / 200)
+            fprintf(stderr, " | ovl %d: %llu cmds %llu KB %llu Mcyc", i, s_ds_n[i], s_ds_b[i] >> 10, s_ds_c[i] / 1000000ull);
+    fputc('\n', stderr);
+    memset(s_ds_n, 0, sizeof s_ds_n); memset(s_ds_b, 0, sizeof s_ds_b); memset(s_ds_c, 0, sizeof s_ds_c);
+    __atomic_store_n(&lk, 0, __ATOMIC_RELEASE);
+}
 /* Called from the lifted code's inline wrch (spu_helpers.h), recorder off. */
 void spu_wrch_cmd_fast(spu_context* ctx, uint32_t cmd)
 {
+    if (__builtin_expect(s_dmastat != 0, 0)) {
+        if (s_dmastat < 0) { const char* e = getenv("PS3_SPU_DMASTAT"); s_dmastat = e ? atoi(e) : 0; if (!s_dmastat) goto plain; }
+        const unsigned long long t0 = __builtin_ia32_rdtsc();
+        const int o = ctx->resident_ovl & 255;
+        const uint32_t sz = ctx->mfc_size;
+        if (!spu_mfc_cmd_fast(ctx, cmd)) spu_wrch(ctx, MFC_Cmd, spu_make_preferred_u32(cmd));
+        const unsigned long long t1 = __builtin_ia32_rdtsc();
+        __atomic_fetch_add(&s_ds_n[o], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&s_ds_b[o], sz, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&s_ds_c[o], t1 - t0, __ATOMIC_RELAXED);
+        if (ctx->spu_id == 0 || (s_ds_n[o] & 4095) == 0) spu_dmastat_print(t1);
+        return;
+    }
+plain:
     if (!spu_mfc_cmd_fast(ctx, cmd)) spu_wrch(ctx, MFC_Cmd, spu_make_preferred_u32(cmd));
 }
 void spu_wrch_tagupd_fast(spu_context* ctx, uint32_t v)

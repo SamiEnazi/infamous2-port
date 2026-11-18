@@ -3352,6 +3352,7 @@ void gcm_dbg_spin(const char* name, int* us)
 static s32 gcm_flip_request(u32 bufferId, int in_fifo)
 {
     { static int us = -1; gcm_dbg_spin("PS3_DBG_FLIP_DELAY_US", &us); }   /* both kinds: the guest's PPU thread */
+    { extern void ppu_timebase_frame_tick(void); ppu_timebase_frame_tick(); }   /* (deck) PS3_TB_FRAMESTEP_US */
     /* GCM_FLIPCOUNT=1: every flip, with a timestamp. FLIP_DBG caps at 20 lines,
      * which answers "did it ever flip?" and not "is it still flipping, and how
      * fast?" -- the question that matters when a title stops appearing on

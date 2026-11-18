@@ -2463,12 +2463,19 @@ static void pad_route_apply(u32 port_no, CellPadData* data)
         fflush(stdout);
     }
     if (!s_mode) return;
+    /* (deck) PS3_TB_FRAMESTEP_US (sys_timer.c): from the anchor on, the guest clock moves a fixed step
+     * per frame and the route is replayed on that clock -- the same path in every run */
+    extern int ppu_timebase_framestep_arm(void);
+    extern uint64_t ppu_timebase_framestep_us(void);
+    static int s_fs;
     if (!s_t0) {
         if (s_anchor && !pad_watch_exists(s_anchor)) return;
-        s_t0 = pad_route_us();
-        printf("[cellPad] pad route: anchor reached, %s starts\n", s_mode == 1 ? "recording" : "replay"); fflush(stdout);
+        s_fs = s_mode == 2 && ppu_timebase_framestep_arm();
+        s_t0 = s_fs ? ppu_timebase_framestep_us() : pad_route_us();
+        printf("[cellPad] pad route: anchor reached, %s starts%s\n", s_mode == 1 ? "recording" : "replay",
+               s_fs ? " (frame-stepped guest clock)" : ""); fflush(stdout);
     }
-    const unsigned int ms = (unsigned int)((pad_route_us() - s_t0) / 1000ull);
+    const unsigned int ms = (unsigned int)(((s_fs ? ppu_timebase_framestep_us() : pad_route_us()) - s_t0) / 1000ull);
     if (s_mode == 1) {
         if (!data->len) return;                      /* not a fresh packet: the game ignores it */
         if (s_have_last && !memcmp(s_last, data->button, sizeof s_last)) return;

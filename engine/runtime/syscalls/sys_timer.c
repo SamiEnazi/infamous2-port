@@ -71,7 +71,83 @@ static uint64_t ppu_timebase_raw(void);
  * At 100 the cost is one load and a compare. */
 volatile int ps3_tb_scale_pct = 100;
 
+/* (deck) PS3_TB_FRAMESTEP_US=<us>: a benchmark clock. Once armed (ppu_timebase_framestep_arm,
+ * from the pad route's anchor), the guest timebase stops following real time: every flip request
+ * (ppu_timebase_frame_tick, cellGcmSys.c) moves it on by exactly <us>, and each read in between
+ * by one tick (so it stays strictly increasing and a loop polling it still sees time pass). A
+ * title that steps its simulation by the mftb delta of its main loop (inFAMOUS 2) then steps by
+ * <us> per frame whatever the host's frame rate, and a recorded route replayed on the same clock
+ * (cellPad.c) takes the same path in every run. Off (unset) = nothing changes. */
+static uint64_t s_fs_ticks;                /* the step in timebase ticks; 0 = off */
+static _Atomic int s_fs_armed;
+static _Atomic uint64_t s_fs_now;          /* the virtual timebase, once armed */
+static _Atomic uint64_t s_fs_base;         /* the current frame's start (written by the flip thread) */
+static _Atomic uint64_t s_fs_flip_real;    /* the real timebase at the last flip (or the arming) */
+/* No flip for this long (real time): the virtual clock flows with real time from the frame's start on,
+ * until the next flip. A guest thread that waits for a deadline on mftb while the frame it waits on never
+ * comes (no flip, so no time) would otherwise wait forever. Frames this slow are hitches, not the
+ * benchmark's frames, so the stepped frames stay exact. */
+#define FS_STALL_TICKS (PS3_TIMEBASE_FREQ / 10)    /* 100 ms */
+static uint64_t ppu_timebase_now_real(void);
+
+static void ppu_fs_env(void)
+{
+    static _Atomic int done;
+    if (atomic_load_explicit(&done, memory_order_acquire)) return;
+    const char* e = getenv("PS3_TB_FRAMESTEP_US");
+    if (e && atoll(e) > 0) s_fs_ticks = (uint64_t)atoll(e) * PS3_TIMEBASE_FREQ / 1000000ull;
+    atomic_store_explicit(&done, 1, memory_order_release);
+}
+int ppu_timebase_framestep_arm(void)
+{
+    ppu_fs_env();
+    if (!s_fs_ticks) return 0;
+    if (!atomic_load(&s_fs_armed)) {
+        const uint64_t r = ppu_timebase_now_real();
+        atomic_store(&s_fs_base, r);
+        atomic_store(&s_fs_flip_real, r);
+        atomic_store(&s_fs_now, r);
+        atomic_store(&s_fs_armed, 1);
+        fprintf(stderr, "[timer] PS3_TB_FRAMESTEP_US: the guest clock moves %llu ticks per flip from now\n",
+                (unsigned long long)s_fs_ticks);
+    }
+    return 1;
+}
+void ppu_timebase_frame_tick(void)
+{
+    if (!atomic_load_explicit(&s_fs_armed, memory_order_relaxed)) return;
+    /* the next frame starts a step after this one, or where a stalled clock already got to */
+    uint64_t cur = atomic_load(&s_fs_now);
+    uint64_t base = atomic_load(&s_fs_base) + s_fs_ticks;
+    if (base < cur) base = cur;
+    atomic_store(&s_fs_base, base);
+    atomic_store(&s_fs_flip_real, ppu_timebase_now_real());
+    while (cur < base && !atomic_compare_exchange_weak(&s_fs_now, &cur, base)) { }
+}
+/* the clock the pad route uses: the virtual one once armed, in microseconds (0 = not armed) */
+uint64_t ppu_timebase_framestep_us(void)
+{
+    if (!atomic_load_explicit(&s_fs_armed, memory_order_acquire)) return 0;
+    return atomic_load(&s_fs_now) * 1000000ull / PS3_TIMEBASE_FREQ;
+}
+
 uint64_t ppu_timebase_now(void)
+{
+    if (__builtin_expect(atomic_load_explicit(&s_fs_armed, memory_order_relaxed), 0)) {
+        uint64_t v = atomic_fetch_add(&s_fs_now, 1) + 1;
+        const uint64_t r = ppu_timebase_now_real(), lf = atomic_load(&s_fs_flip_real);
+        if (r > lf + FS_STALL_TICKS) {                     /* a stall: real time from the frame's start */
+            const uint64_t floor = atomic_load(&s_fs_base) + (r - lf - FS_STALL_TICKS);
+            uint64_t cur = v;
+            while (cur < floor && !atomic_compare_exchange_weak(&s_fs_now, &cur, floor)) { }
+            if (v < floor) v = floor;
+        }
+        return v;
+    }
+    return ppu_timebase_now_real();
+}
+
+static uint64_t ppu_timebase_now_real(void)
 {
     static int env_done;
     if (!env_done) {
