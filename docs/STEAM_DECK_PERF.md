@@ -48,13 +48,20 @@ see below), dispatch 6.4%, FIFO walk 5.2%. ~2.8 us per draw, ~7,600 draws per fr
 | ... same batch: t13g (= 89ca87a) / fs3 (installed + measurement) | 41.83 / 41.02 | 21.0 / 21.9 ms | 96.0 / 98.2 ms |
 | Merge deck-merge (deck-perf + v0.6.2, no PGO), `ab3` 4 rounds | **42.12** | 22.7 ms | 77.2 ms |
 | ... same batch: dpNP (deck-perf, no PGO) / t13g | 38.33 / 42.13 | 23.3 / 21.0 ms | 103.9 / 95.8 ms |
+| **Merged + new PGO (mgPr, 1f22354)**, `ab4` 8 rounds | **48.90** | 19.5 ms | 71.1 ms |
+| ... same batch: mgP (training-only profile) / mg (no PGO) / t13g | 49.14 / 42.52 / 41.76 | 19.3 / 22.4 / 21.1 ms | 72.4 / 75.0 / 96.9 ms |
+
+Real clock, standing at spot 2 (player's settings with the 60 fps cap, GPU 1400): mgPr 57.84 fps over 30 min (5-min
+buckets 57.5-58.3, p99 19.4-19.8 ms, 17 frames > 33 ms, none > 50 ms, worst 38 ms); t13g 48.16 fps over 15 min (p99
+24.1 ms, worst 70 ms). Memory grows ~0.8 MB/min in both (pre-existing, not from the merge).
 
 Far shadow detail in normal play (2026-11-18, j6 build, real clock, 60 fps cap, player's settings and GPU clock
 1400 MHz, HUD on, one 50 s run each of the plaza walk, `sh60full` / `sh60reduced` recordings): Full 34.9 fps,
 8,151 draws per frame; Reduced 37.4 fps, 5,299 draws (+7%; one run each, so noisier than the det bench). The
 visual difference is hard to spot at night in this save (side-by-side video sent to the player).
 
-The installed build is still 4cabf54 (the player's safe version; install only when asked).
+The installed build is still 4cabf54 (the player's safe version; install only when asked). deck-perf is the merged
+line since 1f22354 (2026-11-18): engine exe + game module `libInfamous2Game.so`; dev copy `work/port/mgPr/`.
 
 ## 3. How to measure
 
@@ -89,11 +96,27 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
       distrobox enter infamous2-build -- env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         PORT_LLVM="$E/tools-cache/llvm" PORT_CMAKE="$E/tools-cache/cmake/bin/cmake" \
         PORT_NINJA="$E/tools-cache/ninja/ninja" PORT_SDL2_DIR="$E/deps/sdl2-cmake" \
-        PORT_PGO="use:$E/work/pgo/deck3.profdata" PORT_JOBS=3 PORT_LIFT_JOBS=2 \
-        PORT_BUILD="$D/work/port/build-engavx2" PORT_C_EXTRA="-march=znver2 -ffp-contract=off" \
-        bash -c "cd '$D' && '$D/work/venv/bin/python' -I tools/rebuild.py --only compile"
+        PORT_PGO="use:$E/work/pgo/mg1r-module.profdata" PORT_ENGINE_PGO="use:$E/work/pgo/mg1r-engine.profdata" \
+        PORT_JOBS=3 PORT_LIFT_JOBS=2 \
+        PORT_BUILD="$D/work/port/build-<name>" PORT_C_EXTRA="-march=znver2 -ffp-contract=off" \
+        bash -c "cd '$D' && '$D/work/venv/bin/python' -I tools/rebuild.py --from port --only compile"
 
-  Then copy the binary to `work/port/Infamous2Recomp.<tag>` before benchmarking or profiling it.
+  Then copy the engine exe AND `libInfamous2Game.so` (side by side) to `work/port/<tag>/` before benchmarking or
+  profiling. Since the merge (1f22354): `PORT_PGO` = the game module, `PORT_ENGINE_PGO` = the engine (deck3.profdata
+  is for the old single exe; before 1f22354 the build dir was build-engavx2 with `PORT_PGO=use:deck3.profdata`).
+  `--from port` skips the inputs step, which would copy onto `work/EBOOT.elf` (a symlink into the player's tree).
+  Profile warnings: engine `work/logs/compile-<builddir>.log`, module `<build>/module-obj/compile.log`
+  ("PGO: N function(s) changed since the profile"). Retrain: `<merge tree>/work/bench/pgotrain-mg.sh` (instrumented
+  build with `PORT_PGO=gen PORT_ENGINE_PGO=gen`, `LLVM_PROFILE_FILE=<dir>/<run>-%p-%m.profraw`, clean exit per run)
+  and `pgomerge-mg.sh` (training x3 + deck.profdata real play).
+* Running a merged build (engine + module): `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=1048576
+  PS3_STATIC_TLS_RETRY=1` (else it re-execs and shows up as "exe", invisible to `pgrep -x Infamous2Recomp`, budget.py
+  and the lock checks), `PS3_NATIVE_JOBS_THREADS=4` (play.sh sets both; the exe default is 2), and for benchmarks the
+  sandbox env (`<merge tree>/work/bench/mgenv.txt`: `PS3RECOMP_VK_SHADER_CACHE`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`)
+  so dev builds never write the player's config or the shared shader cache. Bench copies that do all this:
+  `<merge tree>/work/bench/detab-m.sh`, `ab4.sh`, `stand.sh` (real-clock standing run), `valP.sh` (all replays).
+  Fast builds leave the det route more often (5 of 14 PGO runs at the house wall near Hank's at anchor+5-7 s; the
+  > 50 ms frames of those runs come after the divergence): run more rounds and discard by draws.
 * Shell pitfall: never `pkill -f` / `pgrep -f` a pattern that also appears in the waiting command itself
   (it matches its own shell). Wait on a file's line count instead.
 
@@ -114,6 +137,7 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
 
 | Commit | Change | Measured |
 |---|---|---|
+| 1f22354 | merge of deck-merge: upstream v0.6.2 (native WWS job runner, whole-job 208/209/210, their 218) + 0381235 Linux PGO-gen module atexit, 60870c0 4 pool threads, 865ef66 `J218_PICK=ttt`, 36b24fb static TLS, f9bbfd8 pool names, b529db1 Far shadow in their 210, 5dfb0b2 TLS scratch; new profiles mg1r | **48.90 vs 41.76 fps (+17.1%)**, RSX -1.6, SPU -26 ms/frame, p99 23.8 vs 27.4; exact |
 | 56427dc | job 204 type 0 fix: SLOT(12) lanes y..w were wrong in 231 of 517 slot-12 calls of rec-204b (also in the installed build); block buffers compared for every type; FB_RAND / FB_STALE guards | exact; replay time unchanged |
 | 0183e2a | job 204 native: types 1 and 3 (sub-draw lists 0x69B0, type 1 slots 5/7), `J204_TYPES` switch, `PS3_JOBREPLAY_FULLPUT` | SPU -1.1%, fps +0.55% |
 | b653037 | J204_STATS by job type | (tools) |
@@ -149,6 +173,12 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
 * Lower scheduling priority for the SPU threads (renice +3): no effect.
 
 ## 6. Next candidates (expected gain, effort)
+
+Order after the merge (2026-11-18): the merged build is RSX-thread bound (~95% of a CPU, pool threads 75-78%), so
+(a) a fresh "where the frame goes" breakdown on mgPr (section 1 is from the old build), then (b) RSX-thread work
+(item 4 push constants, item 6, new hot spots), then (c) SPU leftovers: job 223 Edge (~19 ms/frame, now the biggest
+job), 218, 204 declines (item 2), 220 / 213 / 216; (d) Edge on GPU only with a new idea (section 5); (e) main thread,
+GPU / power. Items 0, 1, 1b and 3 are done.
 
 0. (player's request, 2026-11-18, next agent after the job 204 fix) Test upstream v0.6.x separately: upstream
    (origin = SamiEnazi/infamous2-port) went v0.5.7 (our base, a9716880) -> v0.6.0/0.6.1/0.6.2 (f746fc6): 171 files,
@@ -245,6 +275,25 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
    merged build (work/bench/pgotrain3.sh adapted, new profile names, the 4-thread runner), rebuild, check the
    stale-profile warnings are gone, det A/B mg-PGO vs mg vs t13g (>= 4 rounds), a long standing run (30+ min,
    real clock, player's settings), the replays again on the PGO build.
+
+   **Result (2026-11-18): accepted, merged into deck-perf (1f22354).** Profiles E/work/pgo/mg1-{module,engine}.profdata
+   (training: spot 2 spin, spot 1 standing, video A/B, plaza) and mg1r-* (training x3 + deck.profdata real play; only
+   529 module / 188 engine functions gain from real play, most lifted functions changed their hash in v0.6). Stale
+   warnings: old t13g 13 functions (11 hot); mg1 / mg1r: module 0, engine 1 (`main`, cold). Replays on mgP and mgPr:
+   the same pass table as mg (208 0/100 = the known nx_208 replay limit, 100/100 with `PS3RECOMP_NATIVE_J207=0`).
+
+   | ab4 (8 rounds) | clean | fps (sd) | main / rsx / spu ms/frame | GPU | W | p99 | >33 / >50 ms per run |
+   |---|---|---|---|---|---|---|---|
+   | mgPr | 4 | 48.90 (0.35) | 18.70 / 19.47 / 71.1 | 15.10 | 14.6 | 23.8 | 1.0 / 0 |
+   | mgP | 5 | 49.14 (0.32) | 18.89 / 19.33 / 72.4 | 15.19 | 14.9 | 24.2 | 1.8 / 0.6 |
+   | mg | 6 | 42.52 (0.55) | 20.27 / 22.44 / 75.0 | 15.46 | 14.5 | 26.7 | 1.8 / 0.2 |
+   | t13g | 5 | 41.76 (0.71) | 18.78 / 21.11 / 96.9 | 15.26 | 15.0 | 27.4 | 2.4 / 0 |
+
+   (I recomputed every run's fps / p99 / >33 ms from the playlogs: consistent.) Discarded (off the route at the
+   Hank's wall): mgP-3, mgPr-3/5/6/8, mg-7. mgPr and mgP are equal within noise; mgPr chosen (real-play coverage,
+   long run done on it). Still RSX-bound (~95%). Risks: profile covers 5 city routes (combat / missions / cutscenes
+   cold: a real-play session with the instrumented build would fix it); Windows module build untested; v0.6's
+   play.sh moves settings.ini / mods.ini / spots.ini / the shader cache into the port folder (install step).
 
 2. Job 204 remaining declines (5.5% of calls, t13d): type 4 (18.7k per run, handler ~3,650 instructions + ~2,600
    in callees: poor value), type 1 slots 6/8/9 (5.9k; 0x11080 sRGB->linear pow 2.4 and 0xA4A8), FB_STALE (material
