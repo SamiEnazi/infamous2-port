@@ -46,6 +46,8 @@ see below), dispatch 6.4%, FIFO walk 5.2%. ~2.8 us per draw, ~7,600 draws per fr
 | j6 (b653037) vs t13d (job 204 types 1/3), 8 clean runs each | 41.70 -> 41.93 | 21.04 -> 21.34 ms (noise?) | 97.38 -> 96.26 ms |
 | Upstream v0.6.2 (f746fc6 + measurement, no PGO), `ab62` 4 rounds | **30.10** | 32.2 ms | 60.6 ms |
 | ... same batch: t13g (= 89ca87a) / fs3 (installed + measurement) | 41.83 / 41.02 | 21.0 / 21.9 ms | 96.0 / 98.2 ms |
+| Merge deck-merge (deck-perf + v0.6.2, no PGO), `ab3` 4 rounds | **42.12** | 22.7 ms | 77.2 ms |
+| ... same batch: dpNP (deck-perf, no PGO) / t13g | 38.33 / 42.13 | 23.3 / 21.0 ms | 103.9 / 95.8 ms |
 
 Far shadow detail in normal play (2026-11-18, j6 build, real clock, 60 fps cap, player's settings and GPU clock
 1400 MHz, HUD on, one 50 s run each of the plaza walk, `sh60full` / `sh60reduced` recordings): Full 34.9 fps,
@@ -187,8 +189,9 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
    * Merge dry-run (deck-perf + f746fc6): text conflicts in 2 files only, `vk_overlay.cpp` (our Far shadow row vs
      their MSAA rows; their menu moved to `vk_overlay_menu.inc`) and `vk_threaded_rec.h` (1 include hunk). Overlaps
      git does not see: job 218 entries 0x16320 / 0x17780 / 0x18B80 registered twice (our job218_native.c, their
-     native_218.c); with their runner on, 208/209/210/212 run as whole-job natives (our nx_job208/209/212 and the
-     j210 walker unused); their 204 = v0.5.7 (ours kept); 201/211/220 ours only. The module split needs PGO
+     native_218.c); with their runner on, 208/209/210 run as whole-job natives (our nx_job208/209 and the j210
+     walker unused; their job212.c is a stub, 212 stays lifted + our nx hook); their 204 = v0.5.7 (ours kept);
+     201/211/220 ours only. The module split needs PGO
      retrained (`PORT_PGO` = module, `PORT_ENGINE_PGO` = engine) and the GLIBC_TUNABLES line in play.sh / bench.
    * Decision: do not install v0.6.2. Try moving the Deck work onto upstream in a test branch (item 1).
 
@@ -197,12 +200,58 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
    only), pool thread count 2/3/4. Accept only if it beats t13g by the acceptance rules; then PGO retrain on the
    winner (item 3).
 
+   **Result (2026-11-18): the merge wins against its fair baseline; it ties t13g without PGO.** Branch `deck-merge`
+   (tree `infamous2-port-merge`, pushed to fork): 93a4593 merge, 5dfb0b2 job 218 check scratch on the heap (module
+   static TLS), f75d36e + 865ef66 `J218_PICK=<blend><pose><palette>` (o = ours, t = theirs, default `ttt`: -13% per
+   job 218, replay 134.5 vs 150 us), b529db1 Far shadow detail in their whole-job 210 (`g_j210_shadow_lod_k`),
+   f9bbfd8 runner pool threads named `ps3-spuj<n>` (SPU role: CPUs 0-5, bench group "spu"), 36b24fb + 60870c0
+   play.sh (GLIBC_TUNABLES line; `PS3_NATIVE_JOBS_THREADS=4` unless set, the exe default is still 2). Exe copies
+   `work/port/mg/` (engine + module) and `work/port/Infamous2Recomp.dpNP` (deck-perf 306f6b1, no PGO).
+   * Native registry: `spu_native_entry` runs the first registered native for an address (module link order), a
+     declining one falls to the lifted code; a second native is never tried. Their whole-job natives:
+     `PS3_NATIVE_CULL=0|1|2|<list>` (default 1). Their runner runs jobs on host SPU contexts through the same
+     native hooks and MFC / atomic paths, so our per-function natives (204, 218 extras, 201/211/212, 216, 220,
+     223) run under it; job 204 accepts 94.5% live as before. Our wtrack, rsxcore placement, frame clock live.
+   * Choices (2 runs each): pool threads 2 / 3 / 4 = 37.75 / 40.75 / 41.00 fps (4); main thread running jobs in its
+     waits on vs off 41.7 / 41.9 (kept on, as upstream); 210 their whole-job vs our walker: SPU 74.9 vs 83.9 ms
+     (theirs); 208/209 theirs vs our nx: equal (theirs, replay-exact).
+   * Exact: replays rec-204b/sel (FULLPUT) 1960/1960, rec-210-218 210 100/100 and 218 102/102 (ooo and ttt),
+     rec-223 150/150, rec-220-211-208 211 / 220 100/100; new recording `mgrec` (1,800 jobs by the merged runner,
+     natives off): 204 / 209 / 210 / 212 / 218 300/300 each, their 208 / 209 / 210 natives 300/300. Live checks:
+     their 218 0 of 3.8 M; their verify 210 0 of 89k, 208 0 of 80k, 209 0 of 26k (209 verify only with our nx_209
+     off: it compares an LS area nx_209 does not write). Our nx_208 fails every replay in t13g / dpNP too (replay
+     tool limit, not new; unused under the runner). Screens: same spot, view, shadows, lighting as t13g; the window
+     is 1152x718 (upstream's), so no pixel diff. 32 merged-build runs, no crash or hang.
+
+   | ab3 (4 rounds) | fps (sd) | main / rsx / spu ms/frame | GPU | W | p99 | >33 ms per run |
+   |---|---|---|---|---|---|---|
+   | mg | 42.12 (0.54), 4 clean | 20.48 / 22.68 / 77.2 | 15.36 | 14.4 | 27.4 | 2.2 |
+   | dpNP | 38.33 (0.74), 3 clean | 20.94 / 23.34 / 103.9 | 15.23 | 14.7 | 30.3 | 16.0 |
+   | t13g | 42.13 (0.86), 3 clean | 18.60 / 20.99 / 95.8 | 15.19 | 15.0 | 27.7 | 6.7 |
+
+   (I recomputed p99 / >33 ms from the playlogs: identical.) mg vs dpNP (both without PGO): fps +9.9%, SPU -25.7%,
+   total CPU -18.5%, p99 30.3 -> 27.4 ms, frames > 33 ms 16 -> 2.2 per run. mg is now RSX-bound (95.5% of a CPU,
+   pool 75-78% busy); its RSX +1.7 ms vs t13g is the PGO gap (dpNP 23.34 vs t13g 20.99). Per job (js1, mg vs
+   dpNP): real savings are the whole-job natives (210 11.9 -> 3.2, 208 2.2 -> 0.5, 209 0.9 -> 0.2 ms/frame), their
+   218 (19.5 -> 18.0) and the runner on short jobs with the same code (204 34 -> 25 us per job, 213 -20%, 201 -25%,
+   212 -36%); 223 / 216 / 220 / 211 savings seen in the upstream build were its 2-thread, 30 fps setting.
+   Total job time 112.5 -> ~92 ms/frame. Risks: Windows build of the module lacks import slots for our natives'
+   extra engine calls (untested); v0.6's play.sh moves settings / mods / spots / shader cache into the port folder
+   (matters at install).
+   * Decision: continue on deck-merge. Next (item 1b): PGO retrain on it, long standing run (rule 3), final A/B vs
+     t13g; if it wins, deck-merge is merged into deck-perf.
+
+1b. PGO on deck-merge (next agent): train module (`PORT_PGO`) and engine (`PORT_ENGINE_PGO`) profiles on the
+   merged build (work/bench/pgotrain3.sh adapted, new profile names, the 4-thread runner), rebuild, check the
+   stale-profile warnings are gone, det A/B mg-PGO vs mg vs t13g (>= 4 rounds), a long standing run (30+ min,
+   real clock, player's settings), the replays again on the PGO build.
+
 2. Job 204 remaining declines (5.5% of calls, t13d): type 4 (18.7k per run, handler ~3,650 instructions + ~2,600
    in callees: poor value), type 1 slots 6/8/9 (5.9k; 0x11080 sRGB->linear pow 2.4 and 0xA4A8), FB_STALE (material
    reads past the fetched material, 14.7k type 0 + 10.9k type 1 + 6k type 2), FB_FPUPLOAD 26.6k, FB_OP11B 20.7k.
    Recording: `<player>/native/recordings/rec-204b/jobrec` (8,000 calls), subsets `sel` (1,960), `sel0..sel3`.
    Details of the handlers and of 0x69B0 / 0x4740 / 0x5F38: work/bench/NOTES.md (2026-11-18 entries).
-3. PGO profile is stale: 13 hot functions now compile without profile data (job 218 blend_group, job 204 run /
+3. (superseded by 1b on deck-merge) PGO profile is stale: 13 hot functions now compile without profile data (job 218 blend_group, job 204 run /
    publish / emit_vec, j210_walker, f_7C18). Retrain (work/bench/pgotrain3.sh, new profile file name) and A/B.
 4. Graphics thread: per-draw constant offsets as push constants (descriptor set only rebound when textures
    change): estimate revised to ~3% RSX (RADV already passes dynamic UBO offsets through its push-constant
