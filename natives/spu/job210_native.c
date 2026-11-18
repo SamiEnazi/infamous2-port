@@ -33,6 +33,7 @@
 #include "native_float.h"
 #include "spu_dma.h"
 #include "spu_jobrec.h"
+#include "ps3emu/ps3_settings.h"   /* (deck) the menu's live PS3RECOMP_SHADOW_LOD */
 #include <immintrin.h>
 #include <pthread.h>
 
@@ -775,9 +776,25 @@ static inline void kq_scale(uint8_t* p, float k)     /* one big-endian float of 
     f *= k; memcpy(&w, &f, 4);
     p[0] = (uint8_t)(w >> 24); p[1] = (uint8_t)(w >> 16); p[2] = (uint8_t)(w >> 8); p[3] = (uint8_t)w;
 }
+/* (deck) PS3RECOMP_SHADOW_LOD=<k> (the in-game menu's "Far shadow detail": 1 the game's, 20 reduced), live:
+ * the far shadow cascade's minimum box size^2 (K.y of the views that have one) times k. J210_KY_SCALE, an
+ * experiment's variable, wins when set. */
+static float s_shadow_lod = -1.0f;
+static int j210_shadow_lod_apply(const char* v)
+{
+    const float k = v && *v ? (float)atof(v) : 1.0f;
+    float f = k > 1.0f ? k : 1.0f; uint32_t u; memcpy(&u, &f, 4);
+    __atomic_store_n((uint32_t*)(void*)&s_shadow_lod, u, __ATOMIC_RELEASE);
+    return 1;
+}
+__attribute__((constructor)) static void j210_settings_register(void)
+{
+    ps3_setting_register("PS3RECOMP_SHADOW_LOD", j210_shadow_lod_apply);
+}
 static void j210_ktweak(J* j)
 {
     static float sc = -1.0f, set = -1.0f, zs = 1.0f, xs = 1.0f;
+    if (__builtin_expect(s_shadow_lod < 0.0f, 0)) j210_shadow_lod_apply(getenv("PS3RECOMP_SHADOW_LOD"));
     if (__builtin_expect(sc < 0.0f, 0)) {
         const char* a = getenv("J210_KY_SCALE"); const char* b = getenv("J210_KY_SET");
         sc = a ? (float)atof(a) : 0.0f; set = b ? (float)atof(b) : 0.0f;
@@ -791,12 +808,14 @@ static void j210_ktweak(J* j)
         if (zs != 1.0f) kq_scale(q + 8, zs);
         if (xs != 1.0f) kq_scale(q, xs);
     }
-    if (sc <= 0.0f && set <= 0.0f) return;
+    float ky = sc;
+    if (ky <= 0.0f) { uint32_t u = __atomic_load_n((const uint32_t*)(const void*)&s_shadow_lod, __ATOMIC_ACQUIRE); memcpy(&ky, &u, 4); if (ky <= 1.0f) ky = 0.0f; }
+    if (ky <= 0.0f && set <= 0.0f) return;
     uint8_t* q = j->ls + j->buf1 + 0x70;
     uint32_t w1 = (uint32_t)q[4] << 24 | (uint32_t)q[5] << 16 | (uint32_t)q[6] << 8 | q[7];
     const uint32_t w2 = (uint32_t)q[8] << 24 | (uint32_t)q[9] << 16 | (uint32_t)q[10] << 8 | q[11];
     float y; memcpy(&y, &w1, 4);
-    if (y > 0.0f && sc > 0.0f) y *= sc;
+    if (y > 0.0f && ky > 0.0f) y *= ky;
     else if (w1 == 0 && w2 == 0 && set > 0.0f) y = set;
     else return;
     memcpy(&w1, &y, 4);

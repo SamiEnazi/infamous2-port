@@ -161,6 +161,7 @@ enum {
     V_ASPECT,                 /* [wide] */
     V_GAME_MODS,              /* [mods] */
     V_FOV,                    /* (dofov) the title's field of view (cheats.cpp), live */
+    V_SHADOW_LOD,             /* (deck) far shadow cascade detail (natives/spu/job210_native.c), live */
     V_N
 };
 static const char* const kVar[V_N] = {
@@ -176,6 +177,7 @@ static const char* const kVar[V_N] = {
     "PS3RECOMP_ASPECT",                               /* [wide] read once, at start */
     "PS3_GAME_MODS",                                  /* [mods] read once, at start */
     "PS3_FOV",                                        /* (dofov) percent of the game's field of view */
+    "PS3RECOMP_SHADOW_LOD",                           /* (deck) 1 = the game's far shadows, 20 = reduced */
 };
 /* Plain arrays: filled during this file's dynamic initialisation, before
  * main (zero-initialised storage exists before any of it runs). */
@@ -1219,6 +1221,7 @@ struct Ui {
     int dof;                  /* (dofov) the game's depth of field: index in kDof (rsx_draw_engine.c ENG_DOF_BLEND_FP) */
     bool edge_blur;           /* the game's own edge blur (the same pass) */
     int fov;                  /* (dofov) PS3_FOV: percent of the game's field of view (kFovMin..kFovMax) */
+    int shadow_lod;           /* (deck) 0 = the game's far shadow detail, 1 = reduced (PS3RECOMP_SHADOW_LOD=20) */
     int mesh_trim;            /* [trim]/[edgevp] 0 = the game's culling at the render resolution (default),
                                * 1 = off (whole meshes), 2 = the PS3's 720p culling */
     int aspect;               /* [wide] index in kAspect; -1 = another value (env / file) */
@@ -1257,6 +1260,7 @@ static void ui_load(void)
       int f = e && *e ? atoi(e) : 100;
       s_ui.fov = f < kFovMin ? kFovMin : f > kFovMax ? kFovMax : f; }
     { const char* e = getenv(kVar[V_EDGE_BLUR]); s_ui.edge_blur = !(e && !strcmp(e, "0")); }
+    { const char* e = getenv(kVar[V_SHADOW_LOD]); s_ui.shadow_lod = e && atof(e) > 1.0 ? 1 : 0; }   /* (deck) */
     { const int t = spu_patch_find("mesh_trim");   /* [trim] what the SPU code runs now */
       const bool culls = t < 0 || spu_patch_alt(t) == 0;
       const char* e = getenv(kVar[V_EDGE_VP]);       /* [edgevp] culling at the render resolution */
@@ -1474,6 +1478,15 @@ static void tab_graphics(void)
       hint(slot < 0 ? "Not in this build: its SPU lift had no tools/spu_patches.txt."
                     : "At the render resolution: no holes, and the culling saves GPU and graphics-thread time "
                       "(the default). Off draws whole meshes. The PS3's 720p culling leaves holes above 720p."); }
+    /* (deck) the far shadow cascade's small-object cut (job 210's view block, K.y) */
+    { static const char* const kShadowLodName[] = { "Full (the game's)", "Reduced (faster)" };
+      ImGui::SetNextItemWidth(combo_w());
+      if (ImGui::Combo("Far shadow detail", &s_ui.shadow_lod, kShadowLodName, 2))
+          apply_setting(V_SHADOW_LOD, s_ui.shadow_lod ? "20" : "1");
+      live_mark(V_SHADOW_LOD);
+      hint("Reduced: small objects far away cast no shadow into the distant shadow map (the game already "
+           "leaves out the smallest ones there; this raises that size). About 2,400 fewer shadow draws a "
+           "frame in a busy street: the graphics thread ~12% lighter. Nearby shadows are unchanged."); }
     ImGui::SetNextItemWidth(combo_w());
     if (ImGui::Combo("Anisotropic filtering", &s_ui.aniso, kAnisoName, 5)) apply_setting(V_ANISO, kAniso[s_ui.aniso]);
     live_mark(V_ANISO);
