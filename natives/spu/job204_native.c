@@ -14,7 +14,18 @@
  * and the lifted main runs. The local store is not left as the lifted code leaves it (callee
  * frames, scratch): the ranges it dirties are declared dead to the job replay (spu_jobrec.h).
  *
- * PS3RECOMP_NATIVE_J204=0: off (the lifted job). PS3_SPU_NATIVE=0: every rewrite off.
+ * (deck) Job types 1 and 3 too (type 4 still declines): their objects carry lists of sub-draws (0x69B0), each
+ * reserving a region of the command stream for a later writer and PUTting a 32-byte record of it to a slot that
+ * an allocator atomic (0x4740) hands out; a full pool drops the region again, so that atomic's outcome shapes the
+ * stream. Such a job is built twice: a dry build that writes nothing and assumes every slot comes (any decline
+ * still happens here), then the committing build, which takes the ring slots, the record slots and the matrix
+ * slots (0x19138) in the job's own order as it goes (the 0x14210 callback's order) and PUTs the records. Every
+ * block is staged in the LS buffer the job would have built it in (out+0x80 even, out+0x1080 odd), so the stale
+ * bytes past its JUMP/RETURN and inside the reserved regions are the job's own; out+0x20..0x6F (the record and
+ * matrix staging) is left as the job leaves it (a later job reads out+0x28 stale).
+ *
+ * PS3RECOMP_NATIVE_J204=0: off (the lifted job). PS3_SPU_NATIVE=0: every rewrite off. Off while the job recorder
+ * records (the recording must hold the lifted job's own operations).
  *
  * Thiago's LICENSE (MIT): Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"), to deal in the
@@ -55,6 +66,7 @@ static inline uint32_t R32(const uint8_t* p) { return (uint32_t)p[0] << 24 | p[1
 static inline uint16_t R16(const uint8_t* p) { return (uint16_t)(p[0] << 8 | p[1]); }
 static inline int16_t S16(const uint8_t* p) { return (int16_t)R16(p); }
 static inline void P32(uint8_t* p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
+static inline void P16(uint8_t* p, uint32_t v) { p[0] = v >> 8; p[1] = v; }
 static inline u128 V4(uint32_t a, uint32_t b, uint32_t c, uint32_t d) { u128 v; v._u32[0] = a; v._u32[1] = b; v._u32[2] = c; v._u32[3] = d; return v; }
 static inline u128 LQ(const uint8_t* p) { return V4(R32(p), R32(p + 4), R32(p + 8), R32(p + 12)); }
 static inline u128 SPL(u128 v, int i) { return V4(v._u32[i], v._u32[i], v._u32[i], v._u32[i]); }
@@ -65,6 +77,7 @@ static inline u128 SPLW(uint32_t x) { return V4(x, x, x, x); }
 enum { FB_SRGB = 1, FB_CONST = 2, FB_OP11B = 4, FB_OP4 = 8, FB_OP = 16, FB_KIND2 = 32, FB_KIND10 = 64,
        FB_KIND11 = 128, FB_SIDE = 256, FB_IN1_9 = 512, FB_FPUPLOAD = 1024, FB_OP5 = 2048,
        FB_TYPE = 4096, FB_EA = 8192, FB_MEM = 16384, FB_STALE = 32768 };
+static unsigned s_types = 0xFu;   /* (deck) J204_TYPES=<mask>: job types the native takes (bit t = type t; default 0xF = 0..3, 0x5 = only 0 and 2 as before 2026-11-18) */
 
 typedef struct {
     uint32_t ea, used;
@@ -92,6 +105,13 @@ typedef struct {
     uint32_t stk_ls;
     uint8_t texon[16], need_mat;
     uint32_t vfmt, streams[3], stencil, tex194;
+    /* (deck) types 1 and 3 */
+    int live;          /* the committing build: atomics taken and records PUT as the job goes (else nothing is written) */
+    int need_live;     /* the dry build met an atomic whose outcome shapes the stream */
+    int wt;            /* the tag register of the current object's last wait (0: its data tag; 8, 10) */
+    uint32_t ctr198;   /* scratch+0x198, the record serial (0 at job start) */
+    uint32_t half;     /* 0x18F10 of IN+0x30C (type 3) or 0 */
+    uint8_t img_on, img[0x50];   /* LS out+0x20..0x6F as the job leaves it (read at the first sub-draw list) */
     /* kept */
     Block* blocks; uint32_t cap;
     uint8_t spill[4096];
@@ -109,18 +129,19 @@ static const uint8_t* G(J* j, uint32_t ea, uint32_t size)
     return vm_base + ea;
 }
 
-/* A PUT as the job's wrapper does it: the block is staged in the local store (the job's own output
- * buffer) and goes through the MFC engine's transfer (coherency, the gcm hook), cmd 0x20. */
-static void guest_put(J* j, uint32_t ea, const uint8_t* src, uint32_t size)
+/* A PUT as the job does it: from where the job stages the bytes in the local store (its own output
+ * buffers), through the MFC engine's transfer (coherency, the gcm hook), cmd 0x20. */
+static void put_ls(J* j, uint32_t lsa, uint32_t ea, uint32_t size)
 {
     spu_context* ctx = j->ctx;
-    const uint32_t lsa = (j->out + 0x80u) & SPU_LS_MASK;
-    memcpy(ctx->ls + lsa, src, size);
+    lsa &= SPU_LS_MASK;
     /* (deck) the lean transfer (spu_dma.h: the same checks, copy, coherence and PUT hook without the ~50
      * diagnostic gates) in play; the raw one while the job recorder is on, as before */
     if (!g_spu_jobrec_mode && spu_dma_fast()) mfc_do_transfer_lean(ctx, lsa, ea, size, 0x20);
     else mfc_do_transfer_raw(ctx, lsa, ea, size, 0x20);
 }
+/* the LS buffer block k is built in (0x14108: out+0x80 and out+0x1080, alternating) */
+static inline uint8_t* blk_ls(J* j, uint32_t k) { return j->ctx->ls + ((j->out + 0x80u + 0x1000u * (k & 1)) & SPU_LS_MASK); }
 
 /* ---------------- command buffer ---------------- */
 static void W(J* j, uint32_t v) { P32(j->cb + j->cursor, v); j->cursor += 4; }
@@ -128,7 +149,7 @@ static void W(J* j, uint32_t v) { P32(j->cb + j->cursor, v); j->cursor += 4; }
 static void next_block(J* j)
 {
     if (j->has_block && j->nblocks) j->blocks[j->nblocks - 1].used = j->cursor;
-    if (j->has_block) j->novf++;     /* the job waits its output tag before PUTting the block it leaves */
+    if (j->has_block) { j->novf++; j->wt = 10; }     /* the job waits its output tag before PUTting the block it leaves */
     j->done += 4096; j->cursor = 0; j->has_block = 1;
     if (j->nblocks == j->cap) {
         uint32_t nc = j->cap ? 2 * j->cap : 16;
@@ -136,30 +157,52 @@ static void next_block(J* j)
         if (!nb) { j->fallback |= FB_MEM; j->cb = j->spill; return; }
         j->blocks = nb; j->cap = nc;
     }
-    j->cb = j->blocks[j->nblocks++].data;
+    const uint32_t k = j->nblocks++;
+    Block* b = &j->blocks[k];
+    j->cb = b->data;
+    if (j->live) {
+        /* (deck) as the job's 0x14210 does it here: the ring slot (clamped to the limit), the block it leaves ends
+         * in NOPs up to 4096 when this one follows it in memory, else in a JUMP to it; this block starts as its LS
+         * buffer is (the block two back, or what the LS held before the job) */
+        uint32_t off = spu_native_atomic_add32(j->ctx, j->ring_ea, 4096);
+        if (off + 4096 > j->limit) off = j->limit - 4096;
+        b->ea = off;
+        if (k) {
+            Block* p = &j->blocks[k - 1];
+            if (off == p->ea + 4096) memset(p->data + p->used, 0, 4096 - p->used);
+            else P32(p->data + p->used, 0x20000000u | (off + j->delta));
+        }
+        memcpy(b->data, k < 2 ? blk_ls(j, k) : j->blocks[k - 2].data, 4096);
+    }
 }
-/* The ring addresses, as the job's allocations would return them one by one
- * (clamped to the limit), the links, and the writes. Block k ends in a JUMP
- * to block k+1, or in NOPs when k+1 follows it in memory. */
+/* Dry build: the ring addresses, as the job's allocations would return them one by one (clamped to the
+ * limit), the links, and the writes. Block k ends in a JUMP to block k+1, or in NOPs when k+1 follows it
+ * in memory. Each block goes to the LS buffer the job builds it in, over the bytes the block two back left
+ * there (what the job PUTs past the JUMP/RETURN), and the job PUTs whole 4096-byte blocks.
+ * Committing build: the slots and links are in place, every block is a whole image of its LS buffer. */
 static void publish(J* j)
 {
     const uint32_t n = j->nblocks;
-    for (uint32_t k = 0; k < n; k++) {
-        uint32_t off = spu_native_atomic_add32(j->ctx, j->ring_ea, 4096);
-        if (off + 4096 > j->limit) off = j->limit - 4096;
-        j->blocks[k].ea = off;
-    }
+    if (!j->live)
+        for (uint32_t k = 0; k < n; k++) {
+            uint32_t off = spu_native_atomic_add32(j->ctx, j->ring_ea, 4096);
+            if (off + 4096 > j->limit) off = j->limit - 4096;
+            j->blocks[k].ea = off;
+        }
     for (uint32_t k = 0; k < n; k++) {
         Block* b = &j->blocks[k];
-        uint32_t size = b->used;
-        if (k + 1 < n) {
-            if (j->blocks[k + 1].ea == b->ea + 4096) { memset(b->data + b->used, 0, 4096 - b->used); size = 4096; }
-            else { P32(b->data + b->used, 0x20000000u | (j->blocks[k + 1].ea + j->delta)); size = b->used + 4; }
+        uint32_t size = 4096;
+        if (!j->live) {
+            size = b->used;
+            if (k + 1 < n) {
+                if (j->blocks[k + 1].ea == b->ea + 4096) { memset(b->data + b->used, 0, 4096 - b->used); size = 4096; }
+                else { P32(b->data + b->used, 0x20000000u | (j->blocks[k + 1].ea + j->delta)); size = b->used + 4; }
+            }
         }
+        uint8_t* ls = blk_ls(j, k);
+        memcpy(ls, b->data, size);
         if (!ea_ok(b->ea, size)) continue;
-        /* the job PUTs whole 4096-byte blocks */
-        if (size < 4096) memset(b->data + size, 0, 4096 - size);
-        guest_put(j, b->ea, b->data, 4096);
+        put_ls(j, (uint32_t)(ls - j->ctx->ls), b->ea, 4096);
     }
     j->rec[0] = j->blocks[0].ea;
 }
@@ -636,6 +679,167 @@ static void f_6FE0(J* j, const uint8_t* E)
     j->stencil = ref;
 }
 
+/* (deck) 0x18F10: float to half as the job does it (no rounding; |x| < 2^-15: +0; |x| >= 65536: 0x7BFF) */
+static uint32_t f2h(uint32_t x)
+{
+    const uint32_t a = (x & 0x7FFFFFFFu) >> 16;
+    if (a < 0x3800) return 0;
+    const uint32_t v = a >= 0x4780 ? 0x7BFFu : (((x - 0x38000000u) << 3) >> 16) & 0x7FFFu;
+    return v | ((x >> 16) & 0x8000u);
+}
+/* (deck) 0x4740 on its GETLLAR line: u16 count +0, u16 high mark +2, u16 flag +6, u16 capacity +8, u32 base +12.
+ * Room: count + 1 (the mark too while the flag is 0), the slot base + 32 * count; full: 0, the line unchanged. */
+static uint32_t slot_fn(uint8_t* l, void* arg)
+{
+    (void)arg;
+    const uint32_t count = R16(l);
+    if (!(R16(l + 8) > count)) return 0;
+    const uint32_t c1 = (count + 1) & 0xFFFF;
+    P16(l, c1);
+    if (R16(l + 6) == 0) P16(l + 2, c1);
+    return R32(l + 12) + (count << 5);
+}
+/* (deck) 0x69B0: the object's sub-draw list (types 1 and 3). n = rec+0x3C items of 80 bytes at rec+0x38. Each:
+ * the object's stream bases from the item (L = IN1+0xD8), then a region of 16 * item[1] bytes reserved in the
+ * stream (16-aligned, a JUMP-to-self at its start and at every 128-byte-aligned EA in it, the rest left as the
+ * LS buffer is) and a 32-byte record of it PUT to a slot of the IN+0x14 pool; no slot: the region is dropped
+ * (the cursor goes back). rec+4 bit 0x100 clear: first the transposed matrix to a 128-byte slot of the IN+0x20
+ * counter (none in range: no items). The records are staged at out+0x20, the matrix at out+0x40 (j->img). */
+static void f_69B0(J* j, const u128 M[4], const uint8_t* rec, const uint8_t* H)
+{
+    spu_context* ctx = j->ctx;
+    if (!j->img_on) { memcpy(j->img, ctx->ls + ((j->out + 0x20u) & SPU_LS_MASK), sizeof j->img); j->img_on = 1; }
+    uint8_t* const o = j->img - 0x20;                  /* o + x = out + x */
+    const uint32_t list = R32(rec + 0x38);
+    const int32_t n = (int32_t)R32(rec + 0x3C);
+    j->wt = 10;                                        /* 0x6AC8: entry waits on tag r116 */
+    if (!(R32(rec + 4) & 0x100)) {                     /* 0x7170 */
+        for (int c = 0; c < 3; c++) for (int r = 0; r < 4; r++) P32(o + 0x40 + 16 * c + 4 * r, M[r]._u32[c]);
+        const uint32_t ctr = R32(IN + 0x20), lim = R32(IN + 0x28);
+        uint32_t m = 0;                                /* the dry build: assumed in range (its value is the committing build's) */
+        if (!j->live) { if ((ctr & 3) || !ea_ok(ctr, 4)) { j->fallback |= FB_EA; return; } j->need_live = 1; }
+        else { m = spu_native_atomic_add32(ctx, ctr, 128); if (m + 128 > lim || !m) return; }
+        P32(o + 0x2C, m);
+        if (j->live) {
+            memcpy(ctx->ls + ((j->out + 0x40u) & SPU_LS_MASK), o + 0x40, 48);
+            if (ea_ok(m, 48)) put_ls(j, j->out + 0x40u, m, 48);
+        }
+        j->rec[3] += 1; j->rec[4] += 128;
+    } else { P32(o + 0x28, R32(H + 4)); P32(o + 0x2C, 0); }
+    o[0x3A] = (R32(IN1 + 0x14) & 1) ? 1 : IN[0x150] ? 3 : 2;
+    P32(o + 0x34, R32(IN + 0x310));
+    o[0x3B] = H[1];
+    P16(o + 0x38, j->half);
+    P32(o + 0x30, R32(IN1 + 0x18));
+    if (n <= 0) return;
+    const uint8_t* L = IN1 + 0xD8;
+    const uint32_t nl = L[0], pool = R32(IN + 0x14);
+    if (!j->live) {                                    /* past what the model covers: the job reads stale LS */
+        if (nl > 16 || n > 0x10000 / 80) { j->fallback |= FB_STALE; return; }
+        for (uint32_t q = 0; q < nl; q++) if (L[17 + q] > 12) { j->fallback |= FB_STALE; return; }
+        if ((list & 15) || (pool & 127) || !ea_ok(pool, 16)) { j->fallback |= FB_EA; return; }
+        j->need_live = 1;
+    }
+    const uint8_t* items = G(j, list, 80u * (uint32_t)n);
+    if (j->fallback) return;
+    for (int32_t i = 0; i < n; i++) {
+        const uint8_t* it = items + 80 * i;
+        j->wt = 8;                                     /* 0x6C60: item i's GET, tag r108 */
+        j->rec[2] += 1; j->rec[5] += R16(it + 10) / 3;
+        if (nl) {
+            room(j, 8 * nl);
+            for (uint32_t q = 0; q < nl; q++) { W(j, 0x00040000 | (0x1680 + 4 * L[1 + q])); W(j, R32(it + 28 + 4 * L[17 + q]) + L[33 + q]); }
+        }
+        if (i > 0) j->wt = 10;                         /* 0x6EB0: the previous record's PUT, tag r116 */
+        const uint32_t rsz = 16u * it[1];              /* 0x5068 */
+        room(j, rsz + 12);
+        if (j->fallback) return;
+        const uint32_t saved = j->cursor;
+        while (j->cursor & 15) W(j, 0);
+        const uint32_t rea = j->blocks[j->nblocks - 1].ea + j->cursor;
+        if (j->live && rsz)
+            for (uint32_t e = rea; ; ) {
+                P32(j->cb + j->cursor + ((e - rea) & ~3u), 0x20000000u | (j->delta + e));
+                e = (e + 128) & ~127u;
+                if (!(rea + rsz > e)) break;
+            }
+        j->cursor += rsz;
+        P32(o + 0x20, rea);
+        P16(o + 0x3C, R32(IN2 + 8));
+        P16(o + 0x3E, ++j->ctr198);
+        P32(o + 0x24, list + 80u * (uint32_t)i);
+        const uint32_t slot = j->live ? spu_native_atomic_line(ctx, pool, slot_fn, 0) : 1;
+        if (!slot) { j->cursor = saved; continue; }
+        if (j->live) {
+            memcpy(ctx->ls + ((j->out + 0x20u) & SPU_LS_MASK), o + 0x20, 32);
+            if (ea_ok(slot, 32)) put_ls(j, j->out + 0x20u, slot, 32);
+        }
+    }
+}
+
+/* (deck) 0x18F50: half to float as the job does it (no denormal / inf / NaN cases) */
+static uint32_t h2f(uint32_t h)
+{
+    const uint32_t w = h << 16;
+    uint32_t r = (uint32_t)((int32_t)w >> 3) & ~0x70000000u;
+    if (w & 0x7FFFFFFFu) r += 0x38000000u;
+    return r;
+}
+/* (deck) 0x7AA0's length: x, y, z squared and summed as (x + y) + z, times the frsqest + Newton rsqrt of
+ * it; 0 unless the sum is above 2^-126 */
+static u128 len3(u128 v)
+{
+    const u128 sq = spu_fm(v, v);
+    const u128 s = SPL(spu_fa(spu_fa(sq, V4(sq._u32[1], sq._u32[2], sq._u32[3], sq._u32[0])), V4(sq._u32[2], sq._u32[3], sq._u32[0], sq._u32[1])), 0);
+    if (!spu_fcgt(s, SPLW(0x00800000u))._u32[0]) return SPLW(0);
+    const u128 r = spu_fi(s, spu_frsqest(s));
+    return spu_fm(spu_fma(spu_fnms(s, spu_fm(r, r), SPLW(F1)), spu_fm(r, SPLW(0x3F000000u)), r), s);
+}
+/* (deck) 0x7AA0 (type 1, slots 5..7): the object's distance. rec+4 bit 0x100: from IN+0x100 + IN+0xC0 to
+ * the translation column of the 3x4 matrix at H+4 + 48 * H[2] (a GET on tag r108); else |M[3].xyz|. */
+static u128 f_7AA0(J* j, const u128 M[4], const uint8_t* rec, const uint8_t* H)
+{
+    if (R32(rec + 4) & 0x100) {
+        const uint32_t ea = R32(H + 4) + 48u * H[2];
+        if (ea & 15) { j->fallback |= FB_EA; return SPLW(0); }
+        const uint8_t* X = G(j, ea, 48);
+        j->wt = 8;
+        const u128 P = spu_fa(LQ(IN + 0x100), LQ(IN + 0xC0));
+        return len3(spu_fs(P, V4(R32(X + 12), R32(X + 28), R32(X + 44), F1)));
+    }
+    u128 v = M[3]; v._u32[3] = F1;
+    return len3(v);
+}
+/* (deck) 0x5F38 (type 1): slot 5's colour and slot 7's fade at distance d. c = (d - near) / (far - near)
+ * clamped to [0, 1] (near / far = the halves at H+0x10 / H+0x12, or IN+0x230 / IN+0x234 when equal;
+ * far - near < 1e-4: a step at near); slot 5 = lerp(H[8..11], H[12..15], c) / 255 * (4 * H[3] / 255),
+ * slot 7.x = its w * H[3] / 255. H+8 and H+0xC both 0: zeros. */
+static void f_5F38(J* j, const uint8_t* H, u128 d, u128* q5, uint32_t* x7)
+{
+    if (!(R32(H + 8) | R32(H + 0xC))) { *q5 = SPLW(0); *x7 = 0; return; }
+    const u128 one = SPLW(F1), zero = SPLW(0), inv255 = SPLW(0x3B808080u);
+    u128 nr = SPLW(h2f(R16(H + 0x10))), fr = SPLW(h2f(R16(H + 0x12)));
+    if (spu_fceq(spu_fs(fr, nr), zero)._u32[0]) { nr = SPLW(R32(IN + 0x230)); fr = SPLW(R32(IN + 0x234)); }
+    const u128 h3 = spu_fm(spu_csflt(SPLW(H[3]), 155), inv255);
+    u128 A, B;
+    for (int i = 0; i < 4; i++) {
+        A._u32[i] = spu_cuflt(SPLW(H[8 + i]), 155)._u32[0];
+        B._u32[i] = spu_cuflt(SPLW(H[12 + i]), 155)._u32[0];
+    }
+    const u128 dd = SPL(d, 0), span = spu_fs(fr, nr);
+    const u128 step = spu_fcgt(dd, nr)._u32[0] ? one : zero;
+    const u128 e = spu_fi(span, spu_frest(span));
+    const u128 t = spu_fm(spu_fma(spu_fnms(e, span, one), e, e), spu_fs(dd, nr));
+    u128 c = spu_fcgt(SPLW(0x38D1B717u), span)._u32[0] ? step : t;
+    if (spu_fcgt(c, one)._u32[0]) c = one;
+    if (spu_fcgt(zero, c)._u32[0]) c = zero;
+    const u128 a = spu_fm(A, inv255);
+    const u128 lerp = spu_fma(spu_fms(B, inv255, a), SPL(c, 0), a);
+    *q5 = spu_fm(lerp, SPL(spu_fm(h3, SPLW(0x40800000u)), 0));
+    *x7 = spu_fm(SPL(lerp, 3), SPL(h3, 0))._u32[0];
+    (void)j;
+}
+
 /* The branches the model lacks that IN1 alone decides (section 10.2),
  * checked at the first object that passes the filter: before it nothing is
  * emitted, and a job none passes writes only its record, whatever the type
@@ -667,6 +871,10 @@ static void precheck(J* j, uint32_t type, int mat_on)
     if (type == 0) {
         static const int ks[] = { 43, 45, 7, 6, 5, 9, 8 };
         for (unsigned i = 0; i < sizeof ks / sizeof *ks; i++) if (SLOT(ks[i]) >= 0) j->fallback |= FB_SIDE;
+        if (IN1[0xD4] ? 1 : IN1[0x17A]) j->fallback |= FB_FPUPLOAD;
+    }
+    if (type == 1) {      /* (deck) 0x10E48: slot 6 (0x11080) and 8, 9 (0xA4A8) unmodelled, 0x62F0 as in type 0 */
+        if (SLOT(6) >= 0 || SLOT(8) >= 0 || SLOT(9) >= 0) j->fallback |= FB_SIDE;
         if (IN1[0xD4] ? 1 : IN1[0x17A]) j->fallback |= FB_FPUPLOAD;
     }
 }
@@ -720,7 +928,7 @@ static void run(J* j)
         if (j->fallback) return;                /* the zero stand-in is smaller than a range can be */
         uint32_t cnt = (re[r] - rb[r]) >> 3; j->nitems += cnt; j->nrange++; j->lastcnt = cnt;
         uint32_t last_mat = 0; const uint8_t* old_mat = 0; const uint8_t* mat = 0;
-        int pend = -1, pend_o = 0; j->lt = 0; j->wo = 0;       /* the tag of the last wait of the lifted pipeline (see j204_main) */
+        int pend = -1, pend_t = 0; j->lt = 0; j->wo = 0;       /* the tag of the last wait of the lifted pipeline (see j204_main) */
         for (uint32_t k = 0; k < cnt; k++) {
             const uint8_t* E = G(j, R32(items + 8 * k), 16);
             const uint8_t* H = G(j, R32(items + 8 * k + 4), 48);
@@ -729,13 +937,14 @@ static void run(J* j)
                          (IN1[0x0A] && ((ew0 >> 5) & 7) != R32(IN2 + 4));
             /* the lifted loop waits item k's instance tag, then the data tag of the previous passing item */
             j->lt = k % 3; j->wo = 0;
-            if (pend >= 0) { j->lt = pend % 3; j->wo = pend_o; }
+            if (pend >= 0) { j->lt = pend % 3; j->wo = pend_t; }
             pend = reject ? -1 : (int)k;
-            const uint32_t ov0 = j->novf;
+            j->wt = 0;      /* (deck) the object's own last wait: 10 = the output tag (a block left, a record PUT), 8 = a sub-draw GET */
             if (reject) continue;
             if (!started) {
                 started = 1;
-                if (type != 0 && type != 2) { j->fallback |= FB_TYPE; return; }
+                if (type > 3 || !(s_types >> type & 1)) { j->fallback |= FB_TYPE; return; }
+                j->half = f2h(type == 3 ? R32(IN + 0x30C) : 0);
                 precheck(j, type, mat_on);
                 if (matsz > 0x300) { j->bad_ea = matsz; j->bad_size = 0xF2; j->fallback |= FB_EA; }
                 if (j->fallback) return;
@@ -760,22 +969,33 @@ static void run(J* j)
                 f_side(j, E, H);
                 f_6FE0(j, E);
                 f_5C98(j, rec);
-            } else {
+            } else if (type == 1) {              /* (deck) 0x10E48 */
+                if (j->need_mat) f_BDD8(j, M);
+                if (SLOT(5) >= 0 || SLOT(7) >= 0) {   /* (slot 6 declined) */
+                    u128 q5; uint32_t x7;
+                    f_5F38(j, H, f_7AA0(j, M, rec, H), &q5, &x7);
+                    if (j->fallback) return;
+                    if (SLOT(5) >= 0) emit_v(j, SLOT(5), q5);
+                    if (SLOT(7) >= 0) emit_v(j, SLOT(7), V4(x7, 0, 0, 0));
+                }
+                f_6FE0(j, E);
+                f_69B0(j, M, rec, H);
+            } else {                             /* 0xBCD0 (type 2), 0xBB60 (type 3, deck) */
                 int po = f_B010(j, M, E);
-                f_5C98(j, rec);
+                if (type == 2) f_5C98(j, rec); else f_69B0(j, M, rec, H);
                 if (po) { room(j, 8); W(j, 0x00040A68); W(j, 0); }
             }
-            j->rec[2] += 1; j->rec[5] += R16(rec + 4);
-            pend_o = j->novf != ov0;
+            if (type == 0 || type == 2) { j->rec[2] += 1; j->rec[5] += R16(rec + 4); }   /* types 1, 3: per sub-draw */
+            pend_t = j->wt;
             if (j->fallback) return;
         }
-        if (pend >= 0) { j->lt = pend % 3; j->wo = pend_o; }
+        if (pend >= 0) { j->lt = pend % 3; j->wo = pend_t; }
     }
     j->rec[1] = j->has_block ? j->done + j->cursor - 4096 : 0xFFFFFFFCu;
     if (j->nblocks) {
         const uint32_t ov1 = j->novf;
         if (j->vfmt) f_5B60(j, 0);
-        if (j->novf != ov1) j->wo = 1;
+        if (j->novf != ov1) j->wo = 10;
         W(j, 0x00020000);
         j->blocks[j->nblocks - 1].used = j->cursor;
     }
@@ -789,6 +1009,7 @@ static void job_init(J* j, spu_context* ctx)
     memset(j, 0, offsetof(J, blocks));
     j->ctx = ctx;
     j->out = ctx->gpr[9]._u32[0] & SPU_LS_MASK & ~15u;
+    if (j->out > SPU_LS_SIZE - 0x2080) j->fallback |= FB_EA;   /* (deck) the record, its staging and the two block buffers */
     uint32_t in = ctx->gpr[3]._u32[0] & SPU_LS_MASK & ~15u;
     if (in > SPU_LS_SIZE - 0x520) { j->fallback |= FB_EA; in = 0; }
     j->IN = ctx->ls + in; j->IN1 = j->IN + 0x380; j->IN2 = j->IN + 0x500;
@@ -833,15 +1054,16 @@ static int j204_main(spu_context* ctx)
         const char* e = getenv("PS3RECOMP_NATIVE_J204");
         s_mode = e ? atoi(e) : 1;
         s_dbg = getenv("J204_DEBUG") != 0;
+        { const char* t = getenv("J204_TYPES"); if (t && *t) s_types = (unsigned)strtoul(t, 0, 0) & 0xFu; }
         s_break = getenv("PS3RECOMP_J204_BREAK") ? atoi(getenv("PS3RECOMP_J204_BREAK")) : 0;   /* checker self-test: a wrong block / record, every replay must fail */
         fprintf(stderr, "[j204] native render-list builder: %s\n", s_mode ? "on" : "off (PS3RECOMP_NATIVE_J204=0)");
     }
-    if (!s_mode || t_bypass) return 0;
+    if (!s_mode || t_bypass || (g_spu_jobrec_mode & SPU_JOBREC_RECORD)) return 0;   /* (deck) a recording holds the lifted job */
     if (!t_j) { t_j = (J*)calloc(1, sizeof(J)); if (!t_j) return 0; }
     J* j = t_j;
     const int replay = spu_native_replay_begin(ctx);
     if (s_dbg) { fprintf(stderr, "[j204] regs r3..r10 ="); for (int q = 3; q <= 10; q++) fprintf(stderr, " %08X", ctx->gpr[q]._u32[0]); fprintf(stderr, " sp %05X\n", ctx->gpr[1]._u32[0]); }
-    static unsigned long long s_tsc_run, s_tsc_all, s_tsc_n;
+    static unsigned long long s_tsc_run, s_tsc_all, s_tsc_n, s_tsc_ty[4], s_acc_ty[4];
     const unsigned long long t_a = s_stats_on ? __builtin_ia32_rdtsc() : 0;
     job_init(j, ctx);
     run(j);
@@ -854,6 +1076,16 @@ static int j204_main(spu_context* ctx)
     if (s_stats) {
         const unsigned n = __atomic_add_fetch(&s_calls, 1, __ATOMIC_RELAXED);
         static unsigned s_type[34];   /* FB_TYPE declines by job type (33: N <= 0 of a split range) */
+        static unsigned s_dty[5][16], s_cty[5];   /* (deck) calls and declines by reason, per job type (4: 4 and up) */
+        { const uint32_t ty = R32(j->IN1 + 4) < 4 ? R32(j->IN1 + 4) : 4;
+          __atomic_add_fetch(&s_cty[ty], 1, __ATOMIC_RELAXED);
+          for (int i = 0; i < 16; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_dty[ty][i], 1, __ATOMIC_RELAXED); }
+        if (n % (unsigned)s_stats == 0)
+            for (int t = 0; t < 5; t++) {
+                fprintf(stderr, "[j204] type %d%s: %u calls, declined by reason:", t, t == 4 ? "+" : "", s_cty[t]);
+                for (int i = 0; i < 16; i++) if (s_dty[t][i]) fprintf(stderr, " bit%d=%u", i, s_dty[t][i]);
+                fputc('\n', stderr);
+            }
         if (j->fallback) {
             __atomic_add_fetch(&s_decl, 1, __ATOMIC_RELAXED);
             for (int i = 0; i < 16; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_why[i], 1, __ATOMIC_RELAXED);
@@ -867,8 +1099,16 @@ static int j204_main(spu_context* ctx)
             for (int i = 0; i < 34; i++) if (s_type[i]) fprintf(stderr, " %d=%u", i, s_type[i]);
             fputc('\n', stderr);
         }
-        if (!j->fallback && t_a) { __atomic_add_fetch(&s_tsc_run, t_b - t_a, __ATOMIC_RELAXED); __atomic_add_fetch(&s_tsc_n, 1, __ATOMIC_RELAXED); }
+        /* (deck) a sample that crossed cores can come out negative (unsigned: huge): such samples are dropped */
+        const int t_ok = t_a && t_b >= t_a && t_b - t_a < 100000000ull;
+        if (!j->fallback && t_ok) { __atomic_add_fetch(&s_tsc_run, t_b - t_a, __ATOMIC_RELAXED); __atomic_add_fetch(&s_tsc_n, 1, __ATOMIC_RELAXED); }
+        if (!j->fallback && t_ok && R32(j->IN1 + 4) < 4) {   /* (deck) by job type (the committing build of types 1/3 is added below) */
+            __atomic_add_fetch(&s_tsc_ty[R32(j->IN1 + 4)], t_b - t_a, __ATOMIC_RELAXED); __atomic_add_fetch(&s_acc_ty[R32(j->IN1 + 4)], 1, __ATOMIC_RELAXED);
+        }
         if (n % (unsigned)s_stats == 0) {
+            fprintf(stderr, "[j204] accepted by type (calls, kcycles each):");
+            for (int i = 0; i < 4; i++) fprintf(stderr, " %d=%llu/%.1f", i, s_acc_ty[i], s_acc_ty[i] ? s_tsc_ty[i] / 1000.0 / s_acc_ty[i] : 0.0);
+            fputc('\n', stderr);
             fprintf(stderr, "[j204] native run: %.1f kcycles per accepted call; ", s_tsc_n ? s_tsc_run / 1000.0 / s_tsc_n : 0.0);
             (void)s_tsc_all;
             fprintf(stderr, "[j204] %u calls, declined %u:", n, s_decl);
@@ -886,6 +1126,28 @@ static int j204_main(spu_context* ctx)
     const uint32_t out = j->out;
     if (out > SPU_LS_SIZE - 32) return 0;
     if (j->nblocks && (!ea_ok(j->ring_ea, 4) || j->limit < 4096)) return 0;   /* nothing written yet: the lifted job runs */
+    if (j->need_live) {
+        /* (deck) the committing build (types 1/3 with sub-draws): the same inputs, so no decline can come now */
+        if (s_mode == 2) return 0;   /* the live check compares dry builds only */
+        const unsigned long long t_c = s_stats_on ? __builtin_ia32_rdtsc() : 0;
+        job_init(j, ctx); j->live = 1;
+        run(j);
+        if (__builtin_expect(j->fallback, 0)) {   /* the inputs changed between the builds (another processor wrote them) */
+            static int nw;
+            if (nw++ < 8) fprintf(stderr, "[j204] committing build met reasons 0x%X (type %u); its output stands\n", j->fallback, R32(j->IN1 + 4));
+            if (j->nblocks && j->cb != j->spill) {   /* run() stopped early: the stream still ends in a RETURN */
+                if (j->cursor > 4092) j->cursor = 4092;
+                W(j, 0x00020000); j->blocks[j->nblocks - 1].used = j->cursor;
+                j->rec[1] = j->done + j->cursor - 4096;
+            }
+        }
+        const unsigned long long t_d = s_stats_on ? __builtin_ia32_rdtsc() : 0;
+        if (t_c && t_d >= t_c && t_d - t_c < 100000000ull && t_a && t_b >= t_a && t_b - t_a < 100000000ull) {
+            const unsigned long long d = t_d - t_c;
+            __atomic_add_fetch(&s_tsc_run, d, __ATOMIC_RELAXED);
+            if (R32(j->IN1 + 4) < 4) __atomic_add_fetch(&s_tsc_ty[R32(j->IN1 + 4)], d, __ATOMIC_RELAXED);
+        }
+    }
     if (s_mode == 2) {
         j204_fn fn = spu_lookup(EC5F_MAIN, ctx->resident_ovl);
         if (!fn) return 0;
@@ -913,23 +1175,29 @@ static int j204_main(spu_context* ctx)
           if (!(++s_pub_n & 0x3FFFF)) fprintf(stderr, "[j204] publish: %.1f kcycles per call, %.2f blocks per call\n", s_tsc_pub / 1000.0 / s_pub_n, (double)s_blk / s_pub_n); } }
     if (s_break == 2) j->rec[2] ^= 1;
     for (int i = 0; i < 8; i++) P32(ctx->ls + out + 4 * i, j->rec[i]);
+    if (j->img_on) memcpy(ctx->ls + ((out + 0x20u) & SPU_LS_MASK), j->img, sizeof j->img);   /* (deck) out+0x20..0x6F as the job leaves it */
     /* the tag wait the lifted main ends in: the tag of its last object's slot (the job's two tags r5/r6 alternate), r4 when it fetched none.
      * The wrapper's later tag-status read depends on the mask it leaves. */
     {
         if (s_dbg) fprintf(stderr, "[j204] draws %u items %u ranges %u lastcnt %u type %u\n", j->rec[2], j->nitems, j->nrange, j->lastcnt, R32(j->IN1 + 4));
-        const uint32_t tg = j->wo ? ctx->gpr[10]._u32[0] : ctx->gpr[4 + (j->nrange ? j->lt : 0)]._u32[0];   /* the job's three tags r4, r5, r6 rotate over the items */
+        /* the job's three tags r4, r5, r6 rotate over the items; wo: the object's last wait was on r10 (the output tag) or r8 (a sub-draw GET) */
+        const uint32_t tg = j->wo ? ctx->gpr[j->wo]._u32[0] : ctx->gpr[4 + (j->nrange ? j->lt : 0)]._u32[0];
         const uint32_t mask = 1u << (tg & 31);
         if (replay) { spu_wrch_raw(ctx, MFC_WrTagMask, mask); spu_wrch_raw(ctx, MFC_WrTagUpdate, 1); (void)spu_rdch_raw(ctx, MFC_RdTagStat); }
         else { u128 m = {0}, one = {0}; m._u32[0] = mask; one._u32[0] = 1; spu_wrch(ctx, MFC_WrTagMask, m); spu_wrch(ctx, MFC_WrTagUpdate, one); (void)spu_rdch(ctx, MFC_RdTagStat); }
     }
     /* what the lifted main leaves in the local store and no later code reads: its callees' frames,
-     * the scratch buffers, the output buffers past the record, the atomic line */
+     * the scratch buffers, the atomic line. (deck) out+0x20..0x7F is left as the job leaves it (j->img) and
+     * compared; the block buffers too for types 1 and 3 (each block staged in its own LS buffer). Types 0/2
+     * keep them dead: SLOT(12)'s y..w (f_side) are the stack quad 0x7C58's prologue saves (main's r112 =
+     * the current range's quad of main's range array, rotated), which the model does not have; a data word
+     * that looks like a JUMP ends the replay's block compare before them. */
     if (replay) {
         const uint32_t sp = ctx->gpr[1]._u32[0] & SPU_LS_MASK;
+        if (R32(j->IN1 + 4) != 1 && R32(j->IN1 + 4) != 3) spu_native_dead_ls(out + 0x80, out + 0x2080);
         spu_native_dead_ls(sp - 0x1800, sp);
         spu_native_dead_ls(0x80, 0x100);
         spu_native_dead_ls(0x19AC0, 0x19AE0);   /* the staging quads of the two-vector constant burst (0x16A54) */
-        spu_native_dead_ls(out + 0x20, out + 0x2080);
         spu_native_dead_ls(0x27000, 0x28800 + 512 * j->nq + 0x400);
         spu_native_dead_ls(0x2C000, 0x2C800);
         spu_native_replay_end(ctx, 1);

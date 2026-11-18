@@ -1026,6 +1026,46 @@ uint32_t spu_native_atomic_add32(spu_context* ctx, uint32_t ea, uint32_t v)
     }
 }
 
+/* (deck) Any read-modify-write of one 128-byte line, as a job's GETLLAR / PUTLLC loop into LS 0x80 does it (job
+ * 204's record-slot allocator 0x4740): fn changes the line in place, or leaves it, and returns the job's result; the
+ * line is stored either way, again on a lost reservation. A replay: fn gets the line of the recording's first
+ * GETLLAR of this line whose PUTLLC then stored, what it leaves goes to guest memory (the end check compares the
+ * line with the recording's last store), the reservation state is the recorded one. */
+uint32_t spu_native_atomic_line(spu_context* ctx, uint32_t ea, uint32_t (*fn)(uint8_t* line, void* arg), void* arg)
+{
+    const uint32_t line = ea & ~127u;
+    jr_tls* t = jr_on(ctx);
+    if (t && t->replaying && t->guest_locked) {
+        const jr_file* f = t->f;
+        for (uint32_t i = t->nat_atom; i < f->h->n_ev; i++) {
+            const jr_ev* g = &f->ev[i];
+            if (g->type != EV_ATOM || g->ch != MFC_GETLLAR_CMD || g->b != line) continue;
+            for (uint32_t j = i + 1; j < f->h->n_ev; j++) {
+                const jr_ev* p = &f->ev[j];
+                if (p->type != EV_ATOM || p->ch != MFC_PUTLLC_CMD || p->b != line) continue;
+                if (p->c != 0) break;               /* that attempt failed: the next GETLLAR */
+                uint8_t l[128];
+                memcpy(l, f->data + g->off + 128, 128);
+                const uint32_t r = fn(l, arg);
+                memcpy(vm_base + line, l, 128);
+                memcpy(ctx->resv_line, f->data + p->off + 256, 128);
+                { uint64_t rw; memcpy(&rw, f->data + p->off + 384, 8); ctx->resv_word = rw; }
+                ctx->atomic_stat = p->c;
+                t->nat_atom = j + 1;
+                return r;
+            }
+        }
+        jr_fail(t, "native atomic on line 0x%08X: the recording has no such stored atomic", line);
+    }
+    for (;;) {
+        ctx->mfc_lsa = 0x80; ctx->mfc_eal = line;
+        spu_mfc_atomic_raw(ctx, MFC_GETLLAR_CMD);
+        const uint32_t r = fn(ctx->ls + 0x80, arg);
+        spu_mfc_atomic_raw(ctx, MFC_PUTLLC_CMD);
+        if (ctx->atomic_stat == 0) return r;
+    }
+}
+
 int spu_native_replay_begin(spu_context* ctx)
 {
     jr_tls* t = jr_on(ctx);
@@ -1083,6 +1123,10 @@ void spu_native_replay_end(spu_context* ctx, int ran)
  * after the native returns, so its recorded operations stay where they are (job 210). */
 static void jr_native_check(jr_tls* t, uint32_t g1, uint64_t q0, int stream0_only)
 {
+    /* (deck) PS3_JOBREPLAY_FULLPUT=1: 4096-byte PUTs compared whole (a native that reproduces the stale LS bytes
+     * past the first JUMP/RETURN too, job 204's) */
+    static int s_fullput = -1;
+    if (s_fullput < 0) { const char* e = getenv("PS3_JOBREPLAY_FULLPUT"); s_fullput = e && *e == '1'; }
     const jr_file* f = t->f;
     const uint32_t g0 = t->cur[0] < f->ns[0] ? f->sidx[0][t->cur[0]] : g1;
     for (uint32_t i = g0; i < g1; i++) {
@@ -1091,7 +1135,7 @@ static void jr_native_check(jr_tls* t, uint32_t g1, uint64_t q0, int stream0_onl
         if (e->type == EV_DMA && mfc_is_put(e->ch) && e->len) {
             const uint8_t* rec = f->data + e->off; const uint8_t* g = vm_base + e->b;
             uint32_t n = e->len;
-            if (n == 4096) {   /* a command block: compare through its first JUMP/RETURN word */
+            if (n == 4096 && !s_fullput) {   /* a command block: compare through its first JUMP/RETURN word */
                 uint32_t k = 0;
                 while (k < 4096 && !jr_is_cmd_end(((uint32_t)rec[k] << 24) | ((uint32_t)rec[k + 1] << 16) | ((uint32_t)rec[k + 2] << 8) | rec[k + 3])) k += 4;
                 n = k + 4 > 4096 ? 4096 : k + 4;

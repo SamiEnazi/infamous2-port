@@ -95,6 +95,8 @@ static inline int spu_native_ea_ok_fast(uint32_t ea, uint32_t size)
 }
 #define spu_native_ea_ok(ea, size) spu_native_ea_ok_fast((ea), (size))
 uint32_t spu_native_atomic_add32(struct spu_context* ctx, uint32_t ea, uint32_t v);   /* guest word += v atomically as the job does; returns the old value (a replay: the recorded one) */
+/* (deck) a GETLLAR / fn / PUTLLC loop on the line of ea through LS 0x80 (a replay: fn on the recorded line); returns fn's result */
+uint32_t spu_native_atomic_line(struct spu_context* ctx, uint32_t ea, uint32_t (*fn)(uint8_t* line, void* arg), void* arg);
 uint32_t spu_native_replay_dec(struct spu_context* ctx, int k);           /* replay: the k-th (1-based) recorded RdDec read from the native's entry */
 void spu_native_replay_end_dec(struct spu_context* ctx, int ran, int ndec);   /* as spu_native_replay_end, but the native's span ends at its ndec-th RdDec (stream 0 only) */
 

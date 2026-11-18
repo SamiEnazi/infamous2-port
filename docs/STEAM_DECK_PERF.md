@@ -43,6 +43,12 @@ see below), dispatch 6.4%, FIFO walk 5.2%. ~2.8 us per draw, ~7,600 draws per fr
 | Baseline (installed 4cabf54 + measurement only) | ~40.7-41 | 22.1 ms | 99.1 ms |
 | Dev 6b300ea | 41.8 | 21.4 ms | 96.1 ms |
 | Dev 6b300ea + Far shadow detail: Reduced | 42.7 | 18.6 ms | 93.8 ms |
+| j6 (b653037) vs t13d (job 204 types 1/3), 8 clean runs each | 41.70 -> 41.93 | 21.04 -> 21.34 ms (noise?) | 97.38 -> 96.26 ms |
+
+Far shadow detail in normal play (2026-11-18, j6 build, real clock, 60 fps cap, player's settings and GPU clock
+1400 MHz, HUD on, one 50 s run each of the plaza walk, `sh60full` / `sh60reduced` recordings): Full 34.9 fps,
+8,151 draws per frame; Reduced 37.4 fps, 5,299 draws (+7%; one run each, so noisier than the det bench). The
+visual difference is hard to spot at night in this save (side-by-side video sent to the player).
 
 The installed build is still 4cabf54 (the player's safe version; install only when asked).
 
@@ -64,6 +70,9 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
   `<player>/native/recordings/rec-210-218`, `rec-220-211-208`, `rec-223`. `PS3_JOBREPLAY_REPEAT=N` for
   timing (replay times are dominated by the harness: compare natives on/off, not absolute).
 * Live checks: `J218_CHECK=1` (blend vs lifted), `J218CLIP_CHECK`, `J210_CHECK`, `J220_CHECK`.
+* Job 204 switches: `PS3RECOMP_NATIVE_J204=0` (all off), `J204_TYPES=<mask>` (types the native takes, default
+  0xF; 0x5 = only 0 and 2 as before), `PS3RECOMP_J204_BREAK=1/2` (checker self-test), `PS3_JOBREPLAY_FULLPUT=1`
+  (replay compares whole 4096-byte command blocks).
 * Statistics switches: `PS3_JOBSTAT=1` (per-job time), `PS3_SPU_DMASTAT=<s>` (DMA per job overlay) with
   `PS3_SPU_DMASTAT_OVL=<id>` (that job's DMA sites), `J204_STATS=<n>` (declines by reason + native cycles),
   `J218_STATS`, `J210_STATS`, `PS3RECOMP_ENG_PASSSTATS`, `PS3RECOMP_VK_CALLSTATS`.
@@ -84,10 +93,25 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
 * Shell pitfall: never `pkill -f` / `pgrep -f` a pattern that also appears in the waiting command itself
   (it matches its own shell). Wait on a file's line count instead.
 
+### Acceptance rules (every change, agreed with the player 2026-11-18)
+
+1. Exact: SPU natives match the lifted job bit for bit (job replay exit 0, live checks 0 differences); graphics
+   changes give the same image (det-bench screenshots).
+2. Faster: interleaved det A/B (>= 3 clean runs per side) shows the targeted side (SPU or RSX ms/frame) lower
+   and fps not lower. Within noise and no other benefit = not committed.
+3. Not less stable: frame-time p99 and the number of frames over 33 ms (each run's playlog.tsv) not worse, no
+   crash or hang in the runs; anything that touches threads or timing also gets a long standing run.
+4. Behind a switch: each change can be turned off by an environment variable / menu setting (rollback without
+   a rebuild), and the commit can be reverted alone.
+5. A change that fails 1-3 is reverted and listed in section 5 with its numbers, so it is not retried blindly.
+6. The installed build only changes when the player asks; the previous exe is kept as a backup.
+
 ## 4. Changes on deck-perf (newest first)
 
 | Commit | Change | Measured |
 |---|---|---|
+| (next) | job 204 native: types 1 and 3 (sub-draw lists 0x69B0, type 1 slots 5/7), `J204_TYPES` switch, `PS3_JOBREPLAY_FULLPUT` | SPU -1.1%, fps +0.55% |
+| b653037 | J204_STATS by job type | (tools) |
 | 6b300ea | job 204 output PUTs via the lean DMA path; J204_STATS cycles; DMASTAT_OVL | small |
 | 89e52ae | in-game "Far shadow detail" (`PS3RECOMP_SHADOW_LOD`, job 210 far cascade K.y x20) | RSX -12%, fps +2-3% |
 | eed8799 | constant upload 8 words per step (AVX2); vertex remap pass vectorises | RSX -0.7% |
@@ -106,6 +130,7 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
 * Packed key arrays for the index / vertex caches: RSX +1 ms (an unprefetched miss in front of the
   prefetched entry). Tag arrays for the descriptor-set memo / table: no gain.
 * `PS3RECOMP_NATIVE_J220=1` (exact BSP native): no gain live.
+* Job 204 type 4 natively: ~6,000 instructions of handler for 1.2% of job 204 calls -- not worth it (2026-11-18).
 * `SPU_LIFT_XFN_BI` (cross-function const `bid/bie` as tail calls): -35..40% fps measured upstream.
 * Huge pages: guest memory already mostly THP; TLB misses < 1% of cycles.
 * Vectorising frest/frsqest: the compiler already uses gathers.
@@ -116,17 +141,25 @@ The installed build is still 4cabf54 (the player's safe version; install only wh
 
 ## 6. Next candidates (expected gain, effort)
 
-1. Job 204: model the declined object types: FB_TYPE = job types 1, 3, 4 (about equal shares, ~6% of all
-   calls together; the native handles types 0 and 2), plus FB_FPUPLOAD 1.7%, FB_STALE 1.3%, FB_OP11B 1.3%
-   of calls. ~1.5-2% SPU; needs new job 204 recordings with those types for the replay check.
-   Dispatch: type at IN+0x384, jump table LS 0x139A4 (module blob loads at LS 0x4000): type 1 -> 0x13B68,
-   3 -> 0x13C78 (item loop 0xBB60), 4 -> 0x13CB0 (item loop 0xC368); type 2 = 0x13C4C (loop 0xBCD0).
-2. Graphics thread: per-draw constant offsets as push constants (descriptor set only rebound when textures
+1. FIRST (correctness, also in the installed build): job 204 type 0 writes a wrong f_side SLOT(12) constant
+   (lanes y..w) in ~4% of type 0 calls: the lifted value is main's r112 quad (the current range's entry of
+   main's range array, saved by 0x7C58 at main sp-0x210); the native reads entry sp-0x970 and uses r10. The
+   replay's block compare stopped at data words that look like a JUMP and hid it; `PS3_JOBREPLAY_FULLPUT=1`
+   shows it (rec-204b/sel0: 74 of 900 fail). Fix, then run every job 204 replay with FULLPUT=1.
+2. Job 204 remaining declines (5.5% of calls, t13d): type 4 (18.7k per run, handler ~3,650 instructions + ~2,600
+   in callees: poor value), type 1 slots 6/8/9 (5.9k; 0x11080 sRGB->linear pow 2.4 and 0xA4A8), FB_STALE (material
+   reads past the fetched material, 14.7k type 0 + 10.9k type 1 + 6k type 2), FB_FPUPLOAD 26.6k, FB_OP11B 20.7k.
+   Recording: `<player>/native/recordings/rec-204b/jobrec` (8,000 calls), subsets `sel` (1,960), `sel0..sel3`.
+   Details of the handlers and of 0x69B0 / 0x4740 / 0x5F38: work/bench/NOTES.md (2026-11-18 entries).
+3. PGO profile is stale: 13 hot functions now compile without profile data (job 218 blend_group, job 204 run /
+   publish / emit_vec, j210_walker, f_7C18). Retrain (work/bench/pgotrain3.sh, new profile file name) and A/B.
+4. Graphics thread: per-draw constant offsets as push constants (descriptor set only rebound when textures
    change): estimate revised to ~3% RSX (RADV already passes dynamic UBO offsets through its push-constant
    area, so the saving is only the bind/flush difference). Needs the HLSL generators (rsx_vp_decompiler.c
    emits `vp_c[(N + aK.c) & 511u]` / `vp_c[N]`, rsx_fp_decompiler.c `fp_constants[N]`, plus vp_posscale,
    vp_posoffset, fp_alpha; the same HLSL feeds D3D12/Metal, so Vulkan-only), the guest set layout
    (rsx_vulkan_backend.c ~3410, bindings VPCONST/PSCONST UNIFORM_BUFFER_DYNAMIC), 7 bind sites and a
    shader-cache key bump. Validate with det-bench screenshots. Low priority for the gain.
-3. Job 218 FK / clip sampler widened like the blend: ~0.5-1% SPU.
-4. Large, risky: WWS job manager natively (~7% SPU); Edge geometry on the GPU (~16% SPU).
+5. Job 218 FK / clip sampler widened like the blend: ~0.5-1% SPU.
+6. Graphics thread +1.4% with t13d (not consistent between batches): check with a longer A/B.
+7. Large, risky: WWS job manager natively (~7% SPU); Edge geometry on the GPU (~16% SPU).
