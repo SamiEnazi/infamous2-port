@@ -853,11 +853,21 @@ static int j204_main(spu_context* ctx)
     if (__builtin_expect(s_stats < 0, 0)) { const char* e = getenv("J204_STATS"); s_stats = e ? atoi(e) : 0; s_stats_on = s_stats > 0; }
     if (s_stats) {
         const unsigned n = __atomic_add_fetch(&s_calls, 1, __ATOMIC_RELAXED);
+        static unsigned s_type[34];   /* FB_TYPE declines by job type (33: N <= 0 of a split range) */
         if (j->fallback) {
             __atomic_add_fetch(&s_decl, 1, __ATOMIC_RELAXED);
             for (int i = 0; i < 16; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_why[i], 1, __ATOMIC_RELAXED);
+            if (j->fallback & FB_TYPE) {
+                const uint32_t ty = R32(j->IN1 + 4);
+                __atomic_add_fetch(&s_type[ty == 0 || ty == 2 ? 33 : ty < 32 ? ty : 32], 1, __ATOMIC_RELAXED);
+            }
         }
-        if (!j->fallback) { __atomic_add_fetch(&s_tsc_run, t_b - t_a, __ATOMIC_RELAXED); __atomic_add_fetch(&s_tsc_n, 1, __ATOMIC_RELAXED); }
+        if (n % (unsigned)s_stats == 0) {
+            fprintf(stderr, "[j204] FB_TYPE by type:");
+            for (int i = 0; i < 34; i++) if (s_type[i]) fprintf(stderr, " %d=%u", i, s_type[i]);
+            fputc('\n', stderr);
+        }
+        if (!j->fallback && t_a) { __atomic_add_fetch(&s_tsc_run, t_b - t_a, __ATOMIC_RELAXED); __atomic_add_fetch(&s_tsc_n, 1, __ATOMIC_RELAXED); }
         if (n % (unsigned)s_stats == 0) {
             fprintf(stderr, "[j204] native run: %.1f kcycles per accepted call; ", s_tsc_n ? s_tsc_run / 1000.0 / s_tsc_n : 0.0);
             (void)s_tsc_all;
