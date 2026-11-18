@@ -198,6 +198,9 @@ if [ $spulight = 0 ]; then export PS3RECOMP_ENG_GPU_LIGHT=07000B80:07384B80 PS3R
 # sleeps its whole period; Windows wakes it early). Each can still be set from outside.
 : "${PS3RECOMP_GCM_SPIN_US:=0}" "${PS3RECOMP_VK_TQ_SPIN_US:=0}" "${PS3RECOMP_VK_PIPE_THREADS:=1}" "${PS3_FRAMECLOCK_US:=250}"
 export PS3RECOMP_GCM_SPIN_US PS3RECOMP_VK_TQ_SPIN_US PS3RECOMP_VK_PIPE_THREADS PS3_FRAMECLOCK_US
+# (deck-merge) v0.6's native job runner: 4 pool threads (its default, physical cores - 2, is 2 here). Det bench at the
+# plaza, 2026-11-18: 2 threads 37.8 fps (the main thread runs jobs in its waits: 26 ms/frame), 3 40.8, 4 41.0.
+: "${PS3_NATIVE_JOBS_THREADS:=4}"; export PS3_NATIVE_JOBS_THREADS
 # The RSX (draw) thread alone on a core, every other thread on the rest (engine host_place.c, Linux):
 # 30.5 -> 33.0 fps on the Deck, 34.7 with the job 210 native. PS3_CPU_PLACE=0 = the OS decides.
 : "${PS3_CPU_PLACE:=rsxcore}"; export PS3_CPU_PLACE
