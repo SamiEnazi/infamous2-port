@@ -70,6 +70,22 @@ the process is `Infamous2Recomp`. Backups / rollback: `work/port/Infamous2Recomp
 over `work/port/build/Infamous2Recomp`, the .so is then unused), `tools/play.sh.installed-4cabf54`,
 `~/.config/infamous2-port/settings.ini.before-merge-20261118`, `saves-backup/before-merge-20261118/`.
 
+Real play with mgPr installed (2026-11-18, Game Mode, ~30 min over 5 sessions, `<player>/play/20261118-17*`): the
+player reports 50s-60 in many places and short dips into the 40s in busy areas. playlog.tsv, seconds in game:
+>= 58 fps 11%, >= 55 18%, >= 50 36%, >= 45 57%, >= 40 80%; 48 frames > 33 ms and 2 > 50 ms per minute. fps falls with
+the draw count: 1,500-3,000 draws 57.9 fps (p10 53), 3,000-4,500 54.3 (46), 4,500-6,000 50.8 (41), 6,000-7,500 46.9
+(37), 7,500-9,000 42.3 (30), 9,000+ 36.7 (30). One crash at the first Game Mode start (17:21:32): SIGABRT "malloc():
+unaligned tcache chunk detected" in SDL's malloc during the joystick scan (pad_sdl_scan <- pad_init_backend <- the
+game's cellPad init; system libSDL2 = sdl2-compat over libSDL3): heap corruption found there, cause unknown (the
+next start ran 18 min). Coredump: `coredumpctl info 756300`.
+
+**Goal set by the player (2026-11-18): stable 60 fps, including busy areas.** Budget at 60 fps: 16.7 ms per frame
+for each single thread (the RSX thread is ~2.56 us per draw now, so 9,000 draws need ~1.6 us per draw, -35%), and
+all CPU work per frame (now ~110 ms: main 18.7, RSX 19.5, SPU 71) has to fit the 4 cores / 8 threads under 15 W
+(roughly -30%). GPU: 15.1 ms/frame at 1200 MHz on the plaza, also close to the 16.7 ms limit. New benchmark zone
+wanted by the player: the busy street of their current save, walking to the cathedral (save snapshot
+`<player>/work/pgo/bench-saves/gamedata3`, 17:54).
+
 ## 3. How to measure
 
 * `work/bench/detbench.sh <tag> [ENV=V ...]` -- the deterministic plaza run: `route-plazafs.pad` replayed on
