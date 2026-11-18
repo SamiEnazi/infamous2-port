@@ -1527,8 +1527,9 @@ static inline void spu_mfc_tagupd_do(spu_context* ctx, uint32_t v)
 void spu_wrch(spu_context* ctx, uint32_t channel, u128 value);
 /* (deck) PS3_SPU_DMASTAT=<seconds>: DMA commands, bytes and TSC cycles in this function, per resident job
  * overlay (job module id; 0 = none), printed every <seconds>. Off: one load and a branch. */
-static int s_dmastat = -1;
+static int s_dmastat = -1, s_ds_ovl = -1;   /* PS3_SPU_DMASTAT_OVL=<id>: that overlay's DMA sites too */
 static unsigned long long s_ds_n[256], s_ds_b[256], s_ds_c[256], s_ds_t0;
+static struct { uint32_t key; unsigned long long n, b; } s_ds_site[512];   /* key = pc | cmd << 20 */
 static __attribute__((noinline, cold)) void spu_dmastat_print(unsigned long long now)
 {
     static int lk;
@@ -1545,6 +1546,18 @@ static __attribute__((noinline, cold)) void spu_dmastat_print(unsigned long long
         if (s_ds_c[i] > tc / 200)
             fprintf(stderr, " | ovl %d: %llu cmds %llu KB %llu Mcyc", i, s_ds_n[i], s_ds_b[i] >> 10, s_ds_c[i] / 1000000ull);
     fputc('\n', stderr);
+    if (s_ds_ovl >= 0) {
+        fprintf(stderr, "[dmastat] ovl %d sites (pc cmd: cmds, avg bytes):", s_ds_ovl);
+        for (int r = 0; r < 24; r++) {
+            int bi = -1; unsigned long long bn = 0;
+            for (int i = 0; i < 512; i++) if (s_ds_site[i].n > bn) { bn = s_ds_site[i].n; bi = i; }
+            if (bi < 0) break;
+            fprintf(stderr, " | %05X %02X: %llu, %llu", s_ds_site[bi].key & 0xFFFFFu, s_ds_site[bi].key >> 20, bn, s_ds_site[bi].b / bn);
+            s_ds_site[bi].n = 0;
+        }
+        fputc('\n', stderr);
+        memset(s_ds_site, 0, sizeof s_ds_site);
+    }
     memset(s_ds_n, 0, sizeof s_ds_n); memset(s_ds_b, 0, sizeof s_ds_b); memset(s_ds_c, 0, sizeof s_ds_c);
     __atomic_store_n(&lk, 0, __ATOMIC_RELEASE);
 }
@@ -1552,7 +1565,11 @@ static __attribute__((noinline, cold)) void spu_dmastat_print(unsigned long long
 void spu_wrch_cmd_fast(spu_context* ctx, uint32_t cmd)
 {
     if (__builtin_expect(s_dmastat != 0, 0)) {
-        if (s_dmastat < 0) { const char* e = getenv("PS3_SPU_DMASTAT"); s_dmastat = e ? atoi(e) : 0; if (!s_dmastat) goto plain; }
+        if (s_dmastat < 0) {
+            const char* e = getenv("PS3_SPU_DMASTAT"); s_dmastat = e ? atoi(e) : 0;
+            const char* o = getenv("PS3_SPU_DMASTAT_OVL"); s_ds_ovl = o ? atoi(o) : -1;
+            if (!s_dmastat) goto plain;
+        }
         const unsigned long long t0 = __builtin_ia32_rdtsc();
         const int o = ctx->resident_ovl & 255;
         const uint32_t sz = ctx->mfc_size;
@@ -1561,6 +1578,13 @@ void spu_wrch_cmd_fast(spu_context* ctx, uint32_t cmd)
         __atomic_fetch_add(&s_ds_n[o], 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&s_ds_b[o], sz, __ATOMIC_RELAXED);
         __atomic_fetch_add(&s_ds_c[o], t1 - t0, __ATOMIC_RELAXED);
+        if (o == s_ds_ovl) {   /* racy diagnostics: a lost count is fine */
+            const uint32_t key = ((uint32_t)ctx->pc & 0xFFFFFu) | (cmd & 0xFFu) << 20;
+            uint32_t h = (key * 2654435761u) >> 23;
+            for (int k = 0; k < 16; k++, h = (h + 1) & 511u) {
+                if (s_ds_site[h].key == key || !s_ds_site[h].n) { s_ds_site[h].key = key; s_ds_site[h].n++; s_ds_site[h].b += sz; break; }
+            }
+        }
         if (ctx->spu_id == 0 || (s_ds_n[o] & 4095) == 0) spu_dmastat_print(t1);
         return;
     }

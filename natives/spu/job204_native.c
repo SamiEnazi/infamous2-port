@@ -116,7 +116,10 @@ static void guest_put(J* j, uint32_t ea, const uint8_t* src, uint32_t size)
     spu_context* ctx = j->ctx;
     const uint32_t lsa = (j->out + 0x80u) & SPU_LS_MASK;
     memcpy(ctx->ls + lsa, src, size);
-    mfc_do_transfer_raw(ctx, lsa, ea, size, 0x20);
+    /* (deck) the lean transfer (spu_dma.h: the same checks, copy, coherence and PUT hook without the ~50
+     * diagnostic gates) in play; the raw one while the job recorder is on, as before */
+    if (!g_spu_jobrec_mode && spu_dma_fast()) mfc_do_transfer_lean(ctx, lsa, ea, size, 0x20);
+    else mfc_do_transfer_raw(ctx, lsa, ea, size, 0x20);
 }
 
 /* ---------------- command buffer ---------------- */
@@ -822,6 +825,7 @@ static int j204_compare(J* j, spu_context* ctx, const uint8_t* rec_ls)
     return 0;
 }
 static int s_mode = -1, s_dbg, s_break;
+static int s_stats_on;   /* (deck) J204_STATS set: the native's own cycles too */
 
 static int j204_main(spu_context* ctx)
 {
@@ -837,20 +841,26 @@ static int j204_main(spu_context* ctx)
     J* j = t_j;
     const int replay = spu_native_replay_begin(ctx);
     if (s_dbg) { fprintf(stderr, "[j204] regs r3..r10 ="); for (int q = 3; q <= 10; q++) fprintf(stderr, " %08X", ctx->gpr[q]._u32[0]); fprintf(stderr, " sp %05X\n", ctx->gpr[1]._u32[0]); }
+    static unsigned long long s_tsc_run, s_tsc_all, s_tsc_n;
+    const unsigned long long t_a = s_stats_on ? __builtin_ia32_rdtsc() : 0;
     job_init(j, ctx);
     run(j);
+    const unsigned long long t_b = s_stats_on ? __builtin_ia32_rdtsc() : 0;
     if (s_dbg) fprintf(stderr, "[j204] D draws %u items %u ranges %u lastcnt %u type %u fb %X\n", j->rec[2], j->nitems, j->nrange, j->lastcnt, R32(j->IN1 + 4), j->fallback);
     /* (deck) J204_STATS=<n>: every n calls, how many the native declined and why (the FB_* bits) */
     static int s_stats = -1;
     static unsigned s_why[16], s_calls, s_decl;
-    if (__builtin_expect(s_stats < 0, 0)) { const char* e = getenv("J204_STATS"); s_stats = e ? atoi(e) : 0; }
+    if (__builtin_expect(s_stats < 0, 0)) { const char* e = getenv("J204_STATS"); s_stats = e ? atoi(e) : 0; s_stats_on = s_stats > 0; }
     if (s_stats) {
         const unsigned n = __atomic_add_fetch(&s_calls, 1, __ATOMIC_RELAXED);
         if (j->fallback) {
             __atomic_add_fetch(&s_decl, 1, __ATOMIC_RELAXED);
             for (int i = 0; i < 16; i++) if (j->fallback >> i & 1) __atomic_add_fetch(&s_why[i], 1, __ATOMIC_RELAXED);
         }
+        if (!j->fallback) { __atomic_add_fetch(&s_tsc_run, t_b - t_a, __ATOMIC_RELAXED); __atomic_add_fetch(&s_tsc_n, 1, __ATOMIC_RELAXED); }
         if (n % (unsigned)s_stats == 0) {
+            fprintf(stderr, "[j204] native run: %.1f kcycles per accepted call; ", s_tsc_n ? s_tsc_run / 1000.0 / s_tsc_n : 0.0);
+            (void)s_tsc_all;
             fprintf(stderr, "[j204] %u calls, declined %u:", n, s_decl);
             for (int i = 0; i < 16; i++) if (s_why[i]) fprintf(stderr, " bit%d=%u", i, s_why[i]);
             fputc('\n', stderr);
@@ -887,7 +897,10 @@ static int j204_main(spu_context* ctx)
         return 1;
     }
     if (s_break && j->nblocks) j->blocks[0].data[8] ^= 1;
-    if (j->nblocks) publish(j);
+    { const unsigned long long t_p = s_stats_on ? __builtin_ia32_rdtsc() : 0;
+      if (j->nblocks) publish(j);
+      if (s_stats_on) { static unsigned long long s_tsc_pub, s_pub_n, s_blk; s_tsc_pub += __builtin_ia32_rdtsc() - t_p; s_blk += j->nblocks;
+          if (!(++s_pub_n & 0x3FFFF)) fprintf(stderr, "[j204] publish: %.1f kcycles per call, %.2f blocks per call\n", s_tsc_pub / 1000.0 / s_pub_n, (double)s_blk / s_pub_n); } }
     if (s_break == 2) j->rec[2] ^= 1;
     for (int i = 0; i < 8; i++) P32(ctx->ls + out + 4 * i, j->rec[i]);
     /* the tag wait the lifted main ends in: the tag of its last object's slot (the job's two tags r5/r6 alternate), r4 when it fetched none.
