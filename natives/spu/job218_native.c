@@ -782,7 +782,7 @@ static int j218_root(spu_context* ctx)
  * Three letters in that order, o = ours (job218_native.c), t = upstream's (native_218.c), e.g. J218_PICK=ott;
  * "ours" / "theirs" = all three. Default J218_PICK_DEFAULT. The other functions are one file's only (ours 0x179C0,
  * 0x5814, 0x18EC0; upstream's 0x13FC0, 0x1D8E8, 0x1DAC0) and always registered. */
-#define J218_PICK_DEFAULT "ooo"
+#define J218_PICK_DEFAULT "ttt"
 static int j218_pick_theirs(int k)
 {
     const char* e = getenv("J218_PICK");
