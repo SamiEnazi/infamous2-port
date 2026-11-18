@@ -28,6 +28,26 @@
 
 extern int g_spu_edge_vp_on;
 
+/* (deck-merge) deck-perf's "Far shadow detail" (PS3RECOMP_SHADOW_LOD=<k>, live; 1 = the game's, 20 = reduced): the
+ * views' minimum box size^2 (header +0x74, K.y) times k when it is > 0 -- what natives/spu/job210_native.c's
+ * j210_ktweak does to the local store before the lifted walker runs, so this native culls the same way. That
+ * file (the game module) owns the setting's live applier and stores k here; 0 = not set yet: read once. */
+uint32_t g_j210_shadow_lod_k = 0;   /* float bits */
+static float j210_shadow_lod(void)
+{
+    uint32_t u = __atomic_load_n(&g_j210_shadow_lod_k, __ATOMIC_ACQUIRE);
+    if (__builtin_expect(u == 0, 0)) {
+        const char* e = getenv("PS3RECOMP_SHADOW_LOD");
+        float v = e && *e ? (float)atof(e) : 1.0f;
+        if (!(v > 1.0f)) v = 1.0f;
+        uint32_t w, z = 0; memcpy(&w, &v, 4);
+        __atomic_compare_exchange_n(&g_j210_shadow_lod_k, &z, w, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        u = __atomic_load_n(&g_j210_shadow_lod_k, __ATOMIC_ACQUIRE);
+    }
+    float k; memcpy(&k, &u, 4);
+    return k;
+}
+
 #define QMAX 384
 #ifdef J210_PROFILE
 #include <intrin.h>
@@ -418,6 +438,10 @@ static int run210(wws_njob* nj)
     if (FBAD(j->cam, 7) || FBAD(h70, 15)) { nj->fallback = CF_FLOAT; return 0; }
     j->hscale = FLANE(h70, 0);
     j->V.cam = j->cam; j->V.hscale = FLANE(h70, 0); j->V.minsize2 = FLANE(h70, 1); j->V.ratio = FLANE(h70, 2);
+    {   /* (deck-merge) Far shadow detail, as j210_ktweak: y > 0 -> y * k (host float multiply, before the job's FP mode) */
+        const float k = j210_shadow_lod();
+        if (k > 1.0f) { float y; memcpy(&y, &j->V.minsize2, 4); if (y > 0.0f) { y *= k; memcpy(&j->V.minsize2, &y, 4); } }
+    }
     j->V.cliph = FLANE(h70, 3); j->V.clip = hdr[0x81] != 0;
     j->V.bsp.p = bsp; j->V.bsp.nbytes = esz[1]; j->V.bsp.n = nplanes;
     cull_bsp_prepare(&j->V.bsp);

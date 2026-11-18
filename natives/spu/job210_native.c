@@ -780,11 +780,15 @@ static inline void kq_scale(uint8_t* p, float k)     /* one big-endian float of 
  * the far shadow cascade's minimum box size^2 (K.y of the views that have one) times k. J210_KY_SCALE, an
  * experiment's variable, wins when set. */
 static float s_shadow_lod = -1.0f;
+/* (deck-merge) the engine's whole-job native of 210 (engine/libs/spurs/native_jobs/job210.c, upstream v0.6's runner)
+ * culls with the same factor: it is told here (0 there = not set yet, it reads the variable once) */
+extern uint32_t g_j210_shadow_lod_k;   /* float bits */
 static int j210_shadow_lod_apply(const char* v)
 {
     const float k = v && *v ? (float)atof(v) : 1.0f;
     float f = k > 1.0f ? k : 1.0f; uint32_t u; memcpy(&u, &f, 4);
     __atomic_store_n((uint32_t*)(void*)&s_shadow_lod, u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_j210_shadow_lod_k, u, __ATOMIC_RELEASE);
     return 1;
 }
 __attribute__((constructor)) static void j210_settings_register(void)
