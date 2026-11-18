@@ -60,8 +60,15 @@ Far shadow detail in normal play (2026-11-18, j6 build, real clock, 60 fps cap, 
 8,151 draws per frame; Reduced 37.4 fps, 5,299 draws (+7%; one run each, so noisier than the det bench). The
 visual difference is hard to spot at night in this save (side-by-side video sent to the player).
 
-The installed build is still 4cabf54 (the player's safe version; install only when asked). deck-perf is the merged
-line since 1f22354 (2026-11-18): engine exe + game module `libInfamous2Game.so`; dev copy `work/port/mgPr/`.
+Installed (2026-11-18, the player asked): **mgPr** = deck-perf 1f22354 with the mg1r profiles (engine exe + game
+module `libInfamous2Game.so` in `<player>/work/port/build/`). The player's `tools/play.sh` (v0.5.7 + the Deck tuning)
+got four lines: GLIBC_TUNABLES static TLS, `PS3_STATIC_TLS_RETRY=1`, `PS3_NATIVE_JOBS_THREADS=4`,
+`PS3RECOMP_VK_SHADER_CACHE=<player>/work/shader_cache` (seeded from the merge sandbox's cache; the old build's
+`~/.cache/ps3recomp` stays untouched). Settings and saves stay where they were (`~/.config/infamous2-port/settings.ini`,
+`game/gamedata`). Smoke test through play.sh: module loaded (PGO), runner 4 threads, wtrack on, rsxcore placement,
+the process is `Infamous2Recomp`. Backups / rollback: `work/port/Infamous2Recomp.installed-4cabf54` (old exe; copy it
+over `work/port/build/Infamous2Recomp`, the .so is then unused), `tools/play.sh.installed-4cabf54`,
+`~/.config/infamous2-port/settings.ini.before-merge-20261118`, `saves-backup/before-merge-20261118/`.
 
 ## 3. How to measure
 
