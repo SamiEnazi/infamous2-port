@@ -83,8 +83,14 @@ player reports 50s-60 in many places and short dips into the 40s in busy areas. 
 the draw count: 1,500-3,000 draws 57.9 fps (p10 53), 3,000-4,500 54.3 (46), 4,500-6,000 50.8 (41), 6,000-7,500 46.9
 (37), 7,500-9,000 42.3 (30), 9,000+ 36.7 (30). One crash at the first Game Mode start (17:21:32): SIGABRT "malloc():
 unaligned tcache chunk detected" in SDL's malloc during the joystick scan (pad_sdl_scan <- pad_init_backend <- the
-game's cellPad init; system libSDL2 = sdl2-compat over libSDL3): heap corruption found there, cause unknown (the
-next start ran 18 min). Coredump: `coredumpctl info 756300`.
+game's cellPad init; system libSDL2 = sdl2-compat over libSDL3). Cause found (2026-11-18, NOTES.md "startup crash in
+the SDL joystick scan"): sdl2-compat's joystick list has no lock, and SDL_NumJoysticks frees and rebuilds it -- also
+inside every joystick ADDED/REMOVED event it converts. cellPadInit's SDL_InitSubSystem on the game thread queues those
+events while the RSX thread's window pump (SDL_PollEvent every 4 ms) converts them: two threads free the same list (a
+double free), the next small malloc aborts. Rare (1 in 33 sessions), at start or a controller hot-plug; old builds and
+upstream v0.6.2 have it too; the benches never reach it (PS3_PAD_SDL=0). Reproduced outside the game (20/20 runs abort,
+ASan: double free, pump thread vs SDL_InitSubSystem) and traced in the game. Fix in commit 8833293:
+the pump and the menu's controller list take cellPad's lock (try-lock; a busy pass is skipped).
 
 **Goal set by the player (2026-11-18): stable 60 fps, including busy areas.** Budget at 60 fps: 16.7 ms per frame
 for each single thread (the RSX thread is ~2.56 us per draw now, so 9,000 draws need ~1.6 us per draw, -35%), and
