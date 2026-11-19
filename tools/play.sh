@@ -9,7 +9,7 @@
 # over it for this session.
 # Controls: any controller SDL knows (buttons by position, as on a PlayStation pad); keyboard + mouse
 # (WASD, mouse = camera after a click in the window, right button = aim, left = R1, Space = Cross,
-# Shift = Circle, F = Square, Q = Triangle, Enter = START, Esc = PC menu). Remapping: input.toml in
+# Shift = Circle, F = Square, Q = Triangle, Esc = START / pause; F2 or Alt+Tab frees the mouse). Remapping: input.toml in
 # the project folder (made on the first start from engine/docs/input.example.toml).
 # Every session gets play/<date-time>/ (stdout.log, stderr.log, playlog.tsv, summary.txt); your
 # saves (game/gamedata/dev_hdd0/home/00000001/savedata) are copied to saves-backup/<date-time>/
@@ -220,6 +220,13 @@ if [ -z "${MESA_VK_WSI_DEBUG+x}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && command -
     export MESA_VK_WSI_DEBUG=sw
 fi
 
+# Built inside a Distrobox container (tools/setup.sh notes it) and started outside: the program may not find the
+# container's libraries (a player's Steam Deck, GitHub #24: sound but no window). Said, not refused.
+if [ -f "$root/work/built-in-container" ] && [ ! -f /run/.containerenv ] && [ ! -f /.dockerenv ] && [ -z "${CONTAINER_ID:-}" ]; then
+    box="$(head -n 1 "$root/work/built-in-container")"; [ -n "$box" ] || box="<the container's name>"
+    echo "Note: the game was built inside a container ($box). If it does not start or shows no window here, start it from there:"
+    echo "  distrobox enter $box -- \"$root/setup.sh\""
+fi
 echo "Starting inFAMOUS 2... F1 = FPS counter, F2 = settings."
 [ $nolog = 0 ] && echo "Press F9 in the game window whenever something feels slow or stutters. Session folder: $out"
 t0=$(date +%s)

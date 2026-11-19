@@ -3277,7 +3277,7 @@ static inline int ovl_index_on(void)
  * the relocatable job modules (images 300+) take a new slot at every new
  * local-store address they are streamed to. In a long session the 16 slots
  * filled with dead spans and every later placement ran on the SPU interpreter
- * ("no free resident code span", 36 times late in Sami's 53-minute city
+ * ("no free resident code span", 36 times late in a 53-minute city
  * session). Now a slot whose image bytes are no longer in local store (a
  * non-zero image word differs) is reclaimed for the new span: that code cannot
  * run from its slot any more anyway. PS3_SPU_SLOT_RECLAIM=0 = the old refusal. */

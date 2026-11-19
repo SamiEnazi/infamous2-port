@@ -32,7 +32,7 @@ try { $root = Get-BuildRoot $root -Create } catch {}
 $game = Join-Path $root "game"
 $out = Join-Path $root "native\recordings\$Tag"
 New-Item -ItemType Directory -Force $out | Out-Null
-# Saves (and trophies) of a test live in the recording, <rec>\gamedata, never in Sami's
+# Saves (and trophies) of a test live in the recording, <rec>\gamedata, never in the player's
 # game\gamedata (play.ps1): every run starts with none (the same main menu, no "Continue"),
 # or with a copy of -SaveFrom.
 $gamedata = Join-Path $out "gamedata"
@@ -54,7 +54,7 @@ $vars = @{
     PS3_GAMEDATA_ROOT     = $gamedata
     PS3_TITLE             = "inFAMOUS 2"
     PS3_LANG              = "en"          # the EU disc ships the English dub
-    PS3_AUDIO_VOLUME      = "15"          # test runs quietly audible (Sami, 2026-11-07: "add a little sound so I can hear it"); -Env @{PS3_AUDIO_VOLUME='0'} = silent
+    PS3_AUDIO_VOLUME      = "15"          # test runs quietly audible (2026-11-07: quietly audible, so a test run can be heard); -Env @{PS3_AUDIO_VOLUME='0'} = silent
     PS3_PAD_SDL           = "0"           # SDL reads pads whatever window has focus: keep a real controller out of scripted runs
     PS3_VERBOSE           = "0"           # the per-wait [WAIT]/[evt] lines (~500/s, one FILE lock): -Env @{PS3_VERBOSE='1'} to capture them
     # run.sh's timing knobs (Mac port defaults)
@@ -70,15 +70,15 @@ $vars = @{
     # the Vulkan window with the game's own (guest) shader programs, as play.ps1 runs it
     PS3RECOMP_VK_WINDOW         = "1"
     PS3RECOMP_VK_GUEST_PROGRAMS = "1"
-    # tests never keep Sami's display awake (at night it may be asleep; shots come from the
+    # tests never keep the player's display awake (at night it may be asleep; shots come from the
     # game's own image now): the game's keep-awake is for play only
     PS3RECOMP_KEEP_AWAKE        = "0"
-    # the in-game overlay (F1 HUD / F2 menu): a test never reads or writes Sami's
+    # the in-game overlay (F1 HUD / F2 menu): a test never reads or writes the player's
     # %APPDATA% settings.ini, and the HUD stays off so screenshots compare cleanly
     PS3_OVERLAY_INI             = "$out\settings.ini"
     PS3_OVERLAY_HUD             = "0"
 }
-# Fast movies (Sami 2026-11-08: "cut down all videos"): runs from a save (-SaveFrom) or closed-loop
+# Fast movies (2026-11-08: "cut down all videos"): runs from a save (-SaveFrom) or closed-loop
 # runs (-Driver) see every pre-rendered cutscene movie as the disc's own 4 s placeholder, through
 # junction/hard-link views of game\disc and game\dev_hdd0 (tools\make_fastmovies.ps1; nothing copied
 # or changed). Fixed-timeline runs (combat.ps1, suite.ps1) keep the real movies: their presses are

@@ -27,6 +27,8 @@
 # Needs (distribution packages): a C/C++ toolchain's headers and libraries (Debian/Ubuntu:
 # build-essential; Fedora: gcc-c++; Arch: base-devel), python3 with venv, curl, tar, xz, unzip, the
 # Vulkan loader (libvulkan1 / vulkan-loader) with your GPU's driver, and SDL2 (libsdl2-2.0-0 / SDL2).
+# SteamOS (Steam Deck) has no C library headers and nothing can be installed there: step 2 downloads them into
+# tools-cache/sysroot-fix (tools/libc_headers.sh; GitHub #81), so stock SteamOS 3.5 and later needs nothing extra.
 # Play with tools/play.sh (or the desktop launcher).
 set -eu   # (no pipefail: 'ldconfig -p | grep -q' would fail on grep's early exit)
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -99,6 +101,7 @@ case "$root$disc" in
 esac
 cache="$root/tools-cache"; deps="$root/deps"; dl="$cache/dl"
 mkdir -p "$cache" "$deps" "$dl"
+. "$root/tools/libc_headers.sh"   # lh_*: the C library's headers where the system has none (SteamOS), the compiler self-test
 
 # download <url> <file> <sha256 or ""> <what>: retried once, checked when a SHA-256 is given
 download() {
@@ -161,7 +164,19 @@ for d in $(ls -d /usr/lib/gcc/x86_64-*linux-gnu/* /usr/lib/gcc/x86_64-*linux/* 2
             [ -f "$lib/libstdc++.so" -o -f "$lib/libstdc++.a" ] && { gccdir="$d"; break 3; }
         done; done
 done
-[ -n "$gccdir" ] && ok ok "C++ headers and libraries" "$gccdir" || ok MISS "C++ headers and libraries" "install them (Debian/Ubuntu: build-essential; Fedora: gcc-c++; Arch: base-devel)"
+[ -n "$gccdir" ] && ok ok "C++ headers and libraries" "$gccdir (tried for real with the compiler in step 2)" || ok MISS "C++ headers and libraries" "install them (Debian/Ubuntu: build-essential; Fedora: gcc-c++; Arch: base-devel)"
+# The C library's own headers (GitHub #81): SteamOS has the C++ ones above but no <features.h>, <stdio.h>,
+# <pthread.h>, <linux/...>, and nothing can be installed there. For the glibc releases SteamOS uses, step 2 gets
+# them into tools-cache/sysroot-fix (tools/libc_headers.sh); any other system is told here, not at step 6.
+hmiss=$(lh_missing); hrow=""; hfix=0; hadvice=0
+if [ -n "$hmiss" ] && [ -n "$gccdir" ]; then
+    hlist="<${hmiss// />, <}>"; hrow=$(lh_pick "$(lh_glibc)")
+    if [ -n "$hrow" ]; then
+        hfix=1; ok note "C library headers" "not on this system ($hlist; SteamOS comes without them): downloaded into tools-cache/sysroot-fix in step 2 (12 MB; nothing is installed on the system)"
+    else
+        hadvice=1; ok MISS "C library headers" "not on this system ($hlist), and there is no set to download for its C library (glibc $(lh_glibc | grep . || echo unknown)): see \"What to do\" below"
+    fi
+fi
 for t in curl tar xz unzip; do command -v $t >/dev/null && ok ok $t found || ok MISS $t "install it"; done
 title=""
 if [ -z "$disc" ]; then ok MISS "Game disc folder" "--disc <the folder that holds PS3_GAME>"
@@ -246,7 +261,10 @@ fi
 for sub in engine/CMakeLists.txt base/infamous2-lle/CMakeLists.txt; do   # (one repository since v0.5.0)
     [ -f "$root/$sub" ] && ok ok "${sub%%/*}" present || ok MISS "${sub%%/*}" "missing: download or git clone the port again"
 done
-[ $miss = 0 ] || fail "fix the MISS items first"
+if [ $miss != 0 ]; then
+    [ $hadvice = 1 ] && lh_advice "$root"
+    fail "fix the MISS items first"
+fi
 
 # ------------------------------------------------------------------------------------------------
 step 2 "the build tools (into tools-cache/, nothing is installed) and the Python tools"
@@ -263,7 +281,15 @@ if [ ! -f "$cache/llvm/.ready" ]; then
 fi
 # clang picks the newest GCC folder; a system with a newer GCC runtime than its C++ headers (Ubuntu
 # 22.04 + gcc-12-base) then finds no <vector>: name the folder that has them.
-for d in clang clang++; do echo "--gcc-install-dir=$gccdir" > "$cache/llvm/bin/$d.cfg"; done
+# Where the system has no C library headers (SteamOS, step 1): the downloaded ones, searched after every system
+# folder (so the C++ headers' #include_next finds them, and a system that has its own keeps using its own).
+# <CFGDIR> is the .cfg file's folder: the port's folder can be moved, and its name may hold spaces.
+if [ $hfix = 1 ]; then
+    lh_install "$cache" "$dl" "$hrow" || { lh_advice "$root"; fail "the C library headers this system lacks could not be downloaded (above). Check your internet connection and run setup again, or use the Distrobox way above"; }
+fi
+for d in clang clang++; do
+    { echo "--gcc-install-dir=$gccdir"; if [ $hfix = 1 ]; then echo '-idirafter <CFGDIR>/../../sysroot-fix/include'; fi; } > "$cache/llvm/bin/$d.cfg"
+done
 # The LLVM release's linker was built against libxml2.so.2 (used only to merge Windows manifests, never here).
 # Ubuntu 25.10 and later ship only libxml2.so.16, so the linker would not start (GitHub #24): it gets a small
 # stand-in libxml2.so.2 in its own lib folder (found through its RUNPATH, $ORIGIN/../lib), made here once,
@@ -312,6 +338,16 @@ XEOF
     echo "  LLVM's linker: made a stand-in libxml2.so.2 (this system has a newer libxml2)"
 fi
 "$cache/llvm/bin/clang" --version | sed -n '1s/^/  /p'
+# The compiler tried for real (GitHub #81: the check in step 1 only looks for folders): a small C and a small C++
+# program with the engine's headers and libraries, the build's flags and linker, built and started.
+if why=$(lh_selftest "$cache/llvm/bin/clang" "$cache/llvm/bin/clang++" "$cache/selftest"); then
+    echo "  compiler check: a C and a C++ program compile, link and run"
+else
+    echo "  compiler check: $why"
+    echo "  (the compiler's own words: $cache/selftest/log.txt)"
+    lh_advice "$root"
+    fail "this system cannot build C/C++ programs yet: $why"
+fi
 export PORT_LLVM="$cache/llvm"
 cmv=$(cmake --version 2>/dev/null | head -1 | awk '{print $3}' || true)
 if [ -n "$cmv" ] && printf '3.24\n%s\n' "$cmv" | sort -V -C; then export PORT_CMAKE="$(command -v cmake)"
@@ -559,6 +595,10 @@ export PORT_JOBS="$jobs" PORT_LIFT_JOBS="$jobs"
 "$venv/bin/python" -I "$root/tools/rebuild.py" || fail "the build failed: see work/logs/ (python3 -I tools/build_errors.py work/logs/compile.log)"
 exe="$root/work/port/build/Infamous2Recomp"
 [ -x "$exe" ] || fail "no $exe after the build"
+# Built inside a container (Distrobox: the way for systems without build tools): the program uses the
+# container's libraries, so tools/play.sh says where to start it when it is started outside
+if [ -f /run/.containerenv ] || [ -f /.dockerenv ] || [ -n "${CONTAINER_ID:-}" ]; then echo "${CONTAINER_ID:-}" > "$root/work/built-in-container"
+else rm -f "$root/work/built-in-container"; fi
 
 # ------------------------------------------------------------------------------------------------
 step 8 "desktop launcher"

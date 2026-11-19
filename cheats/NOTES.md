@@ -405,7 +405,7 @@ in stick mode. Runs native\recordings\m27-* (game-derived scratch in work\mouse2
 
 ## Saved spots: Save this spot / Go to saved spot (2026-11-11 night, inf2-cheats; static only, NOT run)
 
-Sami: load a save and jump to an exact place (the cathedral spire slow view, x -43695 y -22816 z 7786) to
+Goal: load a save and jump to an exact place (the cathedral spire slow view, x -43695 y -22816 z 7786) to
 compare performance there. Everything below was read in the EBOOT (IDA 9.3 batch database copied to
 work\teleport, scripts xr.py / dec.py / ids.py / lst.py / bl.py / imm.py / snap.py there); no game run.
 
@@ -469,12 +469,12 @@ What the cheat writes (cheats.cpp "saved spots"):
 Menu: F2 > Cheats > "Saved spots": Spot (pick), "Go to saved spot (F7)", "Save this spot" (adds "Spot N
 (MM-DD HH:MM)" and picks it). F7 (toolkit agent/teleport: PS3_CHEAT_HOTKEY, kept from the controls) does Go
 with the menu open or closed. File %APPDATA%\inFAMOUS2-port\spots.ini (PS3_CHEATS_SPOTS=<file>, "" = session
-only; with PS3_OVERLAY_INI set = next to it, so test runs never touch Sami's), one spot a line
+only; with PS3_OVERLAY_INI set = next to it, so test runs never touch the player's), one spot a line
 "name = x y z [facing [camera_yaw camera_pitch]]" + "selected: <name>", read again when it changes on disk.
 Seeds (until the first change writes the file): "Cathedral spire" -43695 -22816 7786 (the spire top)
 and "Cathedral roof" -42024.77 -24236.1 6180.76 (below it); no facing/camera.
 Log lines: "[cheats] spot: ..." (from / to / now, re-placements, camera turn end).
-Not checked in a game: everything above (Sami tests). Things to watch: Cole snapping back (would mean
+Not checked in a game: everything above (to be tested by hand). Things to watch: Cole snapping back (would mean
 another state holds the position), a camera that does not turn (camera not in player control), a fall
 through the city at a far spot (the guard's lines).
 
@@ -484,7 +484,7 @@ Source: an RPCS3 patch file by **L_** ("RPCS3 patches for black lightning on evi
 flight"), anchor PPU-41a7d047c573c78c0307506c9d1b52d15a66e4f5 = our EBOOT. The caves (0x0075FA50.., 0x0075FC00..,
 0x0075FD00..) lie in zero padding after the code (0x00742E18) in the first segment. Decoded with capstone
 (work\cheats\ppcdis.py) and IDA 9.3 batch (work\blacklight: dec.py / xr.py / scanw.py / stb.py, d_*.txt, xr_*.txt);
-the lifted bodies in work\port-m23\recompiled agree. No game run (Sami tests).
+the lifted bodies in work\port-m23\recompiled agree. No game run (to be tested by hand).
 
 ### Black lightning
 
@@ -606,7 +606,7 @@ shader set.
 ## Powers: Unlock all powers, Karma powers of both sides (2026-11-12, inf2-cheats; static only, NOT run)
 
 Read in the EBOOT (IDA 9.3 batch on a copy of the database, scripts and outputs in work\powers: dec.sh, xr.sh,
-lsf.py, refl.py, callsites.py, d_*.txt) and in the test saves (work\saves\*\STATE). Sami was recording; no game run.
+lsf.py, refl.py, callsites.py, d_*.txt) and in the test saves (work\saves\*\STATE). A route was being recorded; no game run.
 
 Where the powers live (proven: code + saves):
 - One word per power in the progress struct G = 0x00A64E20: G+0x40 + 4p, p = 0..95 (the loops 0x0012D364 and
@@ -705,18 +705,18 @@ With no ionic upgrade owned the max is 0 and nothing is filled (the page says so
 gives the three, the cheat then has the max recomputed (3) and fills it. Not checked: the HUD's charge display
 (the HUD agent's guess: the purple orb by the karma meter) and whether it shows slots = max.
 
-## v2 after Sami's test (2026-11-12 ~02:15, his run play\20261112-015846; static, NOT run)
+## v2 after a test (2026-11-12 ~02:15, run play\20261112-015846; static, NOT run)
 
-What his log showed: "Every power" gave 45 of 45 (the hero-powers skill defines 45 of the 96 numbers; the other 51
+What the log showed: "Every power" gave 45 of 45 (the hero-powers skill defines 45 of the 96 numbers; the other 51
 -- among them the hard-coded abilities 0x3E..0x5D such as the thruster upgrades 0x4A-0x4C and the ionic ones
 0x57/0x5B/0x5C, which got no "ionic: max charges" line -- were skipped by that filter); then "Every upgrade" put 32
-back (the lower-choice undo). Ionic: max 0 by the game's rule, so nothing to fill. Sami: "its a cheat why follow
+back (the lower-choice undo). Ionic: max 0 by the game's rule, so nothing to fill. Feedback: "its a cheat why follow
 game logic" -- both changed:
 - Unlock all powers = one switch. On: all 96 words get | 7 and & ~0x10 (the missions' forced-off bit cleared too),
   through SetPowerState, at most 8 a frame, again every second; the karma bypass hooks (0x0012D18C / 0x0012D6C8)
   are on with it. Off: nothing more, nothing taken. No levels, no undo, no direct-write knob, no definition filter.
   Still never remembered and only switched on in play. Clearing 0x10 overrides a mission that switches a power
-  off on purpose (Sami's choice).
+  off on purpose (a deliberate choice).
 - Infinite ionic charges = forced: every frame Cole+0x2578 = 3 (written) and G+0x38 = 3 (the setter 0x00154CB4,
   unclamped; a direct write if it did not take). Readers that see it: the scripts' property table entry
   "CURRENT_HEAVY_MAGIC_POINTS" (getter 0x001538C4, entry 0x00963C94; the game calls ionic charges "heavy magic")
@@ -724,7 +724,7 @@ game logic" -- both changed:
   check 0x001538E0 (fires while the count is above 0, given energy above its floor or a power without an energy
   cost), AddIonicCharges' clamp, the collector. The ionic powers themselves still have to be owned (Unlock all).
 
-## Depth of field and field of view (2026-11-13, inf2-cheats dofov; Sami: "can we remove the depth of field effect? and add a fov slider?")
+## Depth of field and field of view (2026-11-13, inf2-cheats dofov; request: "can we remove the depth of field effect? and add a fov slider?")
 
 Menu: Graphics > Game effects > Depth of field (On / Off in gameplay / Off everywhere; PS3RECOMP_DOF = 1 / play / 0),
 Display > Camera > Field of view (70..130 %, PS3_FOV, 100 = the game's). Both live, both saved in settings.ini.

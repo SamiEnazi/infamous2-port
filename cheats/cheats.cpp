@@ -36,7 +36,7 @@
  *   0x0012D18C / 0x0012D6C8  the power word as the game reads it (karma powers: the 1 bit only once their rank was
  *                         reached) / "karma allows this power now": Unlock all powers (NOTES.md "Powers")
  *
- * Test knobs (scripted runs; Sami never needs them):
+ * Test knobs (scripted test runs only, not for players):
  *   PS3_CHEATS="id=value,..."        at the first Cole update
  *   PS3_CHEATS_AT="t:id=value,..."   t seconds after PS3_CHEATS_AT_WAIT=<file> exists (the fast
  *                                    driver's anchor.flag; unset = after the first Cole update);
@@ -310,7 +310,7 @@ void call_game(struct ppu_context* ctx, ppu_hook_body fn, F setup)
 
 void snap_write(uint32_t c);
 
-/* Infinite ionic charges (v2 after Sami's test: forced, whatever the game's rules say), from Cole's update every
+/* Infinite ionic charges (v2 after a test: forced, whatever the game's rules say), from Cole's update every
  * frame: Cole's max (Cole+0x2578) = 3 written directly (the game's RecomputeMaxEnergy would make it 0..3 from the
  * powers 0x57/0x5B/0x5C), and the count (G+0x38) = 3 through the game's own setter 0x00154CB4 (no clamp; it stores
  * and marks the save changed, as a pickup does). Everything that reads them sees 3: the getter 0x001538C4 (the
@@ -493,7 +493,7 @@ void krank_tick(struct ppu_context* ctx, uint32_t c)
     hooks_update();
 }
 
-/* ---- Unlock all powers (2026-11-12, v2 after Sami's test: on = everything, off = nothing taken; NOT run) ------
+/* ---- Unlock all powers (2026-11-12, v2 after a test: on = everything, off = nothing taken; NOT run) ------
  * On: every power word 0..95 is made owned -- bits 1|2|4 set, the missions' forced-off bit 0x10 cleared (the
  * forced-on bit 8 and the "new" mark 0x20 are left) -- through the game's SetPowerState 0x001307C4, so the
  * Powers menu, the power wheel and the slots follow (it re-checks the 16 slots: an empty one takes a usable
@@ -507,7 +507,7 @@ double s_pw_next;                                   /* guest thread only, from h
 long long s_pw_regiven;
 
 /* Cole's hero-powers skill (0x0030EFF0 on his skill list, class 406), run on a copy of the registers: its
- * definitions +0x91C + 4p (t:powerdump; Sami's run m26 found 45 of the 96 defined there). */
+ * definitions +0x91C + 4p (t:powerdump; run m26 found 45 of the 96 defined there). */
 uint32_t hero_powers(struct ppu_context* ctx, uint32_t c)
 {
     const uint32_t mgr = vm_read32(c + kColeSkills);

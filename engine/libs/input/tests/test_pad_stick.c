@@ -90,8 +90,12 @@ static void test_defaults(void)
     assert(m.key[PIM_CIRCLE][0x38 >> 5] >> (0x38 & 31) & 1);
     assert(m.key[PIM_R1][0] >> 0x0E & 1);
     assert((m.key[PIM_LS_UP][0] >> 0x0D & 1) && (m.key[PIM_LS_LEFT][0] & 1));
-    /* Escape is the window's: not bound to anything */
-    for (int c = 0; c < PIM_N_CONTROLS; c++) assert(!(m.key[c][0x35 >> 5] >> (0x35 & 31) & 1));
+    /* Escape is START and nothing else; Enter and keypad Enter are bound to nothing */
+    for (int c = 0; c < PIM_N_CONTROLS; c++) {
+        assert((m.key[c][0x35 >> 5] >> (0x35 & 31) & 1) == (c == PIM_START));
+        assert(!(m.key[c][0x24 >> 5] >> (0x24 & 31) & 1) && !(m.key[c][0x4C >> 5] >> (0x4C & 31) & 1));
+    }
+    assert(m.key_layout == 0);
     /* every setting unset */
     assert(m.stick_deadzone[0] < 0 && m.stick_source[1] < 0 && m.nintendo_labels < 0 && m.trigger_threshold < 0);
     assert(m.pad_fam_set[0] == 0 && m.pad_fam_set[1] == 0);

@@ -6,7 +6,7 @@
 #
 # The decryptor is a command template with {in} and {out}, from config.local.json's "decryptor", e.g.
 #     "decryptor": "\"C:\\Tools\\mydecrypt.exe\" \"{in}\" \"{out}\""
-# Default: tools\ps3tool.py (Sami Enazi's, in the public repository; tools\sony_files.py ps3tool downloads it when
+# Default: tools\ps3tool.py (in the public repository; tools\sony_files.py ps3tool downloads it when
 # a release zip came without it), run as "python tools\ps3tool.py decrypt <in> <out>" by Setup's Python
 # (work\venv, which has pycryptodome); when it is missing or fails and RPCS3 is set up (config.local.json "rpcs3"),
 # tools\rpcs3-adapter.ps1 (RPCS3's own --decrypt, run hidden). Files that are already decrypted pass through the

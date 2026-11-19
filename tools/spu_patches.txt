@@ -15,13 +15,13 @@
 # module (image 223), LS 0xA7C0: the triangle cull's `brnz $r4, 0xA80C` (cull mode != 0 -> cull).
 # As a nop every call takes the job's own no-culling path. PS3RECOMP_MESH_TRIM=1 = the game's
 # culling (what the job replay recordings ran); 0 = the patch (the default, at every resolution:
-# Sami, 2026-11-10).
+# decided 2026-11-10).
 # 2026-11-11 (edgevp): the default is now 1, the game's culling, because the toolkit gives Edge
 # the render targets' real size (PS3RECOMP_EDGE_VP, the idea from ThiagoFraga761/infamous2-pc):
 # every cull stays and none cuts a triangle that covers a pixel, so no holes at 1080p, and the dock
 # runs ~2% faster than with the nop (3+3 runs). 0 = the nop above; 1 + PS3RECOMP_EDGE_VP=0 = the PS3's
 # 720p culling (holes above 720p). A toolkit without edgevp: use 0.
-# 2026-11-17 (fix07): the default is 0 again, whole meshes (Sami after playing next/0.7: "mesh trimming is
+# 2026-11-17 (fix07): the default is 0 again, whole meshes (after playing next/0.7: "mesh trimming is
 # not working properly and it's better off without it"). 1 = the game's culling at the render
 # resolution (PS3RECOMP_EDGE_VP), F2 > Graphics > Mesh trimming.
 switch mesh_trim PS3RECOMP_MESH_TRIM 0 0=1 1=0

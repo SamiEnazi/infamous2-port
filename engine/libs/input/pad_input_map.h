@@ -97,6 +97,12 @@
  * was, comments and other sections included; only binding values change and
  * every control ends up listed in each of the three binding sections.
  *
+ * [keyboard] also holds `layout = 2`, written by pim_render: which built-in
+ * keyboard layout the file was last saved against. A file without it is from
+ * before Esc became START (it was Return / keypad Enter; Esc was the
+ * window's): pim_migrate_layout moves a START still on those old defaults to
+ * Esc, once. A START the player set to anything else is left alone.
+ *
  * This header is the parser and writer only (no SDL, no AppKit), so it
  * builds into a standalone test: libs/input/tests/test_pad_input_map.c.
  */
@@ -141,6 +147,7 @@ enum { PIM_FAM_PLAYSTATION, PIM_FAM_XBOX, PIM_FAM_NINTENDO, PIM_FAM_OTHER, PIM_N
 
 typedef struct {
     uint32_t key[PIM_N_CONTROLS][4];   /* 128 key codes, like g_pad_host_keys */
+    int   key_layout;        /* [keyboard] layout: the built-in layout the file was saved against; 0 = not in the file */
     uint32_t mouse[PIM_N_CONTROLS];
     uint32_t pad[PIM_N_CONTROLS];
     /* [mouse]; -1 (or 0 for sens) = not in the file */
@@ -315,8 +322,9 @@ static void pim_key_set(uint32_t m[4], unsigned vk) { m[(vk >> 5) & 3] |= 1u << 
  *   D-pad    1 2 3 4 = up down left right (Precision Mode, Ionic Vortex,
  *            Purchase Powers, Switch Powers), also the arrow keys (menus);
  *            wheel up = up (Precision Mode)
- *   START    Enter            SELECT  M, Tab (World Map)
- *   Esc is the window's (menu / release the mouse), not the game's.
+ *   START    Esc              SELECT  M, Tab (World Map)
+ *   Esc is the game's pause menu, like on any PC game; Enter is free to
+ *   bind (it was START before layout 2). The port's own menu is F2.
  *
  * A controller is bound by POSITION (SDL's a/b/x/y = bottom/right/left/top on
  * every pad; the runtime asks SDL for positions on Nintendo pads too), so its
@@ -340,7 +348,7 @@ static void pim_defaults(PadInputMap* m)
         {PIM_R3, 0x07},                                 /* X */
         {PIM_UP, 0x12}, {PIM_DOWN, 0x13}, {PIM_LEFT, 0x14}, {PIM_RIGHT, 0x15},   /* 1 2 3 4 */
         {PIM_UP, 0x7E}, {PIM_DOWN, 0x7D}, {PIM_LEFT, 0x7B}, {PIM_RIGHT, 0x7C},   /* arrows */
-        {PIM_START, 0x24}, {PIM_START, 0x4C},          /* Return, keypad Enter */
+        {PIM_START, 0x35},                              /* Escape */
         {PIM_SELECT, 0x2E}, {PIM_SELECT, 0x30},         /* M, Tab */
     };
     for (int i = 0; i < PIM_COUNT(keys); i++) pim_key_set(m->key[keys[i].ctl], keys[i].vk);
@@ -644,6 +652,7 @@ static int pim_parse(PadInputMap* m, const char* text, FILE* err, const char* sr
         if (sec == PIM_SEC_NONE) { pim_warn(m, err, src, line_no, "setting outside a section", key); continue; }
         if (sec == PIM_SEC_MOUSE) { pim_mouse_setting(m, key, val, err, src, line_no); continue; }
         if (sec == PIM_SEC_CONTROLLER_SETTINGS) { pim_controller_setting(m, key, val, err, src, line_no); continue; }
+        if (sec == PIM_SEC_KEYBOARD && !strcmp(key, "layout")) { m->key_layout = atoi(val); continue; }
         const int ctl = pim_lookup(pim_controls, PIM_COUNT(pim_controls), key);
         if (ctl < 0) { pim_warn(m, err, src, line_no, "PS3 control", key); continue; }
         pim_bind(m, sec, ctl, val, err, src, line_no, fam);
@@ -665,6 +674,32 @@ static int pim_parse(PadInputMap* m, const char* text, FILE* err, const char* sr
         if (!(set_pad >> c & 1)) m->pad[c] &= ~pad;
     }
     return m->n_warnings - start_warnings;
+}
+
+/* The built-in keyboard layout's number (the file's [keyboard] layout line):
+ * 2 = Esc is START (before: Return and keypad Enter, with Esc the window's). */
+#define PIM_KEY_LAYOUT 2
+#define PIM_LAYOUT_DONE 0x80000000u   /* the writer: [keyboard] has its layout line */
+
+/* A map read from a file saved against an older built-in layout (no layout
+ * line, or a lower number): what the player never changed follows the new
+ * defaults. Layout 2: START still on Return / keypad Enter alone, and Escape
+ * on no control -> START is Escape. Returns 1 when the map changed (the
+ * caller saves it: the file then says layout = 2 and this never runs again,
+ * so a player who puts START back on Enter keeps it). */
+static inline int pim_migrate_layout(PadInputMap* m)
+{
+    if (m->key_layout >= PIM_KEY_LAYOUT) return 0;
+    const uint32_t* st = m->key[PIM_START];
+    const uint32_t enter1 = 1u << (0x24 & 31), enter2 = 1u << (0x4C & 31);   /* words 1 and 2 */
+    const int on_enter = !st[0] && !st[3] && !(st[1] & ~enter1) && !(st[2] & ~enter2) && (st[1] | st[2]);
+    int esc_used = 0;
+    for (int c = 0; c < PIM_N_CONTROLS; c++) esc_used |= (int)(m->key[c][0x35 >> 5] >> (0x35 & 31) & 1u);
+    if (!on_enter || esc_used) return 0;
+    memset(m->key[PIM_START], 0, sizeof m->key[PIM_START]);
+    m->key[PIM_START][0x35 >> 5] |= 1u << (0x35 & 31);
+    m->key_layout = PIM_KEY_LAYOUT;
+    return 1;
 }
 
 /* Defaults, then the file at `path` on top. Returns 1 if the file was read,
@@ -862,10 +897,14 @@ static void pim_add_missing(PimBuf* b, size_t at, const PadInputMap* m, int s, u
         snprintf(line, sizeof line, "%-8s = \"%s\"%s", pim_control_name(c), list, eol);
         pim_buf_str(&t, line);
     }
+    if (s == 0 && !(*done & PIM_LAYOUT_DONE)) {   /* [keyboard]: the layout these bindings were saved against */
+        snprintf(line, sizeof line, "%-8s = %d%s", "layout", PIM_KEY_LAYOUT, eol);
+        pim_buf_str(&t, line);
+    }
     if (t.oom) b->oom = 1;
     else if (t.len) pim_buf_insert(b, at, t.p, t.len);
     free(t.p);
-    *done = (1u << PIM_N_CONTROLS) - 1u;
+    *done = ((1u << PIM_N_CONTROLS) - 1u) | PIM_LAYOUT_DONE;
 }
 
 /* The file's text for map `m`, written into `old` (the file as it is, or
@@ -917,7 +956,7 @@ static char* pim_render(const PadInputMap* m, const char* old)
                     else if (p[j] == '#' || p[j] == ';') { cpos = j; break; }
                 }
                 const char* eq = (const char*)memchr(p + i, '=', cpos - i);
-                int ctl = -1;
+                int ctl = -1, is_layout = 0;
                 if (eq) {                    /* the key as the parser reads it */
                     char key[64]; size_t k = 0;
                     for (const char* r = p + i; r < eq && k + 1 < sizeof key; r++)
@@ -925,6 +964,7 @@ static char* pim_render(const PadInputMap* m, const char* old)
                     while (k && (key[k - 1] == ' ' || key[k - 1] == '\t')) k--;
                     key[k] = 0;
                     ctl = pim_lookup(pim_controls, PIM_COUNT(pim_controls), key);
+                    is_layout = sec == 0 && !strcmp(key, "layout");
                 }
                 if (ctl >= 0) {
                     const size_t pre = (size_t)(eq - p) + 1;     /* "cross    =" as written */
@@ -938,6 +978,19 @@ static char* pim_render(const PadInputMap* m, const char* old)
                         pim_buf_add(&b, p + cpos, n - cpos);
                     }
                     done[sec] |= 1u << ctl;
+                } else if (is_layout) {      /* the layout line: this writer's number, its comment kept */
+                    const size_t pre = (size_t)(eq - p) + 1;
+                    size_t ve = cpos;
+                    while (ve > pre && (p[ve - 1] == ' ' || p[ve - 1] == '\t')) ve--;
+                    char num[16];
+                    snprintf(num, sizeof num, " %d", PIM_KEY_LAYOUT);
+                    pim_buf_add(&b, p, pre);
+                    pim_buf_str(&b, num);
+                    if (cpos < n) {
+                        if (ve < cpos) pim_buf_add(&b, p + ve, cpos - ve); else pim_buf_str(&b, " ");
+                        pim_buf_add(&b, p + cpos, n - cpos);
+                    }
+                    done[0] |= PIM_LAYOUT_DONE;
                 } else {
                     pim_buf_add(&b, p, n);   /* not a control: as it was */
                 }

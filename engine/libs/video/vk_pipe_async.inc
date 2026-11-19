@@ -15,7 +15,7 @@
  *     vkCreateGraphicsPipelines 24.3 s in total (10.6 ms each), glslang 3.0 s;
  *   - his second session, pipelines.bin (32 MB) loaded: still 969 creations,
  *     1.64 s (87 shaders the cache never had: new places, other settings);
- *   - Sami's own sessions (warm caches): frames of 505 ms (133 pipelines in
+ *   - real play sessions (warm caches): frames of 505 ms (133 pipelines in
  *     353 ms + 37 shaders in 52 ms), 302 ms (7 pipelines, 278 ms: cold ones),
  *     223 ms, 151 ms ... at camera cuts, the hitch catcher's stack in
  *     vk_sc_create_pipeline -> nvgpucomp64.

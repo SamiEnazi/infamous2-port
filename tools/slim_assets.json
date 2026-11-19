@@ -1,8 +1,8 @@
 {
  "format": 1,
- "made": "2026-11-17 23:26:49",
- "release": "v0.6.2",
- "engine_kit": "208d1da06dd7",
+ "made": "2026-11-19 00:51:12",
+ "release": "v0.6.3",
+ "engine_kit": "416c7063577d",
  "module": {
   "abi": 2,
   "layout": [
@@ -25,7 +25,7 @@
   "built_by": "tools/rebuild_win.py with PORT_ENGINE_EXE=<engine exe> PORT_LLVM=<toolchain> (steps inputs..compile; compile = tools/build_module.py)",
   "sample_build": "clang 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1), no PGO"
  },
- "total_download_bytes": 50208119,
+ "total_download_bytes": 50215247,
  "assets": [
   {
    "role": "python",
@@ -86,13 +86,13 @@
     "SDL2.dll"
    ],
    "files_sha256": {
-    "Infamous2Recomp.exe": "43C24D93A0030A858122215D6D018DEE193BA332DACEEA37B07387D9DAD1A64E",
+    "Infamous2Recomp.exe": "20C33322B84CA0707628BC02710B4A9519D49FE481532043E1F651FAA1FC126E",
     "SDL2.dll": "F1A82C299206D5BD3231F5EDB16FB7F33AAF4DC7C20BF57C25CF8E92EDA6EC72"
    },
-   "release": "v0.6.2",
-   "size": 3916082,
-   "sha256": "5F5147A32D191CD207305FCAA3648D945CABC88C89528D69660421D6FB2E9FF2"
+   "release": "v0.6.3",
+   "size": 3923210,
+   "sha256": "59E102981E9BF52B039AC353A35A6FEBDAF4DC6F9B2CEA0EE896703514A601BC"
   }
  ],
- "release_note": "each asset names the release that holds it (\"release\"): the engine is new in v0.6.2, the compiler in v0.6.1, Python and pycryptodome are v0.6.0's"
+ "release_note": "each asset names the release that holds it (\"release\"): the engine is new in v0.6.3, the compiler is v0.6.1's, Python and pycryptodome are v0.6.0's"
 }

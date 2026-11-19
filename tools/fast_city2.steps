@@ -1,6 +1,6 @@
 # Fast city test v2 (testspeed, 2026-11-08): boot the first save (auto-loaded, no menu), the city intro movie is
 # the 4 s placeholder, then WAIT (no presses: X does not skip the Kuo cutscene and a late X makes Cole jump) for
-# the gameplay HUD = anchor. Measured where Sami's session sat at ~52 fps: minutes 27-28 of
+# the gameplay HUD = anchor. Measured where a play session sat at ~52 fps: minutes 27-28 of
 # play\20261108-125910 are the first gameplay minutes on this dock, right after the same cutscene.
 #   0-16 s   stand still: the dock + street view (the heavy one; RSX + PPU main bound)
 #   16-46 s  walk forward (left stick) from that view, into the street

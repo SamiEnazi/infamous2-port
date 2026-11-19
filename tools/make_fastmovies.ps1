@@ -1,6 +1,6 @@
 # Test-only disc + hdd0 views where every pre-rendered cutscene movie (movies\cutscene\*.bik) is
 # the developers' own 4 s placeholder (cut_scene_place_holder.bik, shipped on the disc), so a test
-# does not sit through the 70 s New Marais intro comic or the 96 s opening montage (Sami: "skip
+# does not sit through the 70 s New Marais intro comic or the 96 s opening montage (feedback: "skip
 # the intro, it's just a video"). Everything else is the real game: directory junctions and file
 # hard links into game\disc and game\dev_hdd0, nothing copied, nothing changed in the originals.
 #   powershell -File tools\make_fastmovies.ps1          -> work\fastmovies\disc, work\fastmovies\dev_hdd0

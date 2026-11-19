@@ -21,7 +21,7 @@ import: the game's files copied (a folder) or extracted (an image, a package) IN
   Checked before: free space. Done again only where it stopped (game/disc/.port-source.json is written last).
   Progress lines for Setup: "  progress: <percent>% <what>". Exit code 0 = done, 1 = failed (last line "error: <why>").
 Keys and licenses: an encrypted image needs its disc key and a PSN package its license (.rap). Their files are only
-  passed on, by path, to tools/ps3tool.py (Sami Enazi's, a black box here: python -I ps3tool.py <mode> <in> <out>);
+  passed on, by path, to tools/ps3tool.py (a black box here: python -I ps3tool.py <mode> <in> <out>);
   nothing here reads them. A ps3tool without such a mode says so, and the player is told what to do instead.
 """
 import argparse

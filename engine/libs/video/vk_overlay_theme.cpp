@@ -20,7 +20,7 @@ static ImVec4 alpha(const ImVec4& c, float a) { return ImVec4(c.x, c.y, c.z, a);
     ImVec4(0.600f, 0.650f, 0.720f, 1.00f), /* text_dim  */                   \
     ImVec4(1.000f, 0.620f, 0.220f, 1.00f)  /* warn      */
 
-/* [menu-e] the accents of the menu design Sami picked (E): Hero #4cc3ff, Infamous #e5483b */
+/* [menu-e] the accents of the chosen menu design (E): Hero #4cc3ff, Infamous #e5483b */
 static const VkOvTheme kHero = {
     ImVec4(0.298f, 0.765f, 1.000f, 1.0f),  /* accent: electric blue #4cc3ff */
     ImVec4(0.560f, 0.863f, 1.000f, 1.0f),  /* accent_hi #8fdcff */

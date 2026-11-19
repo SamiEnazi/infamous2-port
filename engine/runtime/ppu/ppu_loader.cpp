@@ -907,7 +907,7 @@ extern "C" int g_resv_store_active = -1;   /* -1 uninit, 0 off, 1 on */
 /* (limits, 2026-11-09) A context is registered ONCE. Guest thread contexts live
  * in the thread table's slots (sys_ppu_thread.c), so a slot reused by a new
  * thread brings back an address already here; appending it again filled the
- * 128 entries after ~127 thread starts (Sami's 53-minute session started 55
+ * 128 entries after ~127 thread starts (a 53-minute session started 55
  * threads: Game State Thread, Bink IO/Snd per movie), and from then on a thread
  * in a never-used slot was not registered at all -- other threads' stwcx no
  * longer broke its reservations (ABA on the guest's lock-free lists) -- while

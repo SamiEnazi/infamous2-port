@@ -42,10 +42,17 @@
  *   PS3_NATIVE_JOBS_HELP_PEEK=0|1   a waiter looks at the queue without the lock before it takes it (default 1)
  *   PS3_NATIVE_JOBS_WAITSTAT=1      a line per 10 s: time in the four job waits (runner on or off)
  *   PS3_NATIVE_JOBS_LOG=1           managers as they are first seen, ownership, dependency cells
+ *   PS3_NATIVE_JOBS_HEAL=0|1        the stall repair (default 1): a wait that makes no progress for 1 s with nothing
+ *                                   of its manager queued or running re-reads the manager from guest memory (below)
+ *   PS3_NATIVE_JOBS_NODETECT=1      tests only: a manager re-created in place is seen by its workload id and array
+ *                                   bases alone, as before the fix (tests/jobrunner drives the repair with it)
  * Always on (cheap): a loud first-occurrence warning ([jobs] WARN, the first 8 of each kind, then every
  * 1000th) for anything the runner does not expect: an unknown entry type, a wait or a barrier stalled for
  * more than 2 s (with the manager's state), a cell of no known manager, an array reset with work left.
  */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE   /* (deck) pthread_setname_np (the engine build sets it; tests/jobrunner builds this file alone) */
+#endif
 #include "wws_native.h"
 #include "wws_njob.h"
 #include "../../runtime/spu/spu_context.h"
@@ -98,6 +105,7 @@ enum {
 /* ---- configuration ------------------------------------------------------------------------- */
 static int s_on, s_all, s_threads, s_wait, s_stats, s_log, s_waitstat, s_help, s_sticky, s_stats_sec = 10;
 static int s_help_peek;   /* (main1) PS3_NATIVE_JOBS_HELP_PEEK, see help_one */
+static int s_heal = 1, s_nodetect;
 static unsigned char s_mod_on[256];
 
 static int env_int(const char* n, int dflt) { const char* e = getenv(n); return e && *e ? atoi(e) : dflt; }
@@ -131,6 +139,8 @@ static void cfg_init(void)
     s_log = env_int("PS3_NATIVE_JOBS_LOG", 0);
     s_waitstat = env_int("PS3_NATIVE_JOBS_WAITSTAT", 0);
     s_help_peek = env_int("PS3_NATIVE_JOBS_HELP_PEEK", 1);
+    s_heal = env_int("PS3_NATIVE_JOBS_HEAL", 1);
+    s_nodetect = env_int("PS3_NATIVE_JOBS_NODETECT", 0);
 }
 
 /* ---- managers ------------------------------------------------------------------------------- */
@@ -155,6 +165,10 @@ typedef struct mgr_state {
     SRWLOCK  lock;                     /* claims, completion, the queue */
     uint32_t active;                   /* the array claims come from (mirrors u32[mgr+8]) */
     uint32_t base[2];                  /* the arrays' bases as last seen: a change = re-initialized in place */
+    uint32_t ver;                      /* u32[mgr+0xC] as this runner left it (only a marker claim and the game's
+                                          manager init write it: another value = re-initialized in place) */
+    uint64_t idle_since;               /* GetTickCount64 of the first token test that found work left and nothing
+                                          queued or running (0 = none): the polled waits' stall clock */
     uint32_t blocked_cell;             /* the barrier cell the claim waits on (0 = none) */
     uint64_t blocked_since;            /* GetTickCount64 when the claim first stopped at it */
     slot_state s[2];
@@ -214,6 +228,7 @@ static mgr_state* mgr_get(uint32_t ea)
         m->spurs = G32(ea + MGR_SPURS);
         InitializeSRWLock(&m->lock);
         m->active = G32(ea + MGR_CTRL_SLOT) & 1;
+        m->ver = G32(ea + MGR_CTRL_VER);
         m->s[0].seq = m->s[1].seq = 0x100;
         m->base[0] = G32(arr_hdr(ea, 0) + ARR_BASE);
         m->base[1] = G32(arr_hdr(ea, 1) + ARR_BASE);
@@ -310,10 +325,10 @@ static void token_give(uint32_t b) { __atomic_fetch_or(&s_spu_tokens, 1L << b, _
 
 static volatile uint64_t s_mod_jobs[256], s_mod_ns[256], s_busy_ns, s_jobs_total, s_help_jobs, s_help_ns, s_wait_ns, s_waits, s_test_help;
 static volatile uint64_t s_lat_ns, s_lat_n, s_lat_b[4];
-enum { W_TYPE, W_WAIT, W_BARRIER, W_CELL, W_RESET, W_REINIT, W_N };
+enum { W_TYPE, W_WAIT, W_BARRIER, W_CELL, W_RESET, W_REINIT, W_HEAL, W_N };
 static const char* const s_warn_name[W_N] = { "unknown entry type", "stalled wait", "stalled barrier",
                                               "cell of no known manager", "array reset with work left",
-                                              "manager re-initialized" };
+                                              "manager re-initialized", "stall repaired" };
 static volatile long s_warn_n[W_N];
 /* 1 = print this one: the first 8 of a kind, then every 1000th */
 static int warn_take(int kind)
@@ -358,6 +373,7 @@ static void publish_marker(mgr_state* m, uint32_t slot)
 {
     pub_arg a = { 0, 0, 1, slot };
     wws_line_update(m->ea, pub_fn, &a);
+    m->ver = G32(m->ea + MGR_CTRL_VER);     /* caller holds m->lock */
 }
 
 /* entries [0, k) done -> publish (caller holds m->lock) */
@@ -369,12 +385,16 @@ static void advance_locked(mgr_state* m, uint32_t s)
     if (k != ss->k) { ss->k = k; publish_k(m, s, k); }
 }
 
-/* a slot whose sequence byte changed was reset by the producer (0x38AE0C) */
-static void slot_check_locked(mgr_state* m, uint32_t s)
+/* a slot whose sequence byte changed was reset by the producer (0x38AE0C). So was one whose finished-prefix
+ * word (quad +2) is not the value this runner published: only the runner and the game's slot reset 0x54C6D0
+ * (the swap, the manager init) write it, and a manager created again at the same address can come back with
+ * the same sequence byte. Only for the array the claim reads: the other one may be inside a swap. */
+static int slot_check_locked(mgr_state* m, uint32_t s, int force)
 {
     const uint32_t seq = G8(arr_hdr(m->ea, s) + ARR_SEQ);
     slot_state* ss = &m->s[s];
-    if (ss->seq == seq && G32(arr_hdr(m->ea, s) + ARR_WIDX) >= ss->claimed) return;
+    if (ss->seq == seq && G32(arr_hdr(m->ea, s) + ARR_WIDX) >= ss->claimed
+        && ((s_nodetect && !force) || G16(m->ea + MGR_QUAD + 16 * s + 2) == ss->k)) return 0;
     if (ss->seq != 0x100 && ss->k != ss->claimed && warn_take(W_RESET))
         fprintf(stderr, "[jobs] WARN #%ld %s: manager %08X array %u reset (seq %02X -> %02X) with %u of %u claimed "
                 "entries unfinished\n", s_warn_n[W_RESET], s_warn_name[W_RESET], m->ea, s, ss->seq & 0xFF, seq,
@@ -383,42 +403,67 @@ static void slot_check_locked(mgr_state* m, uint32_t s)
     ss->claimed = 0;
     ss->k = 0;
     memset(ss->done, 0, sizeof ss->done);
+    {   /* The game's reset leaves the word at 0. Should it ever not be: the entries below it are finished for
+         * the game and are not run again, and the check above holds from here on (no reset per claim). */
+        uint32_t w = G16(m->ea + MGR_QUAD + 16 * s + 2);
+        const uint32_t widx = G32(arr_hdr(m->ea, s) + ARR_WIDX);
+        if (w > widx) w = widx;
+        if (w > SLOT_MAX) w = SLOT_MAX;
+        if (w && !(s_nodetect && !force)) { memset(ss->done, 1, w); ss->claimed = ss->k = w; }
+    }
+    return 1;
 }
 
 /* A manager re-initialized in place (0x38B10C again at the same address: a checkpoint / game-state change
  * re-creates 0xB01E80's manager with a new SPURS workload and fresh arrays, whose sequence bytes may equal the
  * old ones). The b1-roam hang: the old claim count stayed above the new write index, nothing was claimed and
  * the next wait never returned. Seen by the workload id or an array base changing; everything per instance
- * starts over (the game waited for the old instance's jobs before it destroyed it). */
-static void reinit_check_locked(mgr_state* m)
+ * starts over (the game waited for the old instance's jobs before it destroyed it).
+ *
+ * The new instance can get the SAME workload id and the SAME two array addresses (the allocator hands the
+ * blocks just freed back in the same order): the hang of "Powering Up Flood Town". The old instance had
+ * swapped to array 1, the new one starts in array 0 (the init writes u32[mgr+8] = 0), the runner kept
+ * claiming from array 1 and no job of the new instance ever ran. So also: the two control words only a
+ * marker claim of this runner and the game's manager init write, the active array u32[mgr+8] and the table
+ * version u32[mgr+0xC] (the init decrements it), must be what the runner left there. */
+static int reinit_check_locked(mgr_state* m, int force)
 {
     const uint32_t wid = G32(m->ea + MGR_WID);
     const uint32_t b0 = G32(arr_hdr(m->ea, 0) + ARR_BASE), b1 = G32(arr_hdr(m->ea, 1) + ARR_BASE);
-    if (wid == m->wid && b0 == m->base[0] && b1 == m->base[1]) return;
+    const uint32_t act = G32(m->ea + MGR_CTRL_SLOT) & 1, ver = G32(m->ea + MGR_CTRL_VER);
+    if (wid == m->wid && b0 == m->base[0] && b1 == m->base[1]) {
+        if ((s_nodetect && !force) || (act == m->active && ver == m->ver)) return 0;
+        /* the game waits for every job of an instance before it destroys it, and a job leaves `running` under
+         * this lock: with a job queued or running this is no new instance, and nothing is touched */
+        if (m->qh != m->qt || __atomic_load_n(&m->running, __ATOMIC_ACQUIRE)) return 0;
+    }
     if (warn_take(W_REINIT))
-        fprintf(stderr, "[jobs] WARN #%ld %s: manager %08X wid %u -> %u, arrays %08X/%08X -> %08X/%08X; old instance: "
-                "queued %u, running %ld, claimed %u/%u, prefix %u/%u\n", s_warn_n[W_REINIT], s_warn_name[W_REINIT],
-                m->ea, m->wid, wid, m->base[0], m->base[1], b0, b1, m->qt - m->qh, m->running,
-                m->s[0].claimed, m->s[1].claimed, m->s[0].k, m->s[1].k);
+        fprintf(stderr, "[jobs] WARN #%ld %s: manager %08X wid %u -> %u, arrays %08X/%08X -> %08X/%08X, active %u -> %u,"
+                " version %08X -> %08X; old instance: queued %u, running %ld, claimed %u/%u, prefix %u/%u\n",
+                s_warn_n[W_REINIT], s_warn_name[W_REINIT],
+                m->ea, m->wid, wid, m->base[0], m->base[1], b0, b1, m->active, act, m->ver, ver, m->qt - m->qh,
+                m->running, m->s[0].claimed, m->s[1].claimed, m->s[0].k, m->s[1].k);
     m->wid = wid;
     m->spurs = G32(m->ea + MGR_SPURS);
     m->base[0] = b0; m->base[1] = b1;
-    m->active = G32(m->ea + MGR_CTRL_SLOT) & 1;
+    m->active = act;
+    m->ver = ver;
     m->blocked_cell = 0; m->blocked_since = 0;
     for (int s = 0; s < 2; s++) {
         m->s[s].seq = 0x100; m->s[s].claimed = 0; m->s[s].k = 0;
         memset(m->s[s].done, 0, sizeof m->s[s].done);
     }
+    return 1;
 }
 
 /* claim what can be claimed (caller holds m->lock) */
 static void claim_locked(mgr_state* m)
 {
-    reinit_check_locked(m);
+    reinit_check_locked(m, 0);
     uint32_t pushed = 0;
     for (int guard = 0; guard < 4; guard++) {
         const uint32_t s = m->active;
-        slot_check_locked(m, s);
+        slot_check_locked(m, s, 0);
         slot_state* ss = &m->s[s];
         const uint32_t h = arr_hdr(m->ea, s);
         const uint32_t base = G32(h + ARR_BASE);
@@ -535,8 +580,9 @@ static void run_one(wws_worker* w, uint32_t own_spu, mgr_state* m, const qjob* q
     AcquireSRWLockExclusive(&m->lock);
     m->s[q->slot].done[q->index] = 1;
     advance_locked(m, q->slot);
+    __atomic_sub_fetch(&m->running, 1, __ATOMIC_ACQ_REL);   /* under the lock: "queue empty and running 0" there
+                                                               means no job of this manager is anywhere */
     ReleaseSRWLockExclusive(&m->lock);
-    __atomic_sub_fetch(&m->running, 1, __ATOMIC_ACQ_REL);
     for (uint32_t d = 0; d < r.n_deps; d++)
         if (wws_cell_dec(r.dep_ea[d]) == 1) cell_opened(r.dep_ea[d], m);
     claim(m);
@@ -647,12 +693,81 @@ static void mgr_dump(const char* why, mgr_state* m, uint32_t a, uint32_t b, uint
             G8(h + ARR_SEQ), m->active, G32(m->ea + 8), m->qt - m->qh, m->running, m->blocked_cell,
             m->blocked_cell ? G16(m->blocked_cell) : 0);
 }
+
+/* The stall repair (PS3_NATIVE_JOBS_HEAL, default on). A wait made no progress for a second. If a job of the
+ * manager is queued or running, that is a long job and nothing is done. Otherwise the runner's picture of
+ * the manager may be wrong, and the game would wait forever (a frozen picture with the sound still playing):
+ * the picture is taken again from guest memory, which is the truth the game's own waits read:
+ *   1. the manager checks of the claim, without exceptions (re-created in place; an array reset);
+ *   2. a claimed entry that is neither finished nor queued nor running (nothing is, here) is queued again;
+ *   3. the claim runs.
+ * If none of this changes anything (the claim stands at a barrier whose cell another manager still holds,
+ * or at an entry the game has not written yet), nothing is reported and the wait goes on.
+ * What keeps the game state exact: nothing is completed by decree. Every entry the game still waits for
+ * runs through the same job code as always, and the finished-prefix word is published in order as always;
+ * entries below the word the game already reads as finished are never run again. The one case that is not
+ * bit-for-bit the normal run is a job that ran without the runner recording it, which would run twice; the
+ * runner records a job under the same lock that publishes it, so no known path leads there. */
+static int heal(mgr_state* m, const char* where, uint32_t a, uint32_t b, uint64_t ms)
+{
+    if (!s_heal) return 0;
+    int what = 0; uint32_t lost = 0;
+    char before[400];
+    AcquireSRWLockExclusive(&m->lock);
+    if (m->qh != m->qt || __atomic_load_n(&m->running, __ATOMIC_ACQUIRE)) { ReleaseSRWLockExclusive(&m->lock); return 0; }
+    const uint32_t k0 = m->s[0].k, k1 = m->s[1].k, c0 = m->s[0].claimed, c1 = m->s[1].claimed, qt0 = m->qt;
+    {   /* the state the stall was in, for the report */
+        const uint32_t s = a & 1, h = arr_hdr(m->ea, s);
+        snprintf(before, sizeof before, "array %u wants %s%u, words min %u, claimed %u, prefix %u, widx %u, seq %02X/%02X,"
+                 " active %u (u32[+8] %u), version %08X (u32[+C] %08X), barrier cell %08X = %u", s,
+                 b == 0xFFFFFFFFu ? "drained " : "index ", b == 0xFFFFFFFFu ? 0u : b, words_min(m->ea, s),
+                 m->s[s].claimed, m->s[s].k, G32(h + ARR_WIDX), m->s[s].seq & 0xFF, G8(h + ARR_SEQ), m->active,
+                 G32(m->ea + MGR_CTRL_SLOT), m->ver, G32(m->ea + MGR_CTRL_VER), m->blocked_cell,
+                 m->blocked_cell ? G16(m->blocked_cell) : 0);
+    }
+    if (reinit_check_locked(m, 1)) what |= 1;
+    if (slot_check_locked(m, m->active, 1)) what |= 2;
+    for (uint32_t s = 0; s < 2; s++) {
+        slot_state* ss = &m->s[s];
+        const uint32_t h = arr_hdr(m->ea, s), base = G32(h + ARR_BASE);
+        uint32_t n = 0;
+        if (ss->seq != G8(h + ARR_SEQ)) continue;
+        for (uint32_t i = ss->k; i < ss->claimed; i++) {
+            if (ss->done[i]) continue;
+            const uint32_t hi = G32(base + 8 * i), lo = G32(base + 8 * i + 4);
+            if ((hi & 0xFFFF) == 1) {
+                qjob j = { s, i, hi, lo, module_of_desc(lo, (hi >> 16) & 511), s_stats ? now_ns() : 0 };
+                __atomic_add_fetch(&m->running, 1, __ATOMIC_ACQ_REL);
+                mq_push_locked(m, &j);
+            } else ss->done[i] = 1;
+            n++;
+        }
+        if (n) advance_locked(m, s);
+        lost += n;
+    }
+    if (lost) { what |= 4; ready_add_n(m, m->qt - qt0); }
+    claim_locked(m);
+    const int moved = what || m->qt != qt0 || m->s[0].k != k0 || m->s[1].k != k1 || m->s[0].claimed != c0 || m->s[1].claimed != c1;
+    const uint32_t queued = m->qt - qt0;
+    ReleaseSRWLockExclusive(&m->lock);
+    if (moved && warn_take(W_HEAL)) {
+        fprintf(stderr, "[jobs] WARN #%ld %s: manager %08X (module %d): %s made no progress for %llu ms with nothing"
+                " queued or running. The manager was read again from the game's memory (%s%s%s%s), %u jobs queued;"
+                " the game goes on. Please report this line. Before: %s\n", s_warn_n[W_HEAL], s_warn_name[W_HEAL],
+                m->ea, m->module, where, (unsigned long long)ms,
+                (what & 1) ? "re-created in place; " : "", (what & 2) ? "array reset; " : "",
+                (what & 4) ? "claimed entries lost; " : "", what ? "" : "entries not claimed; ", queued, before);
+        fflush(stderr);
+    }
+    return moved;
+}
+
 static void wait_until(mgr_state* m, wait_pred p, uint32_t a, uint32_t b)
 {
     if (p(m, a, b)) return;
     const uint64_t t0 = s_stats ? now_ns() : 0;
     const uint64_t w0 = GetTickCount64();
-    uint64_t next_warn = 2000;
+    uint64_t next_warn = 2000, next_heal = 1000;
     claim(m);                                  /* entries kicked but not flushed yet */
     for (unsigned spin = 0; !p(m, a, b); spin++) {
         if (help_one(m, a, p == pred_token ? b : 0xFFFFFFFFu)) { spin = 0; continue; }
@@ -663,6 +778,10 @@ static void wait_until(mgr_state* m, wait_pred p, uint32_t a, uint32_t b)
             if ((spin & 255) == 0) {
                 claim(m);
                 const uint64_t waited = GetTickCount64() - w0;
+                if (waited >= next_heal) {      /* nothing moved for a second: is the runner's picture wrong? */
+                    next_heal = waited + 1000;
+                    if (heal(m, "a wait", a, p == pred_token ? b : 0xFFFFFFFFu, waited)) { spin = 0; continue; }
+                }
                 if (waited >= next_warn) {      /* a stall: say what the manager looks like, once per doubling */
                     next_warn *= 2;
                     if (warn_take(W_WAIT)) mgr_dump("stalled wait", m, a, p == pred_token ? b : 0xFFFFFFFFu, waited);
@@ -764,7 +883,16 @@ static void hook_token_test(ppu_context* ctx, ppu_hook_body body)
     claim(m);
     if (help_one(m, (uint32_t)s, t)) __atomic_add_fetch(&s_test_help, 1, __ATOMIC_RELAXED);
     else for (int i = 0; i < 64; i++) CPU_PAUSE();
-    ctx->gpr[3] = words_min(ea, (uint32_t)s) >= t ? 1 : 0;
+    const int done = words_min(ea, (uint32_t)s) >= t;
+    ctx->gpr[3] = done ? 1 : 0;
+    /* the callers that poll this test never reach wait_until: their stall clock. It runs while tests of this
+     * manager say "not yet" with nothing of it queued or running; a job or a finished test restarts it. */
+    if (done || m->qh != m->qt || __atomic_load_n(&m->running, __ATOMIC_RELAXED)) { if (m->idle_since) m->idle_since = 0; }
+    else {
+        const uint64_t now = GetTickCount64(), since = m->idle_since;
+        if (!since) m->idle_since = now;
+        else if (now - since >= 1000) { m->idle_since = now; heal(m, "a polled token test", (uint32_t)s, t, now - since); }
+    }
 }
 
 /* Track D seam (libs/game/inf2_dlogic.c, PS3_D_HELP=1 default): the native world tick's poll of an entity whose anim

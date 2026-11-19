@@ -271,7 +271,7 @@ foreach ($raw in $stepsTxt) {
             (@("hosttid`tcpu_pct`tname") + ($rows | Sort-Object { -[double](($_ -split "`t")[1]) })) | Set-Content -Encoding ascii (Join-Path $Rec "threads_$($a[0]).tsv")
             Note "threads" "$($a[0]) $sec s"
         }
-        "say" {   # spoken message (Sami records a route: the game window keeps the focus)
+        "say" {   # spoken message (while a route is recorded: the game window keeps the focus)
             try { Add-Type -AssemblyName System.Speech; $sp = New-Object System.Speech.Synthesis.SpeechSynthesizer; $sp.Speak($rest); $sp.Dispose() } catch {}
             Write-Host $rest; Note "say" $rest
         }

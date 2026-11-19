@@ -2,7 +2,7 @@
 
     python -I tools/save_info.py [<savedata dir> | <gamedata dir> | <recording dir>]
 
-Default: Sami's saves (game\\gamedata\\dev_hdd0\\home\\00000001\\savedata). PARAM.SFO is read
+Default: the port's saves (game\\gamedata\\dev_hdd0\\home\\00000001\\savedata). PARAM.SFO is read
 in the console's PSF format (what the toolkit writes since 2026-11-08) or the older
 "KEY=value" text form. Exit 1 when a save looks broken (no PARAM.SFO, empty file, bad PSF).
 """

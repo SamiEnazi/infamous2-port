@@ -27,8 +27,8 @@
 #   DS4Windows is closed first (its virtual pad doubles the input).
 #   Keyboard + mouse: WASD move, mouse = camera (click in the window to capture the mouse),
 #   right button = aim (L1), left button = R1, Space = Cross, Shift = Circle, F = Square,
-#   Q = Triangle, Enter = START, Tab/M = map.
-#   Esc opens the PC menu (and frees the mouse); Alt+F4 or the window's close button quits.
+#   Q = Triangle, Esc = START (the game's pause menu), Tab/M = map.
+#   F2 opens the PC menu; F2 or Alt+Tab frees the mouse; Alt+F4 or the window's close button quits.
 #   Remapping, dead zones, sensitivity: input.toml in the project folder (made on first run
 #   from engine\docs\input.example.toml).
 #
@@ -313,7 +313,7 @@ $vars = @{
     # diagnostics on (ps3_log.h): ~500 lines/s through one FILE lock. Off for play.
     PS3_VERBOSE                 = $(if ($env:PS3_VERBOSE) { $env:PS3_VERBOSE } else { "0" })
     # defaults below settings.ini (the in-game menu); -Fps/-Volume/-Fullscreen override both.
-    # The picture defaults are the best look for the cost (Sami, 2026-11-09: "best visuals to
+    # The picture defaults are the best look for the cost (feedback, 2026-11-09: "best visuals to
     # performance ratio, 60-70+ fps"): softer sun shadows, full-res AO at 125%, dithered light,
     # full-resolution effects, light sharpening; together ~1 ms of GPU per frame (city ~88 -> ~83
     # fps uncapped on an RTX 2070 Super). The engine's own defaults stay the PS3 look (tests).
@@ -411,17 +411,17 @@ if (-not $updBy) {
     $updAuto = -not ($auto -eq "0")
 } else { $vars["PS3_UPDATE_BY"] = $updBy }
 
-# The machine-wide game lock (tools\with_game_lock.ps1): agents' test runs wait while Sami
+# The machine-wide game lock (tools\with_game_lock.ps1): test runs wait while the player
 # plays, and a test run already going finishes first (they last up to ~7 min).
 $lockFs = $null
 $lockPath = Join-Path $root "work\game.lock"
 $lockInfo = Join-Path $root "work\game.lock.owner"
-# Sami goes first: a ticket that sorts before every agent's in the first-come queue
+# The player's game goes first: a ticket that sorts before every agent's in the first-come queue
 # (with_game_lock.ps1 lets only the oldest live ticket take the lock).
 $qdir = Join-Path $root "work\game.lock.queue"
 New-Item -ItemType Directory -Force $qdir | Out-Null
 $myTicket = Join-Path $qdir ("00000000000000000_{0}.t" -f $PID)
-Set-Content -LiteralPath $myTicket -Value "Sami (play.ps1)"
+Set-Content -LiteralPath $myTicket -Value "player (play.ps1)"
 while (-not $lockFs) {
     try { $lockFs = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
     catch {
@@ -430,7 +430,7 @@ while (-not $lockFs) {
         Start-Sleep -Seconds 5
     }
 }
-Set-Content -LiteralPath $lockInfo -Value ("Sami playing since {0:HH:mm:ss}" -f (Get-Date))
+Set-Content -LiteralPath $lockInfo -Value ("Player's game running since {0:HH:mm:ss}" -f (Get-Date))
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $Exe
@@ -439,7 +439,7 @@ $psi.WorkingDirectory = $out
 $psi.UseShellExecute = $false
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
-# -RecordRoute <name> (2026-11-08): Sami drives a route once, tests replay it (tools\fast.ps1, '#! replay').
+# -RecordRoute <name> (2026-11-08): a route is driven once by hand, tests replay it (tools\fast.ps1, '#! replay').
 # Your own saves are never touched: the game starts from a fresh COPY of the test save
 # (work\saves\first-save\gamedata, "3. Forward Momentum"), the cutscene movies are the 4 s placeholder,
 # and recording starts by itself when the gameplay HUD is back after the Kuo cutscene (a voice says

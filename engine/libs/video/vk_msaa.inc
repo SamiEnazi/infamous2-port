@@ -101,7 +101,7 @@ static void vk_ms_device_ready(void)
  * default min = the nearest sample). The resolved depth is what every 1x pass
  * tests against, what a stale twin is refilled from and what the full-screen
  * passes (fog, light, SSAO) read as a texture. With sample 0 (feat/aa's first
- * choice), which is not at the pixel centre, two things went wrong (Sami,
+ * choice), which is not at the pixel centre, two things went wrong (seen in
  * next/0.7 with MSAA 4x; FIX07.md in work/native):
  *  - the game re-draws its skin layers over depth an earlier pass wrote; the
  *    re-draw of the SAME triangle passed or failed by the triangle's depth

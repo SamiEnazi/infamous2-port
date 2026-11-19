@@ -352,6 +352,7 @@ engine/libs/input/tests/test_pad_mouse_direct.c
 engine/libs/input/tests/test_pad_remap.c
 engine/libs/input/tests/test_pad_rumble.c
 engine/libs/input/tests/test_pad_stick.c
+engine/libs/input/tests/test_pad_thread.c
 engine/libs/misc/cellAvconfExt.c
 engine/libs/misc/cellAvconfExt.h
 engine/libs/misc/cellBGDL.c

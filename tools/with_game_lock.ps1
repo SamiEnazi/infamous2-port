@@ -9,7 +9,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Cmd,
     [string]$Who = "anonymous",
     [int]$TimeoutMin = 120,
-    [switch]$Priority          # the lead's short jobs for Sami's build: queue right behind Sami, before the agents
+    [switch]$Priority          # short priority jobs: queue right behind the player's game, before the other test runs
 )
 $root = Split-Path -Parent $PSScriptRoot
 $lock = Join-Path $root "work\game.lock"
@@ -18,8 +18,8 @@ $deadline = (Get-Date).AddMinutes($TimeoutMin)
 $queued = Get-Date; $got = $null
 # First come, first served (2026-11-08: with four workers a waiter could lose the race for an
 # hour): every waiter drops a ticket (<time>_<pid>.t) in work\game.lock.queue and only the oldest
-# live ticket may take the lock. Tickets of dead processes are swept. play.ps1 (Sami) drops a
-# ticket named 00000000000000000_<pid>.t, which sorts first; -Priority uses 1<time>_<pid>.t (after Sami, before every agent, first come first served among themselves).
+# live ticket may take the lock. Tickets of dead processes are swept. play.ps1 (the player's game) drops a
+# ticket named 00000000000000000_<pid>.t, which sorts first; -Priority uses 1<time>_<pid>.t (after the player's game, before every agent, first come first served among themselves).
 $qdir = Join-Path $root "work\game.lock.queue"
 New-Item -ItemType Directory -Force $qdir | Out-Null
 $ticket = Join-Path $qdir ($(if ($Priority) { "1{0:yyyyMMddHHmmssfff}_{1}.t" } else { "{0:yyyyMMddHHmmssfff}_{1}.t" }) -f (Get-Date), $PID)

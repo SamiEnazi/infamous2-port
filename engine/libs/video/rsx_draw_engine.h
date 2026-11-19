@@ -122,7 +122,7 @@ typedef struct rsx_be_render_state {
  * (perf, 2026-11-09) 1024 -> 4096: inFAMOUS 2's city seen from above binds more
  * than 1024 distinct textures a frame, and an LRU smaller than the working set
  * misses on every bind -- every frame re-hashed, re-decoded, re-uploaded and
- * re-created every texture (Sami's 55 s at 4-5 fps). The same wall was found
+ * re-created every texture (a 55 s stretch at 4-5 fps). The same wall was found
  * and fixed this way in ThiagoFraga761/infamous2-pc (MIT). This is the maximum;
  * PS3RECOMP_ENG_TEXCACHE=<n> runs with fewer (1024 = the old size). */
 #define RSX_DRAW_ENGINE_TEXTURE_CACHE 4096
@@ -152,7 +152,7 @@ typedef struct rsx_tex_stats {
 extern rsx_tex_stats g_rsx_tstat;
 
 /* ---- PS3RECOMP_LIMITS: the renderer's capacities and how close a run came --
- * (rsx5, 2026-11-09, Sami: "stability more than fps" -- the 1024-entry
+ * (rsx5, 2026-11-09, goal: "stability more than fps" -- the 1024-entry
  * texture cache once turned the city into a 4-10 fps slideshow.) Every
  * fixed-size or capacity-limited structure of the engine and the Vulkan
  * backend has an entry: its capacity (0 = grows without a set bound), the

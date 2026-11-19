@@ -17,7 +17,7 @@ l2       = "C"
 r2       = "R"
 l3       = "V"
 r3       = "X"
-start    = "Return, KeypadEnter"
+start    = "Escape"
 select   = "M, Tab"
 up       = "1, Up"
 down     = "2, Down"
@@ -31,6 +31,7 @@ rs_up    = "I"
 rs_down  = "K"
 rs_left  = "J"
 rs_right = "L"
+layout   = 2             # the built-in keyboard layout this file was written for (2: Esc is START)
 
 [mouse_buttons]
 cross    = ""
@@ -90,7 +91,7 @@ rs_right = ""
 # invert_x    = false
 # invert_y    = false
 # deadzone    = 30       # first stick step past centre (skips the game's own dead zone)
-# capture     = true     # click in the window to capture the mouse, Esc releases it
+# capture     = true     # click in the window to capture the mouse; F2 or Alt+Tab releases it
 
 [controller_settings]
 # deadzone          = 0.08   # radial, both sticks (deadzone_left / deadzone_right)

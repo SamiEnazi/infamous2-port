@@ -32,7 +32,7 @@ static void test_defaults(void)
         {PIM_R1, 0x0E}, {PIM_L1, 0x06}, {PIM_R2, 0x0F}, {PIM_L2, 0x08}, {PIM_L3, 0x09}, {PIM_R3, 0x07},
         {PIM_UP, 0x12}, {PIM_DOWN, 0x13}, {PIM_LEFT, 0x14}, {PIM_RIGHT, 0x15},
         {PIM_UP, 0x7E}, {PIM_DOWN, 0x7D}, {PIM_LEFT, 0x7B}, {PIM_RIGHT, 0x7C},
-        {PIM_START, 0x24}, {PIM_START, 0x4C}, {PIM_SELECT, 0x2E}, {PIM_SELECT, 0x30},
+        {PIM_START, 0x35}, {PIM_SELECT, 0x2E}, {PIM_SELECT, 0x30},
     };
     int total = 0;
     for (unsigned i = 0; i < sizeof def / sizeof def[0]; i++) assert(key_of(&m, def[i].ctl, def[i].vk));
@@ -214,7 +214,9 @@ static void test_keys_hit(void)
     PadInputMap m;
     pim_defaults(&m);
     uint32_t keys[4] = {0, 0, 0, 0};
-    keys[0x4C >> 5] |= 1u << (0x4C & 31);                /* keypad Enter */
+    keys[0x4C >> 5] |= 1u << (0x4C & 31);                /* keypad Enter: nothing since layout 2 */
+    assert(!pim_keys_hit(&m, PIM_START, keys));
+    keys[0x35 >> 5] |= 1u << (0x35 & 31);                /* Escape */
     assert(pim_keys_hit(&m, PIM_START, keys));
     assert(!pim_keys_hit(&m, PIM_SELECT, keys));
 }
@@ -261,7 +263,9 @@ static void test_render_round_trip(void)
     pim_defaults(&m);
     char list[256];
     pim_inputs_text(&m, PIM_SEC_KEYBOARD, PIM_START, list, sizeof list);
-    assert(!strcmp(list, "Return, KeypadEnter"));
+    assert(!strcmp(list, "Escape"));
+    pim_inputs_text(&m, PIM_SEC_KEYBOARD, PIM_SELECT, list, sizeof list);
+    assert(!strcmp(list, "M, Tab"));
     pim_inputs_text(&m, PIM_SEC_MOUSE_BUTTONS, PIM_L1, list, sizeof list);
     assert(!strcmp(list, "Right"));
     pim_inputs_text(&m, PIM_SEC_CONTROLLER, PIM_CROSS, list, sizeof list);
@@ -296,8 +300,8 @@ static void test_render_round_trip(void)
      * controls a section did not list go after its last line */
     assert(strstr(text, "# hand-written\n[keyboard]\ncross = \"Q\"\ncircle   = \"Shift\"\nsquare   = \"F\"\n"
                         "triangle = \"\"\n") == text);
-    assert(strstr(text, "start    = \"Return, KeypadEnter\"\n"));
-    assert(strstr(text, "rs_right = \"L\"\n\n[mouse]\nsensitivity = 1.5   # fast\ninvert_y = true\n\n[controller]\n"
+    assert(strstr(text, "start    = \"Escape\"\n"));
+    assert(strstr(text, "rs_right = \"L\"\nlayout   = 2\n\n[mouse]\nsensitivity = 1.5   # fast\ninvert_y = true\n\n[controller]\n"
                         "cross = \"a\"\ncircle   = \"b\"\n"));
     assert(strstr(text, "select   = \"\"\n"));       /* [controller]: unbound above */
     assert(strstr(text, "\n[future]\nx = 1\n\n[mouse_buttons]\ncross    = \"\"\n"));   /* a missing section: appended */

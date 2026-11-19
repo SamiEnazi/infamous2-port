@@ -15,10 +15,10 @@ No emulator while you play, and no emulator to install it.
 [![3.4x the frame rate of RPCS3](https://img.shields.io/badge/vs%20RPCS3-3.4%C3%97%20the%20fps-2a78d6)](#performance)
 [![Any controller](https://img.shields.io/badge/controllers-plug%20%26%20play-1baf7a?logo=steamdeck&logoColor=white)](#what-you-get)
 [![License: MIT](https://img.shields.io/badge/license-MIT-1baf7a)](LICENSE)
-[![Made with Claude Code](https://img.shields.io/badge/made%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](#made-with-claude-code)
 [![Visitors](https://komarev.com/ghpvc/?username=SamiEnazi-infamous2-port&label=visitors&color=3fa9ff&style=flat)](https://github.com/SamiEnazi/infamous2-port)
 
 <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+<a href="https://paypal.me/samiEnazi"><img alt="Support the port on PayPal" src="https://img.shields.io/badge/Support%20the%20port-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white" height="48"></a>
 
 </div>
 
@@ -47,6 +47,23 @@ and builds it once. On the test PC the whole install took 12 to 15 minutes.
 ![Setup: pick your game, one progress bar, then Play](docs/setup.png)
 
 Linux and the Steam Deck: [see below](#linux-and-steam-deck). More detail on copies and keys: [FAQ](#faq).
+
+## What's new in v0.6.3
+
+A hotfix.
+
+- **The freeze in "Powering Up Flood Town" is fixed** ([#87](../../issues/87), [#88](../../issues/88)): the picture
+  stopped while the sound went on. Other freezes of the same kind are fixed with it, and if the game ever waits on
+  work that nobody is doing, it now notices after a second and carries on.
+- **"Optimise for this PC" works again** ([#90](../../issues/90)). In v0.6.2 its training run ended after 40
+  seconds and Setup built the game without it.
+- **Setup no longer stops with *"Cannot bind argument to parameter 'Path'"*** ([#89](../../issues/89)) when the
+  RPCS3 folder an older install took the game from has been removed. Pick your game again and it is copied in.
+- **No more freezes of up to a second when the game checks the controllers.** They came with Bluetooth
+  controllers, most of all when one reconnected.
+- **Esc pauses the game** (the game's own menu, START), and **F2** alone opens the port's menu. Enter no longer
+  pauses and is free to bind in F2 → Controls. Your `input.toml` follows by itself, unless you had changed the
+  pause key. F2 or Alt+Tab frees the mouse.
 
 ## What's new in v0.6.2
 
@@ -276,8 +293,13 @@ cd infamous2-port
 - **Fedora, openSUSE** and other `lib64` distributions work since v0.6.0 ([#64](../../pull/64)).
 - **NixOS:** build and play inside the FHS environment in [`tools/nixos/fhs-env.nix`](tools/nixos/fhs-env.nix)
   (the commands are at the top of that file). Tested by its author on NixOS 26.05 with a Radeon 780M.
-- **Steam Deck:** a player built it inside an Ubuntu Distrobox container in Desktop Mode and plays it in Game Mode
-  ([#24](../../issues/24)).
+- **Steam Deck (SteamOS 3.5 and later):** `./setup.sh` in Desktop Mode, nothing to install first (new on 18 Nov,
+  not confirmed on a Deck yet: please report how it goes in [#81](../../issues/81)). SteamOS comes
+  without the C library's headers and its system folders are read-only, so setup downloads them (12 MB, from Valve's
+  package mirror, SHA-256 checked) into the port's own `tools-cache/` ([#81](../../issues/81)). The other way still
+  works: a player built it inside an Ubuntu Distrobox container and plays it in Game Mode
+  ([#24](../../issues/24)); a game built in a container is started from that container too
+  (`distrobox enter <name> -- <port folder>/setup.sh`).
 - **v0.6.0 on Linux was built and run by us on Ubuntu 22.04 with a Radeon RX 550 (RADV)**: it installs, starts and
   plays there (slowly: that card is the limit). No Linux frame rate is claimed. Please [report](../../issues) how it runs on
   your distribution and GPU.
@@ -303,14 +325,16 @@ Start with `Play inFAMOUS 2.cmd` or the desktop shortcut. For Steam, Playnite an
 | Key | Action |
 |---|---|
 | **F1** | fps counter |
-| **F2** (or hold L3+R3) | the settings menu |
+| **F2** (or hold L3+R3) | the port's settings menu |
+| **Esc** | pause: the game's own menu (START) |
 | **F3** | your picture vs the original PS3 look |
 | **F7** | go to your saved spot |
 | **F9** | mark a moment in the session log (a stutter, a glitch) |
 | **Alt+Enter** | fullscreen |
 
 Keyboard and mouse: WASD to move, mouse for the camera, right button to aim, left button to shoot,
-Space = ✕, Shift = ○, F = □, Q = △. Remap anything in F2 → Controls → *Buttons and keys*.
+Space = ✕, Shift = ○, F = □, Q = △, Esc = pause. A click in the game holds the mouse; F2 or Alt+Tab
+frees it. Remap anything in F2 → Controls → *Buttons and keys* (Enter is free to bind: it was pause before v0.6.3).
 
 ## Mods
 
@@ -441,13 +465,6 @@ Contributors: [ANewJanuary](https://github.com/ANewJanuary) (Linux setup, [#64](
 | `cheats/` | The game side of the cheats and of the mouse camera. |
 | [`natives/`](natives/) | Native versions of the game's heaviest SPU jobs. |
 | `tools/` | The build, Setup, `tools/play.ps1`, and the tools used to test it. |
-
-## Made with Claude Code
-
-This port was built in **2 days and 9 hours**, in one long conversation between **Sami** and **Claude**
-(Anthropic's Claude Opus 5.5, working in [Claude Code](https://claude.com/claude-code)): from the first message
-(6 Nov 2026, 22:42) to the first public release (9 Nov 2026, 07:15). Sami brought the idea, his own copy of the
-game, the direction, the playtesting and the feedback; Claude wrote the code, the tools, Setup and this README.
 
 ## Thanks and credits
 

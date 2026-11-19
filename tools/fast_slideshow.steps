@@ -1,4 +1,4 @@
-# Slideshow scene (rsx5 limits audit, 2026-11-09): Sami's save "5. Karma's a Bitch" (work\saves\slideshow-save),
+# Slideshow scene (rsx5 limits audit, 2026-11-09): a save at "5. Karma's a Bitch" (work\saves\slideshow-save),
 # the city seen from above where the old 1024-entry texture cache turned the game into a 4-10 fps slideshow.
 # Anchor = the game's first world frame (> 2500 draws, PS3RECOMP_ENG_WORLD_MARK, not in the first 40 s after the
 # first present); then the camera turns right in steps, each view held still while it is measured.

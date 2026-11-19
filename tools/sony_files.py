@@ -21,7 +21,7 @@ What it gets, all checked before use:
             translates those three, and the game itself opens nothing else in dev_flash while it runs.
             When Sony no longer serves 4.93, the newest one from Sony's update list is used (its MD5 is in
             its address); the build then says the modules differ from the tested ones.
-  ps3tool   tools/ps3tool.py (Sami Enazi's, in the port's public repository, never in a release zip):
+  ps3tool   tools/ps3tool.py (in the port's public repository, never in a release zip):
             from GitHub at the port's own commit (port-version.txt), else from main.
 ps3tool is used as a program only: python tools/ps3tool.py pkg|pup <in> <out>.
 The digital (PSN) versions are not covered: their update is part of the game, installed in RPCS3.

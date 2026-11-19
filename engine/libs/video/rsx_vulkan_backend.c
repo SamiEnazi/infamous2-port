@@ -4282,7 +4282,7 @@ static int vk_create_swapchain(void)
 
     /* Present mode. FIFO (vsync) queues finished frames behind the display: with
      * three images and two frames in flight, up to 2-3 frames waited between the
-     * game reading the controller and the picture showing it (Sami: "input lag
+     * game reading the controller and the picture showing it (feedback: "input lag
      * using the controller", 2026-11-07). MAILBOX shows the newest finished frame
      * at the next refresh and drops a waiting one -- no tearing, no queue -- and
      * the frame cap (vk_frame_limit) does the pacing. PS3RECOMP_VK_PRESENT=fifo |
@@ -11249,16 +11249,18 @@ static void vk_playlog_frame(void)
 }
 
 /* ---- window events and the mouse (cellPad.c owns the decisions) -----------
- * Esc no longer quits: with a mouse-driven camera it is the key players hit
- * to get their cursor back. It goes to cellPad (cellPad_host_window_event):
- * the in-game menu's open/close counter, and releasing the captured mouse.
+ * Esc does not quit and does not open the in-game menu (F2 does): it is the
+ * game's START (the pause menu) unless the player's [keyboard] leaves it
+ * unbound, and then it only releases the captured mouse
+ * (cellPad_host_window_event). The mouse is also free while the F2 menu is
+ * open and when the window loses the focus (Alt+Tab).
  * Quit = closing the window or Alt+F4 (SDL turns both into SDL_QUIT).
  * PS3_ESC=quit restores Esc = quit; while the last frame is held on screen
  * after the game ended (PS3RECOMP_VK_HOLD) Esc still ends it.
  * The mouse is captured (cursor hidden, kept in the window) only after a
  * click in the window, and only while the window has the focus and no menu
  * is open; the motion itself comes from raw input on cellPad's own thread. */
-int  cellPad_host_window_event(int ev);          /* 1 click, 2 Esc; 1 = swallowed */
+int  cellPad_host_window_event(int ev);          /* 1 click, 2 Esc; 1 = the window's (not the game's) */
 void cellPad_host_window_focus(int focused);
 int  cellPad_host_capture_wanted_now(void);      /* 0 none, 1 motion only, 2 hold the cursor */
 void cellPad_host_set_mouse_captured(int on);
@@ -11330,7 +11332,8 @@ static int vk_lnx_input(const SDL_Event* e)
             const uint32_t bit = 1u << (k & 31);
             if (e->type == SDL_KEYUP)
                 __atomic_and_fetch(&g_pad_host_keys[k >> 5], ~bit, __ATOMIC_RELAXED);
-            else if (ps3_pad_kbm_on() && !cellPad_host_overlay_open())
+            /* (a repeat sets nothing: a key held since a menu was open stays the menu's) */
+            else if (!e->key.repeat && ps3_pad_kbm_on() && !cellPad_host_overlay_open())
                 __atomic_or_fetch(&g_pad_host_keys[k >> 5], bit, __ATOMIC_RELAXED);
         }
         return 0;                            /* Esc and F9 still reach the pump's branches */
@@ -11396,9 +11399,11 @@ static void vk_mouse_capture_sync(void)
  * released: sdl2-compat (SteamOS's SDL2) rebuilds its joystick list, which has no lock, for
  * every joystick / gamepad ADDED or REMOVED event a poll converts, and cellPadInit's
  * SDL_InitSubSystem on a game thread queues those while this pump runs (a double free in
- * that list: "malloc(): unaligned tcache chunk detected", 2026-11-18; cellPad.c,
- * cellPad_host_sdl_trylock). A pass that finds the lock held is skipped. Windows has the
- * real SDL2 (and cellPad's SDL on its own thread there): no lock. */
+ * that list: "malloc(): unaligned tcache chunk detected", 2026-11-18), as does cellPad's
+ * controller thread, whose passes call SDL_NumJoysticks and run SDL's device detection
+ * (cellPad.c, cellPad_host_sdl_trylock: the lock of SDL's joystick list). A pass that finds
+ * the lock held is skipped. Windows has the real SDL2 (and cellPad's SDL on its own thread
+ * there): no lock. */
 #if !defined(_WIN32)
 int  cellPad_host_sdl_trylock(void);
 void cellPad_host_sdl_unlock(void);
@@ -11433,10 +11438,9 @@ int rsx_vulkan_backend_pump_messages(void)
         if (e.type == SDL_QUIT) quit = 1;
         else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
             if (s_vk_holding || vk_esc_quits()) quit = 1;
-            /* the window's Esc (cellPad: unless [keyboard] gives it to the game): the
-             * PC menu opens [overlay]; the mouse is free while it is open and
-             * captured again when it closes */
-            else if (!e.key.repeat && cellPad_host_window_event(2)) vk_overlay_open_menu();
+            /* Esc is the game's (START by default, read by cellPad); bound to no
+             * control it releases the captured mouse. The PC menu is F2 [overlay]. */
+            else if (!e.key.repeat) cellPad_host_window_event(2);
         }
         else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F9 && !e.key.repeat) {
             s_pl.mark = 1;
