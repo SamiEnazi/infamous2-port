@@ -252,3 +252,19 @@ This should be done before you reach Flood Town.
 4. rebuild with the profile.
 
 Every player trains their own: upstream never publishes profiles. Our PGO gain was about 15% (plaza 42.1 → 48.9 fps). This is also a candidate pull request for upstream.
+
+### 14:20: main thread round 2 finished, nothing kept
+
+| Idea | Result |
+|---|---|
+| **M2:** the guest store slow path | **Rejected.** Counted: the main thread makes ~38,000 slow-path stores a frame, 96 % of them to lines no reservation uses. Moving those inline removed them all and changed nothing: street 44.96 → 44.92 fps (guest 4–20 s, 6 runs each, no PGO on either side). The earlier ~1 ms estimate came from profiler skid; each call costs under ~8 ns. |
+| **M7:** pin the main thread to a CPU of its own | **Rejected:** −2.1 % full window (48.94 vs 50.01 fps), −1.0 % guest 4–20 s (8 rounds). The main thread's own work is 0.2–0.6 ms faster, but the job threads lose a CPU and it waits longer. |
+| **Power** | All four cores always run at **one shared clock** (~2,930–3,050 MHz of 3,500), set by the 15 W cap: CPU 9.1–9.4 W, GPU 2.3–2.7 W, SoC 0.8 W. Nothing per core is settable without root. Governor `performance`: no gain. Cutting the job threads' idle spin: no measurable watts. |
+
+**What this means:** the watts go into real work: job threads 3.3 CPUs, main 1, RSX 0.8. So a faster job helps the main thread twice: it frees burst capacity (the 0.2 rule) and it frees power for the shared clock. 1 W less anywhere is roughly +4 % clock, about 0.8 ms of main thread. Less GPU draw helps the same way; GPU 1400 vs 1200 MHz costs the main thread 1.1 ms.
+
+**Next main-thread candidate:** job 218. The main thread runs ~6 of these jobs a frame itself (~1.8 ms, one to one), so 10 % faster gives roughly 0.35–0.5 ms. After that: M8 (runtime per DMA command) and M3.
+
+**One slip:** the governor test left the CPU's energy preference at `performance` instead of `balance_performance`. Setting the governor back worked, but the driver keeps the energy preference, and only root can write it. No fps effect at the 15 W cap; slightly more battery use at light load. A reboot restores it. From now on, agents don't touch the CPU governor or any other system-wide CPU setting. The GPU clock is back at 1100 MHz.
+
+**Next:** the upstream v0.6.3 merge round, with each upstream change measured on its own against hd3.

@@ -168,6 +168,35 @@ opens its barrier sooner, but the main thread then waits for the rest of the bur
 from a burst's jobs buys ~0.2 ms of main thread; work on the main thread itself (its own 218 runs, the store slow path,
 guest code) counts one to one.**
 
+**Main thread round 2 on the street (2026-11-19, agent mt2; NOTES.md "main thread round 2 (agent mt2)").** Three
+things, all `PS3_TB_FRAMESTEP_IDLE_US=2000`, rotated rounds:
+
+* **The store slow path (M2) is not a lever.** Counted (`PS3_STSTAT`, section 3): the main thread makes 1.92 M out-of-line
+  stores a second (~38,000 a frame), 96 % to a line no reservation ever marked, on the ~55 pages that hold a marked line
+  (0x00A6E000 alone half of them: its one marked line is a live job-queue line, ~26,000 reservations a second); 4 %
+  (~1,650 a frame) to a marked line, 8 a second on a line another agent held. Taking the 96 % inline (`PPU_ST_LINE`,
+  section 5) removes them all and changes nothing: guest 4-20 s, 6 runs each, no-PGO modules: HEAD lift 44.96 fps (sd
+  0.87), main 20.37 ms; inline 44.92 (0.66), 20.48; the same binary with `PS3_ST_LINE=0` 45.09 (0.44), 20.48; full window
+  and plaza equal too (section 5). So the ~1 ms main1 put on the slow path was sample skid; the store calls cost < ~8 ns.
+* **`PS3_CPU_PLACE_MAIN=cpu` (M7) is slower**: same exe (hd3's module + the mt2e engine), 8 rotated rounds: full window
+  x0 50.01 fps (n = 7, sd 0.77) vs cpu 48.94 (n = 5, sd 0.74), guest 4-20 s 46.96 (0.48) vs 46.49 (0.62) (n = 8); main's
+  own time falls 0.2-0.6 ms (pinned, no migrations) but it waits longer: the pool and SPU threads lose a CPU (6 -> 5).
+* **Power: one clock for all four cores, set by the 15 W budget.** The SMU's metrics (gpu_metrics, section 3; street,
+  hd3 module, GPU 1200, every run of these batches): socket 14.9-15.0 W (at the cap), CPU 9.1-9.4 W, GFX 2.3-2.7 W, SoC
+  0.77 W, the rest ~2.4 W; the four cores always report the SAME clock, 2,930-3,060 MHz (max 3,500), core 3 (the RSX
+  core) 1.6-1.8 W, the others 2.3-2.45 W each. perf stat per thread (mt2pw-x0, guest ~17-57 s): main 0.98 CPUs busy at
+  2.74 GHz effective (user cycles / task-clock; its kernel time pulls it below the core clock), IPC 1.04; pool 3.28 CPUs at
+  2.85 GHz, IPC 1.55; RSX 0.83 CPUs at 2.76 GHz, IPC 2.02; SPU threads 0.41 CPUs. Nothing per core is settable without
+  root (cpufreq / amd-pstate files are root's), and per-core settings would not help: the SMU runs the cores at one
+  clock; the system-wide governor `performance` (EPP performance, settable through steamosctl) gives no clock at the cap
+  either (2,930 vs 2,950 MHz; section 5, with a warning). What moves the main thread's clock is the TOTAL power the
+  rest of the APU draws: runs on a lighter path (GFX 2.7 W, CPU 8.9 W) ran at ~3,050 MHz vs ~2,965 on the route, and GPU 1400 vs 1200 MHz costs the main thread 1.1 ms
+  (section 2 above). At P ~ f^2.5, 1 W less anywhere is ~+4 % clock, ~0.8 ms of main thread. So the power lever is less
+  CPU burnt per frame by the other threads and less GPU draw, on top of the capacity rule (1 ms of burst CPU = ~0.2 ms of
+  main). The pool's idle spin is not where the watts are: cutting ready_pop's 3,000 PAUSEs to 300 or 0 left the clock
+  where it was (2,941 / 2,955 / 2,962 MHz on the route; section 6, P1). The watts go into real work: pool 3.3 CPUs, main 1,
+  RSX 0.8 -- so a faster job (M1 / M3 / M8) helps twice, by capacity and by power.
+
 **Installed 2026-11-19 05:30: hd2** (code 3d974be, PGO mg2r) replaces mgPr in the player's folder. Backups: `<player>/work/port/installed-mgPr-20261119/` (both files) and `tools/play.sh.installed-mgPr-20261119`; older: `work/port/Infamous2Recomp.installed-4cabf54`. Smoke test of the installed files (sandbox, street route): ran and exited cleanly, no errors.
 
 Real clock, standing at spot 2 (player's settings with the 60 fps cap, GPU 1400): mgPr 57.84 fps over 30 min (5-min
@@ -471,6 +500,21 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
 * Light pass check (gpu2): `PS3RECOMP_VK_LIGHT_CULL=2` renders the original light shader too every 60th light pass, reads
   both outputs back and compares them byte for byte (`[light-cull] check` lines; the run is slow, only for exactness).
 
+* Slow guest stores (2026-11-19, mt2): `PS3_STSTAT=<s>` in an engine built with work/bench/m2-diag.patch (diagnostic, not in
+  the tree; exe work/port/mt2d = HEAD + it) counts every out-of-line lifted store (ppu_lean_st<N>) of the main thread by page
+  and line (marked or not, held by another agent at that moment or not), other threads in total, and every reservation per
+  line by kind (PPU lwarx / SPU getllar); a dump every <s> s in stderr.log (`[ststat]` lines: totals, top 30 pages with
+  their page byte and marked lines, top 30 marked lines with their reservation rates).
+* Power and clocks without root (2026-11-19, mt2): the SMU's metrics table `/sys/class/drm/card0/device/gpu_metrics` (v2.4,
+  168 bytes, world-readable) has socket / CPU / SoC / GFX power (u16 mW at 0x28), the four cores' power (0x30) and current
+  clocks (0x58, MHz), GFX clock (0x4C). `work/bench/mt2-power.py <rec> [delay] [dur]` samples it at 20 Hz from anchor+delay
+  for dur s into <rec>/power.tsv and (unless PERF=0) runs `perf stat --per-thread -e cycles:u,instructions:u,task-clock`
+  on the game for the same window (perf_event_paranoid 2 allows it for our own process); `mt2-powwatch.sh <prefix>` starts
+  it (PERF=0) for every new recording of a batch; `mt2-powsum.py <rec>...` prints the means and, per thread group, the
+  effective clock (user cycles / task-clock) and IPC. Settable without root: nothing per core (cpufreq / amd-pstate files
+  are root-only); system-wide through steamosctl (D-Bus): CPU governor (powersave / performance = EPP balance_performance /
+  performance), boost, TDP limit (3-15 W, 15 = max), CPU scheduler (none / lavd), GPU clock / performance level.
+
 ### Acceptance rules (every change, agreed with the player 2026-11-18)
 
 1. Exact: SPU natives match the lifted job bit for bit (job replay exit 0, live checks 0 differences); graphics
@@ -488,6 +532,7 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
 
 | Commit | Change | Measured |
 |---|---|---|
+| (nothing kept; mt2, 2026-11-19) | main thread round 2: store slow path inline (`PPU_ST_LINE`, work/bench/m2-st-line.patch) and `PS3_CPU_PLACE_MAIN=cpu` (work/bench/main1-place-main.patch) measured and rejected (section 5); the tree is back at HEAD. Tools only (work/bench, not in git): m2-diag.patch (`PS3_STSTAT`), mt2-power.py / mt2-powsum.py / mt2-powwatch.sh (SMU power and clocks, perf stat per thread; section 3) | street M2 guest 4-20 s 44.96 / 44.92 / 45.09 fps (HEAD lift / inline / inline off), M7 46.96 -> 46.49 |
 | (uncommitted; work/bench/m13-216.patch, exe work/port/m13) | job 216: native selection pass 0x4D80 (new natives/spu/job216_sel_native.c, `PS3_NATIVE_J216SEL`, default 1; 0 off, 2 check mode, `J216SEL_STATS=N`): O(n^3/6) -> O(n^2) dot products (each candidate keeps its running maximum), four candidates per exact SPU helper op; BSP clipper split(): vertex sides four at a time + the crossing slots from bit masks (`PS3_NATIVE_J220_VEC`, default 1; 0 = the scalar loop, 2 = check against it) | **neutral**: 216 per job live 661 -> 595 us street, 568 -> 510 plaza (replay 415 -> 317 us); street m13s + m13t (12 rotated rounds) full window 49.80 vs 50.19 fps (4 / 6 clean of 12, main 19.41 -> 19.22 ms), guest 4-20 s 46.80 vs 47.14 (n = 12, +0.7 %, 1.5 SE; main 19.53 -> 19.32), plaza m13p 51.53 vs 51.26 (4 / 4, main 18.71 / 18.72); p99 27.1 / 27.3 (street), 23.7 / 24.0 (plaza); exact (replay 400 street jobs FULLPUT 400/400; live check 660k 0x4D80 calls and 329 M vertex sides, 0 differ). By rule 2 not a commit on its own merit; PGO: bsp / split lost their profile (changed), new TU unprofiled |
 | (uncommitted; work/bench/gpu2-lightcull.patch, exe work/port/gpu2l) | light pass per 16x16 tile (`PS3RECOMP_VK_LIGHT_CULL`, default 1; 0 = the original shader, 2 = check): a pass over 4x4-pixel position boxes and a tile pass (0.3 ms together) keep, per tile, only the lights whose sphere can reach the tile; the light shader walks those bits in order with the original loop body (rsx_vk_passes_glsl.h VK_LIGHT_GLSL, rsx_vulkan_backend.c vk_eng_light_pass) | street GPU 17.43 -> 13.17 ms (guest 4-20 s, 4 runs each), fps +3.2 %; plaza 17.58 -> 13.51 ms, 50.21 -> 51.83 fps (3 on-route rounds), +7.4 % where the GPU limited; exact (check mode: 0 bytes differ in 113 M pixels, street + plaza; end shots at noise level) |
 | 626ab72 | `PS3_TB_FRAMESTEP_IDLE_US` (bench only, default off, work/bench/main1-fsidle.patch): the frame-stepped clock lets the flipping thread's clock-polling sleeps see real time after <us> (the game's timed wait 0xB1388 ended only by the 100 ms stall rule) | (tools) street: frames > 50 ms ~15 -> 1 per run, max ~130 -> ~60 ms; guest 4-20 s 39.5 -> ~45 fps (the artifact cost ~13 % there, ~3-8 % over guest 10-85 s); route replays (on-route runs m1s-fs-2 and m1x-xu-2: segments within 3 % of ZREF, end shots 13.7 / 13.9 %; all 8 runs agree to guest 20 s); off-route rate still high (6 of 8) |
@@ -507,6 +552,30 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
 
 ## 5. Tried and rejected (do not retry without a new reason)
 
+* Store slow path, inline line-bit test (M2, 2026-11-19, agent mt2; work/bench/m2-st-line.patch, lift switch `PPU_ST_LINE`,
+  run-time `PS3_ST_LINE`; exe dirs work/port/mt2a / mt2b, no-PGO modules on both sides): counted first (`PS3_STSTAT`,
+  work/bench/m2-diag.patch): the main thread made **1.92 M out-of-line stores a second** on the street (~38,000 a frame),
+  96 % of them to a line no reservation ever marked, on ~55 pages that hold a marked line (one data page, 0x00A6E000, took
+  half: its one marked line is a live job-queue line, reserved ~26,000 times a second by SPUs and PPU), 4 % (~1,650 a
+  frame) to a marked line, and only 8 a second hit a line another agent held at that moment. The inline test (page byte 3
+  = fast page with a reserved line: test the line's bit, store inline with ppu_lean_st's own re-check) removed all the
+  unmarked-line calls (1.92 M -> 72 k/s, checked with the counter) and **bought nothing**: street 6 rotated rounds, guest
+  4-20 s (n = 6 each) a0 44.96 / b 44.92 / boff 45.09 fps, main 20.37 / 20.48 / 20.48 ms; full window b 46.42 / boff (same binary, switch off) 47.82 / HEAD-lift a0 47.10 fps (n = 3 / 2 / 3), main 20.82 / 20.22 /
+  20.44 ms; same off-route path a0 55.73, b 54.58 and 55.81, boff 54.69; plaza a0 49.99, b 50.03, boff 50.88 (n = 3 / 2 /
+  1), main 19.42 / 19.41 / 19.03. The calls cost less than the noise (< ~8 ns each): main1's "~1 ms" for the slow path
+  was sample skid (the samples sit on the call after a cache-missing load). And the module grows 17 % (111 -> 130 MB, the
+  cold branch at ~405,000 store sites) and loses its PGO profile. Unmarking unheld lines (the other M2 idea) cannot help
+  either: the hot pages' marked lines are reserved thousands of times a second (a re-mark = a process barrier).
+* `PS3_CPU_PLACE_MAIN=cpu` (M7, 2026-11-19, agent mt2; work/bench/main1-place-main.patch, engine build-mt2e-eng + hd3's
+  module = exe work/port/mt2m, the same binary on both sides): street, 8 rotated rounds: full window 48.94 fps (n = 5, sd
+  0.74) vs 50.01 (n = 7, sd 0.77) without it, guest 4-20 s 46.49 (0.62) vs 46.96 (0.48) (n = 8, -1.0 %, 1.7 SE); main's own
+  ms/frame 18.66 vs 19.26 (full window) but more of the frame spent waiting: the rest of the process gets 5 CPUs instead of
+  6. With `=core` (main1, section 5 above) it was -3.6 %. Placement of the main thread is not a lever.
+* CPU governor `performance` (EPP performance) via steamosctl (2026-11-19, mt2): street at the 15 W cap, the cores ran
+  2,930 MHz vs 2,940-2,960 with the default EPP balance_performance; fps within noise. Not a lever (the power limit sets
+  the clock). **Do not toggle it in benches:** on this kernel the switch back to powersave keeps EPP = performance (the
+  driver's cached value), and the EPP file is root's -- only `sudo tee .../energy_performance_preference` or a reboot
+  restores balance_performance (mt2 left it at performance, NOTES.md).
 * Native job 213 (2026-11-19, m13; not built): a live 213 job is 37-42 us but its lifted code only ~10 us (replay of 400
   recorded street jobs, REPEAT=40); the rest is ~85 small synchronous GET-and-wait DMAs a job (pointer chasing, cache
   misses on the copies) and the runner's staging, which a native of its game logic (16k SPU instructions in 769 lifted
@@ -595,14 +664,18 @@ Breakdown in section 2. Ranked by the expected saving on the main thread per fra
 | # | Candidate | Expected ms/frame | Effort | Risk | Notes |
 |---|---|---|---|---|---|
 | M1 | Shorter anim burst (213 + 218 + 200, ~22.5 ms of CPU): 2026-11-19 (m13) measured -- 213's lifted code is only ~1/4 of a live 213 job (the rest = DMA latency, see M8); 218 is the lever: ~18 ms/frame of pool CPU on the path through the world tick, and the main thread runs ~6 of them itself (~1.6 ms, one to one) | 218 -10 %: ~0.4-0.5 (0.2 per burst-ms + its own runs) | large (218's natives are upstream's AVX2 blend k16320_ 3 ms/frame, our FK 1.8 + clip 1.8, a flat lifted rest 2.2) | medium | capacity rule (section 2): 1 ms of burst CPU = ~0.2 ms of main |
-| M2 | Store slow path: an inline line-bit test where the page has a reserved line (no out-of-line call through the GOT), and/or unmarking lines no reservation holds | 0.3-0.8 | medium (lifter header + module rebuild, no-PGO A/B; unmarking needs a holder count per line and the process barrier on re-mark) | medium (SPU/PPU coherency) | ppu_lean_st* 0.6 + coherency notify 0.3 + call sites ~0.3 ms/frame; lines and pages are marked forever (spu_coherency.h); next step: count slow stores by page (which pages, PPU lwarx or SPU getllar marks) |
+| M2 | TRIED 2026-11-19 (mt2), rejected (section 5): the inline line-bit test removes 96 % of the main thread's out-of-line stores (1.92 M/s -> 72 k/s) and buys nothing measurable (b vs the same binary with `PS3_ST_LINE=0`: street main 20.82 / 20.22 ms, plaza 19.41 / 19.03); the module grows 17 %. Unmarking unheld lines: the hot pages' lines are live (thousands of reservations a second). Left: the ~1,650 marked-line stores a frame (lock + fence + two scans; 8 a second find a holder) | <= 0.2 (unproven: main1's slow-path estimate was sample skid) | medium (a per-line "held" summary the reservers keep, Dekker with the writer's fence) | medium-high (reservation protocol) | measure first: a causal switch that adds a busy wait per marked-line store, or skip notify_spus on lines no SPU ever reserved |
 | M3 | Render-manager drain (204 x 520 at 18 us, 216 x 6 at 600-700 us behind barriers): 2026-11-19 (m13) DONE for 216 (0x4D80 native + vector BSP sides, -10..-16 % per 216 job live, exact) -- main / fps unchanged within noise (capacity-bound burst, section 2); left in 216: split's polygon loop, lifted 0x7C40 / 0x9DF8 / 0x6CB8 / 0x55A0 (~26 % of the job) | 216 rest: ~0.1; 204 -20 %: ~0.4 | medium-large | low (exact by replay) | SPU_NATIVE_MAX (32, spu_channels.c) is full since job216_sel_native.c: the next native needs it raised (engine) |
 | M8 | SPU runtime per DMA command: the runner's staging copies (spu_wrch, 3.1 % of all samples: the out-of-line path, by its copy loop mostly wws_native.c WR()'s staging DMAs -- inferred, no call graph) and the jobs' commands (spu_wrch_cmd_fast 4.1 %), ~1/3 of both = the copy's cache misses: prefetch the next queued job's input buffers (the runner has its command list) while the current job runs; a leaner per-command path (overlay / coherency checks, bcmp) | 0.2-0.4 (1-2 ms of pool CPU in both bursts; helps 213, 204, 218, 220 at once) | medium (engine; hot functions lose their PGO profile -> retrain) | medium (DMA ordering is unchanged; exact by construction, replays) | the biggest single block of pool time (~12 ms/frame with indirect branches and wws_native_run) |
 | M4 | Codegen: ctx traffic around calls (~6 % of hot guest samples) | 0.3-0.5 | large (lifter) | medium | host-stack spills (12 %) are register pressure; v20-v31 kept = no gain on SysV (section 5) |
 | M5 | Codegen: VMX special-value tests | <= 0.3 | large | high (NJ / NaN exactness) | part of the 8.5 % vector/fp alu |
 | M6 | DONE 2026-11-19 (pgo2, with R1): PGO retrain mg2r, build hd2 | measured 0 on the street (main 20.56 vs hd1 20.43 ms/frame, guest 4-20 s 20.51 vs 20.50), plaza -0.4 (18.98 vs 19.38) | -- | -- | the 9 changed engine functions (help_one, usleep, ppu_timebase_now, pump_messages, the crash fix's pad lock ...) have profiles again; stale after the use build: module 0, engine 1 (`main`, cold) |
-| M7 | `PS3_CPU_PLACE_MAIN=cpu` (main pinned to a CPU of its own, the sibling shared) | 0-0.5? | small (patch exists) | low | +1.6 % over guest 4-20 s in 2 runs: needs a real A/B |
-| -- | done / rejected: help-peek (neutral, section 4), 216 natives (neutral, section 4), native 213 (section 5), HELP=2, THREADS=5, PLACE_MAIN=core, cross-manager priority, v20-v31 locals (section 5) | | | | |
+| M7 | TRIED 2026-11-19 (mt2), rejected (section 5): `PS3_CPU_PLACE_MAIN=cpu` -2.1 % full window (48.94 vs 50.01 fps, n = 5 / 7), -1.0 % guest 4-20 s (n = 8) | -- | -- | -- | main's own time -0.2..-0.6 ms, but the rest loses a CPU |
+| P1 | Power: the other threads' spins burn the budget the main thread's clock comes from (one clock for all four cores at the 15 W cap, section 2). First test 2026-11-19 (mt2, work/bench/mt2-poolspin.patch, `PS3_NATIVE_JOBS_POOL_SPIN`, street, 2 rounds): the pool's idle spin 3,000 -> 300 / 0 PAUSEs gives NO measurable clock (on the route 2,941 / 2,955 / 2,962 MHz, CPU 9.10 / 9.05 / 9.17 W) and guest 4-20 s 48.02 / 46.70 / 46.62 fps (n = 2 each, ~1-1.5 SE: the main thread runs more jobs itself when the pool sleeps). So a PAUSE spin costs little power here; MONITORX / MWAITX (user mode on Zen 2) would save less still | <= 0.2 (unproven; the spin's watts are small) | small-medium | low-medium | the bigger power items are the GPU's draw (clock, light tiles) and the total CPU work of the bursts |
+| M2b | The ~1,650 marked-line stores a frame (stripe lock + seq_cst fence + scans of the PPU slots and SPU contexts; 8 a second find a holder): skip notify_spus on lines no SPU ever reserved (a second bitmap set before the barrier), or a per-line holder summary | <= 0.2 (unproven) | medium | medium-high (reservation protocol) | causal test first (a busy wait per marked-line store); M2's lesson: the slow-path samples were skid |
+| -- | done / rejected: M2 inline line test, M7 PLACE_MAIN=cpu (section 5, mt2), help-peek (neutral, section 4), 216 natives (neutral, section 4), native 213 (section 5), HELP=2, THREADS=5, PLACE_MAIN=core, cross-manager priority, v20-v31 locals (section 5) | | | | |
+
+Order after mt2 (2026-11-19): M2 and M7 measured and rejected (section 5). The main thread's work is guest code (14 ms, cache-miss bound, IPC ~1.0) and the jobs it runs or waits for; what is left with a known size: **M1 via 218** (the main thread runs ~6 of them itself: one to one, plus 0.2 per burst-ms; every ms of pool CPU saved also frees power for the one all-core clock), then M8 / M3; P1 (the spins) measured small. A PGO retrain is not needed for anything of this round (nothing kept).
 
 Order after m13 (2026-11-19): **M2 first** (it is time ON the main thread: counts one to one, ~1 ms/frame at stake), then
 M8 (runtime per DMA command, helps every job of both bursts at once), then M1 via 218; more single-job natives on the
