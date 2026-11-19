@@ -212,6 +212,31 @@ Faster jobs 213 / 218 / 204 / 216 (main thread, M1 / M3); estimated âˆ’0.8 to âˆ
 - **Job 213 native: rejected.** Its own code is only about a quarter of a 213 job. The rest is waiting for many small memory transfers, which a native would still have to do.
 - **What this changes in the plan:** single-job speedups are worth much less than estimated. The levers now are work on the main thread itself, and less CPU and GPU work overall, which leaves more of the shared 15 W for the main thread (the light tiles made the main thread 0.7 ms faster this way).
 
+### 11:40: upstream v0.6.3 is out (merge planned after the current round)
+
+v0.6.3 (1f407ee, 19 Nov) plus 6e7addd: 55 files, about 1,840 lines added since v0.6.2. Our branch has 66 commits on top of v0.6.2.
+
+**What matters for us:**
+- **Freeze fix in "Powering Up Flood Town"** (#87, #88), in the job runner (`wws_runner.c`), which we use. A job manager re-created at the same address kept the old state, and the game waited forever. Upstream also adds a stall repair (`PS3_NATIVE_JOBS_HEAL`, on by default). Our job-queue change (365fd60) touches the same file.
+- **Controller thread** (`cellPad.c`, "controller freezes"): SDL controller polling moves to its own thread (`PS3_PAD_THREAD`), so a slow controller driver no longer stalls the game's main thread. This is the same code our startup-crash fix (8833293) protects. The merge must check again that the SDL race stays fixed, with the replica test, because there is now a third thread calling SDL.
+- **Linux setup on stock SteamOS** (6e7addd, `tools/libc_headers.sh`): relevant to the final PR and to the Linux PGO script.
+- **"Optimise for this PC" fixes** (#90, Windows setup), Esc pauses, smaller fixes.
+
+**Expected conflicts:** `cellPad.c`, `rsx_vulkan_backend.c` (the window pump), `vk_overlay.cpp`, `wws_runner.c`, `tools/play.sh`.
+
+**Plan:**
+1. After main thread round 2: merge v0.6.3 into deck-perf.
+2. Re-verify the SDL race fix with the replica.
+3. Retrain PGO (new code), A/B against hd3, then a standing run and the job replays.
+4. Install as hd4, with your OK.
+
+This should be done before you reach Flood Town.
+
+**Final goal (your instruction):** a branch with all our improvements on top of the latest upstream, ready for the maintainer to merge:
+- our changes as clean commits on upstream main, split into topic PRs, each with its measurements;
+- bench-only and local tooling left out;
+- Windows paths left untouched. We can't build Windows here, so Linux-only code stays behind `#if` and the maintainer's Windows build is the check.
+
 ### 11:25: main thread round 2 started
 
 1. The guest store slow path (~1 ms on the main thread itself).
