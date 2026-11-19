@@ -76,6 +76,34 @@ waits ~14 % + the runner's wait spin 4 % (~3.6 ms/frame of job waiting), guest s
 (caller not yet found). The street bench has fixed clusters of ~120 ms frames while walking (an artifact of the
 frame-stepped clock, absent on the real clock): its p99 / > 50 ms counts are not real-play numbers.
 
+**Main thread on the street (2026-11-18, agent main1; NOTES.md "main thread on the street").** hd1, guest 10-85 s,
+21.6 ms frames, main 20.4 ms busy (94.5 %). From the main-thread profile (zb-pmain, 56,743 samples) and a timeline run
+with the job runner's new ftrace kinds (m1d-1: every job run, every wait of the main thread, 2,250 frames):
+
+| Item | ms/frame | Notes |
+|---|---|---|
+| Guest PPU code (lifted EBOOT) | 14.0 | 69 %, flat (top 30 functions = 27 % of it); mostly data-cache-miss bound (the hot samples sit on the instruction after a guest load); no single codegen pattern stands out (below) |
+| Jobs the main thread runs itself | 2.7 | 218 anim 1.8 (6/frame x 300 us, from the world tick's re-polls), 204 0.5 (30/frame, array-wait help), 220 0.2, rest 0.2 |
+| Waiting for jobs (spin, lock, yields) | 2.5 | waits total 3.6 ms incl. the help above; by the job a wait ends on: 213 1.2, 204 0.8, 216 0.8, 220 / 218 polls 0.45, rest 0.2; inside: wait_until's spin 0.8, its pthread_rwlock calls 0.7, token tests 0.2 |
+| Guest store slow path | ~1.0 | ppu_lean_st* 0.6 (stores to pages where any line was ever reserved: out-of-line call through the GOT), SPU coherency notify from PPU stores 0.3, reservations / stwcx 0.1 |
+| Other runtime | ~0.5 | world-tick native 0.2, HLE / indirect calls 0.1, gcm pump 0.1 |
+| Idle | 1.2 | |
+
+Waiting for jobs (union of waits, jobs run and the world tick's re-polls): 5.2-5.7 ms/frame, a quarter of the frame. The
+timeline shows two bursts per frame in which the pool (4 threads, 78 % busy on average) is saturated: the anim manager
+(213 x 142 + 218 x 62 + 200; ~22.5 ms of CPU) kicked at ~7 ms and consumed by the world tick from ~10.5 ms, and the
+render manager (204 x 513 + 210 + 216 x 6 at 800 us + 208 + 201; ~20 ms) kicked at ~15.5 ms and drained at ~20.4 ms;
+between them (~14-15 ms) the pool is idle. Neither job order (each burst is one manager's jobs in the guest's kick
+order, nothing else competes) nor the runner's pick (the main thread takes only jobs it needs) is the cause: it is
+capacity in the bursts -- and more threads do not buy it at 15 W (a 5th pool thread, or waiters running any queued job,
+section 5), so the lever is shorter jobs on that path (213, 218, 204, 216; section 6). The 3.4 % of pthread_rwlock calls are the spin of these waits: help_one took the manager's lock
+on every spin turn (33,000 rwlock calls a frame), i.e. wait time, plus lock traffic against the pool.
+
+The frame-stepped bench's ~120 ms frames (guest 8 / 10 / 16-17 s) are the main thread in the game's timed wait
+func_000B1388 (deadline = mftb + f/30 s, usleep(3) polls): on the stepped clock its deadline only comes from the 100 ms
+stall rule. `PS3_TB_FRAMESTEP_IDLE_US=2000` (new, bench only) lets the flipping thread's clock-polling sleeps see real
+time after 2 ms, as on the real clock (section 3).
+
 Real clock, standing at spot 2 (player's settings with the 60 fps cap, GPU 1400): mgPr 57.84 fps over 30 min (5-min
 buckets 57.5-58.3, p99 19.4-19.8 ms, 17 frames > 33 ms, none > 50 ms, worst 38 ms); t13g 48.16 fps over 15 min (p99
 24.1 ms, worst 70 ms). Memory grows ~0.8 MB/min in both (pre-existing, not from the merge).
@@ -172,6 +200,25 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
   `<merge tree>/work/bench/detab-m.sh`, `ab4.sh`, `stand.sh` (real-clock standing run), `valP.sh` (all replays).
   Fast builds leave the det route more often (5 of 14 PGO runs at the house wall near Hank's at anchor+5-7 s; the
   > 50 ms frames of those runs come after the divergence): run more rounds and discard by draws.
+* Frame-stepped clock, timed waits (2026-11-18, main1): `PS3_TB_FRAMESTEP_IDLE_US=<us>` (default 0 = off; only with
+  `PS3_TB_FRAMESTEP_US`) -- the flipping thread's clock-polling sleeps (usleep calls < 1 ms apart in one frame, with
+  mftb reads right after them: 8+ polls) see real time once they last longer than <us>, from the start of the polls. It
+  removes the street bench's fixed ~120 ms frames (the game's timed wait 0xB1388 could only end by the 100 ms stall
+  rule). A wait on another thread (0x13ACE8's wait for the RSX sleeps without reading the clock) and every other thread
+  keep the stepped clock. Not used by detstreet.sh yet (results would not compare with older batches): pass it as an
+  env (`... PS3_TB_FRAMESTEP_IDLE_US=2000`) to both sides of an A/B, on builds that have it (m1p and later).
+* Main-thread job timeline (2026-11-18, main1; patch work/bench/main1-diag.patch + main1-diag-dlogic.patch, not in the
+  tree): PS3_FTRACE kinds 20 (every wait of a waiter: hook, slot, the needed jobs queued / running / unclaimed at its
+  start, the manager's module, the target), 21 (every job run: pool thread or helping waiter, module, source), 22 (the
+  world tick's re-poll passes), 23 (the 100 ms stall rule fired: thread, guest lr). Run with
+  `PS3_FTRACE=28:85:<rec>/ftrace.txt PS3_FTRACE_KINDS=1,2,5,7,8,9,10,12,16,17,20,21,22,23 PS3_FTRACE_CAP=16000000`
+  (overrides linux_run.py's), then `work/bench/main1-ftana.py <rec> <t_lo_ms> <t_hi_ms>` (per-frame waits, runs, pool),
+  `main1-ftmatch.py` (each wait -> the module of the job it ended on), `main1-ftframe.py <rec> <frame>` (one frame).
+* rwlock callers: `LD_PRELOAD=work/bench/main1-rwshim.so RWSHIM_OUT=<rec>/rwshim` (build main1-rwshim.c in the
+  distrobox: `gcc -O2 -fPIC -shared -o main1-rwshim.so main1-rwshim.c -ldl -lpthread`), then `main1-rwana.py <rec>
+  <k_lo> <k_hi> <frames>` (dump k = 5 s steps since start).
+* Codegen: `main1-cgana.py <perf.data> <module .so> [n]` (hot instructions of the top n lifted functions by class),
+  `main1-cghot.py <perf.data> <so> <guest addr>` (one function's hottest instructions in context).
 * Shell pitfall: never `pkill -f` / `pgrep -f` a pattern that also appears in the waiting command itself
   (it matches its own shell). Wait on a file's line count instead.
 * Merged builds in the dev tree (2026-11-18, rsx1): `work/bench/abx.sh <rounds> "<label>=<exe dir>[|ENV=V ...]" ...`
@@ -224,6 +271,8 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
 
 | Commit | Change | Measured |
 |---|---|---|
+| 626ab72 | `PS3_TB_FRAMESTEP_IDLE_US` (bench only, default off, work/bench/main1-fsidle.patch): the frame-stepped clock lets the flipping thread's clock-polling sleeps see real time after <us> (the game's timed wait 0xB1388 ended only by the 100 ms stall rule) | (tools) street: frames > 50 ms ~15 -> 1 per run, max ~130 -> ~60 ms; guest 4-20 s 39.5 -> ~45 fps (the artifact cost ~13 % there, ~3-8 % over guest 10-85 s); route replays (on-route runs m1s-fs-2 and m1x-xu-2: segments within 3 % of ZREF, end shots 13.7 / 13.9 %; all 8 runs agree to guest 20 s); off-route rate still high (6 of 8) |
+| 365fd60 | `PS3_NATIVE_JOBS_HELP_PEEK` (default 1, work/bench/main1-runner-peek.patch): help_one looks at the queue without the lock before taking it -- the waiters' spin took the manager lock ~15,000 times a frame | neutral: street `m1a` 46.68 vs hd1 46.66 fps (2 / 4 clean of 8), guest 4-20 s 39.76 vs 39.49 (8 runs each, sd 0.48 / 0.26); plaza `m1z`+`m1z2` 50.96 (49.72 without one outlier, 4 / 3 clean of 7) vs hd1 49.28 (2 clean of 7); exact by construction (the locked test still decides). By rule 2 not a commit on its own merit (cleanup of ~30,000 lock calls a frame) |
 | 04ddd13 | short tail for repeated draws also in a wide picture with the HUD pinned (`PS3RECOMP_ENG_FASTDRAW_HUD`, default 1): under the player's 16:10 it was off for every draw (rsx_draw_engine.c eng_fd_hud_note, rsx_draw_fast.inc fd_takes) | `rb3` 7 rounds (switch off / on, same binary): RSX 19.63 -> 18.59 ms/frame (2.57 -> 2.45 us per draw), **fps 48.44 -> 50.40**, p99 24.2 -> 23.3; final binary vs mgPr (`rb4`+`rb5`, 7 / 6 clean): RSX 19.61 -> 18.87, fps 48.03 -> 49.75, p99 24.6 -> 23.5, > 33 ms 2.7 -> 1.0 per run; exact (VERIFY=2: 13 M draws, 0 differences); main thread now co-limits; the short tail is still cold in the mg1r profile (retrain) |
 | 1f22354 | merge of deck-merge: upstream v0.6.2 (native WWS job runner, whole-job 208/209/210, their 218) + 0381235 Linux PGO-gen module atexit, 60870c0 4 pool threads, 865ef66 `J218_PICK=ttt`, 36b24fb static TLS, f9bbfd8 pool names, b529db1 Far shadow in their 210, 5dfb0b2 TLS scratch; new profiles mg1r | **48.90 vs 41.76 fps (+17.1%)**, RSX -1.6, SPU -26 ms/frame, p99 23.8 vs 27.4; exact |
 | 56427dc | job 204 type 0 fix: SLOT(12) lanes y..w were wrong in 231 of 517 slot-12 calls of rec-204b (also in the installed build); block buffers compared for every type; FB_RAND / FB_STALE guards | exact; replay time unchanged |
@@ -239,6 +288,19 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
 
 ## 5. Tried and rejected (do not retry without a new reason)
 
+* Main thread, street (2026-11-18, main1; NOTES.md; street A/B `m1a` 8 interleaved rounds, zone2/m1a.out):
+  `PS3_NATIVE_JOBS_HELP=2` (waiters run any queued job of their manager): 45.58 vs hd1 46.66 fps (5 / 4 clean), main
+  +0.5 ms/frame -- the main thread takes long jobs (218 at 300 us, 216 at 800 us) while the job it waits for ends within
+  ~13 us. `PS3_NATIVE_JOBS_THREADS=5`: main -0.3 ms (busy 92 %) but SPU-side CPU +5.6 ms/frame and fps 46.11 (3 clean):
+  no gain at 15 W. Over guest 4-20 s (the stretch all 8 runs of each share): hd1 39.49 / HELP=2 39.62 / THREADS=5
+  39.65 fps (sd 0.26-0.32): equal. `PS3_CPU_PLACE_MAIN=core` (experiment, work/bench/main1-place-main.patch: the main
+  thread alone on a core, everything else on the other 4 CPUs): guest 4-20 s 43.28 vs 44.91 fps (both with
+  `PS3_TB_FRAMESTEP_IDLE_US=2000`, 2 runs each), main +1.5 ms (it waits longer for the jobs). `=cpu` (main pinned to
+  its own CPU, the sibling shared): 45.64 vs 44.91 (2 runs each): inconclusive, not pursued.
+* Job priority across managers for the main thread's waits (2026-11-18, main1, not built): the timeline shows no
+  competition -- in both job bursts of a street frame only one manager's jobs are queued, in the guest's kick order.
+* Keeping v20-v31 in locals across calls (lifter, not built): on x86-64 SysV every xmm register is caller-saved, so a
+  vector local live across a call is reloaded from the host stack instead of ctx: no saving.
 * `PS3RECOMP_EDGE_GPU=1/2` (GPU culls instead of Edge): SPU -1%, RSX +8 points. No.
 * `PS3RECOMP_RSX_SPLIT=1` (walker + exec threads, exec on the RSX core's SMT sibling): -19% fps.
 * Threaded Vulkan recording / VK_BT, `PS3_CPU_PLACE=rsxcpu`: slower on the Deck.
@@ -270,6 +332,24 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
   shader-generator change on its own.
 
 ## 6. Next candidates (expected gain, effort)
+
+**Main-thread candidates (2026-11-18, main1; street, hd1: main 20.4 ms/frame busy, target <= 16 ms, i.e. -4.4 ms).**
+Breakdown in section 2. Ranked by the expected saving on the main thread per frame:
+
+| # | Candidate | Expected ms/frame | Effort | Risk | Notes |
+|---|---|---|---|---|---|
+| M1 | Shorter job bursts on the main thread's critical path: faster 213 (142 jobs x 39 us, lifted; the main thread waits for them token by token, 1.2 ms) and 218 (62 x 270 us; the main thread runs 6 itself, 1.8 ms) | 0.5-1.5 | large (natives, exactness by job replay) | medium | the anim burst (213 + 218 + 200, ~22.5 ms of CPU) is saturated on 4 pool threads + main for ~5-7 ms of every frame |
+| M2 | Store slow path: an inline line-bit test where the page has a reserved line (no out-of-line call through the GOT), and/or unmarking lines no reservation holds | 0.3-0.8 | medium (lifter header + module rebuild, no-PGO A/B; unmarking needs a holder count per line and the process barrier on re-mark) | medium (SPU/PPU coherency) | ppu_lean_st* 0.6 + coherency notify 0.3 + call sites ~0.3 ms/frame; lines and pages are marked forever (spu_coherency.h); next step: count slow stores by page (which pages, PPU lwarx or SPU getllar marks) |
+| M3 | Render-manager drain at the frame's end (204 x 513 at 20 us, 216 x 6 at 800 us behind a barrier): faster 204 / 216 | 0.3-0.8 | large | medium | 204 drain 0.8 + 216 barrier 0.8 ms of waiting |
+| M4 | Codegen: ctx traffic around calls (~6 % of hot guest samples) | 0.3-0.5 | large (lifter) | medium | host-stack spills (12 %) are register pressure; v20-v31 kept = no gain on SysV (section 5) |
+| M5 | Codegen: VMX special-value tests | <= 0.3 | large | high (NJ / NaN exactness) | part of the 8.5 % vector/fp alu |
+| M6 | PGO retrain (R1) with the main-thread builds | 0.2-0.5 | medium | low | help_one, usleep, ppu_timebase_now, the crash fix lost their profile |
+| M7 | `PS3_CPU_PLACE_MAIN=cpu` (main pinned to a CPU of its own, the sibling shared) | 0-0.5? | small (patch exists) | low | +1.6 % over guest 4-20 s in 2 runs: needs a real A/B |
+| -- | done / rejected: help-peek (neutral, section 4), HELP=2, THREADS=5, PLACE_MAIN=core, cross-manager priority, v20-v31 locals (section 5) | | | | |
+
+The street's 60 fps also needs the GPU (17.5 ms/frame at 1200 MHz) and the RSX thread (17.9 ms) below 16.7 ms; the main
+thread's remaining 14 ms of guest code is flat and data-cache-miss bound, so the job side (M1, M3) and the store path
+(M2) are the levers with a known size.
 
 Order after the RSX breakdown (2026-11-18, rsx1; target: a stable 60 fps, i.e. ~1.6-1.7 us of RSX thread per draw at
 9,000 draws, now 2.45 us at the plaza). With the short tail working at 16:10 (section 4) the RSX thread and the main
