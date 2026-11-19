@@ -530,6 +530,102 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
   <file> --expect-broken` for an old runner), engine/libs/input/tests/test_pad_thread.c / test_pad_hotplug.c (need stubs
   for SDL_GetVersion and our frame-step clock hooks on Linux).
 
+### How to measure (fast) (2026-11-19, agent ft1; NOTES.md "faster testing (agent ft1)")
+
+Triage only: a change that passes these still gets the full gate (street + plaza A/B with >= 4 clean rounds, the standing
+run, the job replays) before an install. All tools in work/bench; the engine side is bench only and off by default.
+What to use: a switch-only question -> one in-run run (`liveab.sh`, 3-4 min) for its mechanism (clock, power, GPU, thread
+ms: precise) and big fps effects (>= 2-3 %), or `abseq.sh` on quick street runs (3 pairs = 7 min for >= 2.5-3 %, up to 8
+pairs = 18 min); a code change -> `ft1build.sh` (seconds when no lift input changed), the counters' reject-only filter
+(4 + 4 quick counter runs, 9 min), then `abseq.sh`; the full A/B -> street runs with the steering (every run on the route:
+no discarded rounds) in rotated pairs with the early-stopping rules. Small effects (0.5-1 % fps) stay expensive: the
+content noise (the crowd) is ~1 % per run whichever way it is measured.
+
+**The HUD is on in every test run since 2026-11-19 19:30** (the player's request: linux_run.py's default, zrun.sh /
+stand2.sh; HUD=0 turns it off). Both sides of an A/B always share the HUD state; never compare a batch of before with one
+of after. Measured: HUD off vs on, in-run (street-still, 12 pairs): fps +0.5 % (SE 1.2), RSX thread -0.25 ms (SE 0.16),
+GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (nothing to switch off).
+
+* **The A/B inside one game run** (`PS3_LIVEAB`, runtime/diag/ps3_liveab.c): `EXE=<exe dir> work/bench/liveab.sh <tag>
+  <scene> "<switch>=<a>|<b>;block=300f;settle=60f;blocks=24" [ENV=V ...]` -- one run (~3-4 min) flips the switch in blocks
+  (order abba) and prints per block fps, CPU ms per frame per thread group, GPU ms, the SMU's power and clock; then
+  `work/bench/liveab.py <rec>... [--cross]` = paired differences with SE. Scenes: `spot2-still` (plaza save, standing,
+  ~64 fps; use start=1050f), `street-still` (street save, walk 16 s, stand), `street-pan`, `street-walk` / `street-walk2`
+  (the det route / route v2; content changes along the walk, so pair two runs of opposite phase: `first=b` + `--cross`).
+  Switches: PS3RECOMP_VK_LIGHT_CULL, PS3_PAD_THREAD_US, PS3_CPU_PLACE_MAIN (re-pins at the flip), PS3_DBG_FLIP_DELAY_US,
+  PS3_DBG_PRESENT_DELAY_US, PS3_JOBDELAY_US, PS3_OVERLAY_HUD, `null` (A/A). New switches: read through g_ps3_lab[] (a site
+  that caches its env value keeps the cache and takes the override when it is >= 0). Settle: power split < 0.5 s, clock
+  < 1 s, fps ~1.5 s after a flip (trace=1, liveabtrace.py): settle=60f is enough.
+  * Validation: light tiles on vs off +4.7..+6.0 % on the still street (GPU -5.2 ms, clock +120-130 MHz, main -1.0..-1.3 ms;
+    SE 1.1-1.2 % per run), +5.7 % at spot 2 (SE 0.65, one 2.9 min run); reference +3.2 % on the street WALK (GPU -4.3 ms):
+    same sign and mechanism, larger in the standing views (their light pass costs more). PS3_CPU_PLACE_MAIN=cpu: NOT
+    reproduced (spot 2 -0.02 % SE 0.41, still street +0.48 % SE 0.60, two runs each; reference -1.0 % walk guest 4-20 s at
+    1.7 SE, -2.1 % full window). Controller thread 4 ms vs 1 ms (PS3_PAD_SDL=1): +2.2 % (SE 1.0), ps3-pad's group -0.47
+    ms/frame; reference +1.4 % (1.9 SE): agrees. Each of these: one run of 3-4.4 min (the reference A/Bs: 20-40 min). On
+    the WALK (street-walk, 4 runs crossover, blocks of 8 guest s): light tiles +1.25 % (SE ~1) over guest 4-20 s (the
+    unsteered route split after that), reference +3.2 %: same sign, ~2 SE low.
+  * Noise (A/A): pair sd 3.1 % fps at spot 2, 4.9 % on the still street (300-frame blocks): the content (the crowd) differs
+    from block to block, so the fps SE per run is ~0.9 % (spot 2) / ~1.4 % (street) -- no better per minute than between
+    runs. The mechanism metrics are precise in one run: clock SE 5-8 MHz, power 0.03-0.05 W, GPU 0.05-0.1 ms, thread ms
+    0.1-0.27 ms. Use it for (a) big effects (>= 2-3 %: one run), (b) power / clock / GPU / thread-time questions (one run),
+    (c) causal delays (below). It cannot settle 0.5-1 % fps questions in 10 minutes; nothing here can (see the counters).
+  * Limits: the effect is the scene's (standing views differ from the walk); a switch must be safe to flip at any frame;
+    effects that need seconds to build up (caches, pools) need longer blocks and settles.
+* **Causal delay per job** (`PS3_JOBDELAY=<module>:<us>[:all|main|pool][:mwait|spin]`, wws_runner.c; default off): every job
+  of that module takes <us> longer before its completion is published; `mwait` = MONITORX/MWAITX with a TSC timeout (user
+  mode on Zen 2: the thread waits in C0 without drawing power), `spin` = PAUSE. Flip it in-run with
+  `PS3_LIVEAB="PS3_JOBDELAY_US=0|<us>;..."`; the block lines carry `ev` = delays per frame. Validation on job 218: pool
+  only, 100 us (spot 2, ~16 delays a frame = +1.6 ms of burst time): frame +0.30 ms (fps -1.9 %, SE 0.7) = 0.19 ms per ms,
+  the rule of thumb's 0.2 (here without the power part). Main only, 200 us x 3.9 a frame (= 0.78 ms of the main thread's
+  own 218 time, street-still): frame +0.12 ms (SE 0.18, mwait) / -0.08 ms (SE 0.27, spin): NOT one to one -- the main
+  thread's 218 runs sit inside its waits for the anim burst (it helps while it waits), so they cost like burst work.
+* **Quick street run** (`ZONE=streetq detstreet.sh`, bench-street-quick.steps): the street route only to real 30 s after
+  the mark, measured over guest 4-20 s (the stretch every run walks: no run leaves the route): ~68 s a run instead of
+  ~142 s. Per-run sd ~0.9 % fps.
+* **The street route's split (item 5)**: at guest ~17-19 s Cole passes the cathedral gate's round stone pillar with a
+  margin of a few degrees of heading; he moves relative to the follow camera, whose heading differs a little from run to
+  run (the guest's own run-to-run variation; no long frames before the gate), so he either passes it (on to the cathedral
+  balustrade, ~8,200 draws) or runs into it / onto other walls. Open-loop nudges (route v2, v3) did not reproduce the path
+  (v2: 9 of 10 runs on ONE path, but into a wall by the steps: 5,600-6,250 draws). **Fix: closed-loop steering**
+  (`PS3_PAD_STEER=00A93440:<absolute path of work/bench/zone2/steer-ref2.txt>:160:6000:19500`, cellPad.c, bench only; the
+  game opens the file from its recording folder, so the path must be absolute): the street's copy of
+  the player position (guest 0x00A93440 = (x, y, height, 1) in cm on this save; live until guest ~20 s, when Cole leaves
+  the street) is steered toward the recorded path of an on-route run (steer-ref2.txt, made with `PS3_PAD_STEER_REC=
+  00A93440:<file>`) 600 ms ahead: **11 of 11 runs on the old route's path** (ft1-st1..11: draws per segment guest 20-30 /
+  30-40 s 8,114-8,287 / 8,071-8,282 vs the route's reference 8,241 / 8,218; shots at real 30 s vs the reference end shot
+  7.6-8.6 % of pixels differ, on-route runs of the old route 9.9-15.2 %; the unsteered route: 3 of 4 here, ~50 % over the
+  earlier batches). Timing A/B with it over the full window (light tiles off vs on, 8 rotated pairs, 16 of 16 runs on the
+  route, 38 min): -3.79 % (SE 1.27; INCONCLUSIVE by 0.02 SE), reference +3.7 % for tiles; the full window's pair sd 3.6 %
+  (the crowd at the balustrade) vs 1.4-2.5 % over guest 4-20 s. Pass it to every street run (`detstreet.sh <tag> PS3_PAD_STEER=...`;
+  both sides of an A/B). Another save, another route or a game build that moves the heap needs the address found again
+  (PS3RECOMP_ENG_MEMSNAP dumps + work/bench/ft1-posfind.py, NOTES) and a new reference run.
+* **Early stopping** (`work/bench/abseq.sh "a=<exe>[|ENV..]" "b=<exe>[|ENV..]"`, rules in abseq.py, fixed): rotated pairs
+  of quick street runs (AB, BA, ...), d = fps B/A - 1 over guest 4-20 s; from pair 3: ACCEPT at >= +3 SE, REJECT at <= -3
+  SE, NO EFFECT when the 95 % interval sits inside +-0.5 %, at 8 pairs INCONCLUSIVE; SE = max(sd, 1.2 %)/sqrt(n) (the
+  floor: two lucky pairs cannot fake a small SE). Live: light tiles off vs on REJECT at pair 3 (-2.09 %, SE 0.69) in 6.8
+  min (reference +3.2 %). Replayed on old batches (`abseq.py replay <batch .out> <a> <b>`): light tiles street (g2f) ACCEPT at
+  pair 3, plaza (g2p) at pair 4; PLACE_MAIN (m7s, -1.0 %), mg3r vs hd3 (mg3s), the controller period (mg3f, +1.4 %), M2
+  (m2s), 216 (m13s): all INCONCLUSIVE at 8 pairs (or their 4-6), as their verdicts were "within noise". With between-run
+  noise (pair sd 1.4-2.5 %) NO EFFECT within +-0.5 % is out of reach (it needs SE <= 0.2 %: ~40-150 pairs).
+* **Work counters** (`work/bench/ctrstreet.sh <tag>` = quick street run + ctr.py: perf stat per thread, cycles:u /
+  instructions:u / task-clock in 0.5 s intervals, and the SMU's power; `ctrsum.py <rec>... [-g g1:g2] [--noise]` per frame
+  and thread group over the guest window). Noise (4 runs of one binary, guest 4-20 s; sd per run): cycles per frame main
+  1.0 %, RSX 0.6 %, pool 1.3 %, SPU threads 0.6 %, other 1.0 %; instructions 0.8-1.4 %; socket power 0.12 W (0.8 %), CPU
+  0.04 W, GFX 0.08 W, clock 27 MHz; fps 0.9 %. **Rule (reject-only):** with n runs a side, a group "moves" when its
+  cycles per frame (or a power figure) differ by more than 2 x sd x sqrt(2/n) (n = 4: 1.4 x sd); reject a code change only
+  when NO group's cycles and no power figure move. Changes to scheduling, placement or waiting skip the filter (they
+  change fps without changing work). perf costs ~1-2 % fps while attached: compare counter runs only with counter runs.
+* **Builds**: `work/bench/ft1build.sh <name> <module pgo> <engine pgo> --from port` = mg3build.sh + PORT_LIFT_REUSE=1 (a lift
+  step whose inputs did not change is skipped; byte-identical lift outputs keep their old times), `SEED=<build dir>` starts
+  a new module dir as a copy (only what changed compiles). Two fixes in tools/rebuild_win.py: on Linux the lifted files'
+  old times were given back only AFTER the module compile (so every re-lift compiled all 132 module TUs, twice); the five
+  patched port files were rewritten on every build (now only when their bytes change). Measured (PGO use, 4 jobs): nothing
+  changed 1 s; one native changed 2 s (1 TU); an engine file changed 2 s; a fresh engine dir 32 s; a re-lift (lifter /
+  natives.txt / rebuild_win.py change) ppu 381 s + SPU/jobs 40 s, then only the changed files compile; the whole module
+  from scratch 411 s. Byte checks: a reverted incremental build == a full compile of the same tree (module .so identical;
+  engine identical); a fresh engine dir differs from an incremental one only in .debug_* (the build dir's path). No
+  compiler cache in the build container (none installed; not added).
+
 ### Acceptance rules (every change, agreed with the player 2026-11-18)
 
 1. Exact: SPU natives match the lifted job bit for bit (job replay exit 0, live checks 0 differences); graphics
