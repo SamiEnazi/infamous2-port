@@ -59,6 +59,8 @@ graphics thread and the SPU side were at the limit then.)
 | ... same batches: mgPr | 48.03 | 19.61 ms | 73 ms |
 | hd1 = HEAD e0c7e3d (04ddd13 + 8833293 SDL fix, mg1r), new tooling `ZONE=plaza detstreet.sh` (guest 16-100 s), `zp`+`zp2` 3 clean of 7 | **50.12** | 18.69 ms | 73.1 ms |
 | ... same batches: mgPr, 3 clean of 7 | 48.08 | 19.78 ms | 72.5 ms |
+| **hd2** = 08b19a7 (code of 3d974be: hd1 + 365fd60 help peek + 626ab72 bench clock switch) + **mg2r** profiles (R1 / M6, short tail trained), `p2z`+`p2z2` 8 rounds, label order rotated, 6 clean of 8 | **50.65** (sd 0.61) | 18.42 ms (2.40 us/draw) | 72.4 ms |
+| ... same batches: hd1 8 clean of 8 / mgPr 4 clean of 8 | 49.73 (0.84) / 48.16 (0.16) | 18.81 (2.47 us) / 19.71 (2.56 us) ms | 74.2 / 73.4 ms |
 
 **Street (zone 2, the player's autosave of 17:54: busy street by the pharmacy, toward the cathedral; 2026-11-18,
 agent zone2; section 3).** Guest 10-85 s of the walk, player's settings, GPU 1200, ~8,300 draws:
@@ -67,6 +69,21 @@ agent zone2; section 3).** Guest 10-85 s of the walk, player's settings, GPU 120
 |---|---|---|---|---|---|---|
 | mgPr, 5 clean of 9 | 45.90 (0.42) | 20.46 / 19.03 / 77.6 | 94 / 87 % | 17.49 | 14.7 | 30.3 |
 | hd1, 3 clean of 9 | **46.34** (0.45) | 20.40 / 17.86 / 77.7 | 95 / 83 % | 17.48 | 14.7 | 29.6 |
+
+PGO retrain (2026-11-19, agent pgo2): hd2 = HEAD with the mg2r profiles (section 3), batches `p2s`+`p2s2`, 12 rounds,
+label order rotated, same tooling and settings snapshot:
+
+| Build (batches `p2s`+`p2s2`) | fps (sd) | main / RSX / jobs+SPU ms per frame | busy main / RSX | GPU ms | W | p99 |
+|---|---|---|---|---|---|---|
+| mgPr, 5 clean of 12 | 45.84 (0.73) | 20.58 / 19.08 / 78.3 | 94 / 88 % | 17.43 | 14.7 | 29.2 |
+| hd1, 8 clean of 12 | 46.34 (0.68) | 20.43 / 17.71 / 76.5 | 95 / 82 % | 17.43 | 14.7 | 29.3 |
+| hd2, 5 clean of 12 | 46.08 (0.51) | 20.56 / 17.50 / 78.9 | 95 / 81 % | 17.52 | 14.7 | 29.0 |
+
+Guest 4-20 s, the stretch EVERY run walks (before the junction split; `main1-shared.sh`, n = 10 per build of `p2s`):
+mgPr 39.18 fps (sd 0.27), hd1 39.63 (0.94; 39.90 without one outlier), hd2 **40.07** (0.24); RSX 20.05 / 19.09 /
+18.63 ms, main 20.52 / 20.50 / 20.51 ms. So on the street hd2 = hd1 within noise (main-bound: the RSX saving of
+0.2-0.5 ms does not reach fps), better than mgPr; off the route at the tram junction: mgPr 7, hd1 4, hd2 7 of 12 (this
+time hd1 stayed on it most: the split is chaotic, not a property of a build).
 
 The street is **main-thread-bound**: a 2 ms busy wait per frame on the main thread costs 2.2 ms of frame time, on the
 RSX thread 0.7 ms (causal test over guest 4-20 s), so 04ddd13's RSX saving (-1.2 ms, 2.16 us per draw) gives only +1 %
@@ -104,9 +121,16 @@ func_000B1388 (deadline = mftb + f/30 s, usleep(3) polls): on the stepped clock 
 stall rule. `PS3_TB_FRAMESTEP_IDLE_US=2000` (new, bench only) lets the flipping thread's clock-polling sleeps see real
 time after 2 ms, as on the real clock (section 3).
 
+**Installed 2026-11-19 05:30: hd2** (code 3d974be, PGO mg2r) replaces mgPr in the player's folder. Backups: `<player>/work/port/installed-mgPr-20261119/` (both files) and `tools/play.sh.installed-mgPr-20261119`; older: `work/port/Infamous2Recomp.installed-4cabf54`. Smoke test of the installed files (sandbox, street route): ran and exited cleanly, no errors.
+
 Real clock, standing at spot 2 (player's settings with the 60 fps cap, GPU 1400): mgPr 57.84 fps over 30 min (5-min
 buckets 57.5-58.3, p99 19.4-19.8 ms, 17 frames > 33 ms, none > 50 ms, worst 38 ms); t13g 48.16 fps over 15 min (p99
 24.1 ms, worst 70 ms). Memory grows ~0.8 MB/min in both (pre-existing, not from the merge).
+hd2 (2026-11-19, `work/bench/stand2.sh`, the player's CURRENT settings of 17:42 -- aniso 16, soft shadows 2, SSAO 2,
+immediate present -- heavier than mgPr's run above, which had aniso 8, soft shadows 0, mailbox): 58.86 fps over 30 min
+(5-min buckets 58.3-59.1, p99 18.6-19.4 ms, 11 frames > 33 ms, none > 50 ms, worst 44 ms), exit 0, no crash / hang /
+error, RSS 680 -> 762 MB (+0.75 MB/min after 5 min), threads 55 -> 56. Control on the same settings, mgPr 15 min (standmgPr2): 57.06 fps, p99 19.9 ms, 8 frames > 33 ms
+(0.54 per minute vs hd2's 0.36), none > 50 ms, worst 39 ms. So hd2 is not less stable than mgPr (rule 3) and +3 % at the cap.
 
 Far shadow detail in normal play (2026-11-18, j6 build, real clock, 60 fps cap, player's settings and GPU clock
 1400 MHz, HUD on, one 50 s run each of the plaza walk, `sh60full` / `sh60reduced` recordings): Full 34.9 fps,
@@ -179,25 +203,52 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
       distrobox enter infamous2-build -- env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         PORT_LLVM="$E/tools-cache/llvm" PORT_CMAKE="$E/tools-cache/cmake/bin/cmake" \
         PORT_NINJA="$E/tools-cache/ninja/ninja" PORT_SDL2_DIR="$E/deps/sdl2-cmake" \
-        PORT_PGO="use:$E/work/pgo/mg1r-module.profdata" PORT_ENGINE_PGO="use:$E/work/pgo/mg1r-engine.profdata" \
+        PORT_PGO="use:$E/work/pgo/mg2r-module.profdata" PORT_ENGINE_PGO="use:$E/work/pgo/mg2r-engine.profdata" \
         PORT_JOBS=3 PORT_LIFT_JOBS=2 \
-        PORT_BUILD="$D/work/port/build-<name>" PORT_C_EXTRA="-march=znver2 -ffp-contract=off" \
+        PORT_BUILD="$D/work/port/build-<name>" PORT_ENGINE_BUILD="$D/work/port/build-<name>-eng" \
+        PORT_C_EXTRA="-march=znver2 -ffp-contract=off" \
         bash -c "cd '$D' && '$D/work/venv/bin/python' -I tools/rebuild.py --from port --only compile"
+
+  (PORT_ENGINE_BUILD: the compile step builds the engine there, default work/port/build -- never leave it unset.
+  The current profiles are mg2r (2026-11-19, below); mg1r = the installed mgPr's.)
 
   Then copy the engine exe AND `libInfamous2Game.so` (side by side) to `work/port/<tag>/` before benchmarking or
   profiling. Since the merge (1f22354): `PORT_PGO` = the game module, `PORT_ENGINE_PGO` = the engine (deck3.profdata
   is for the old single exe; before 1f22354 the build dir was build-engavx2 with `PORT_PGO=use:deck3.profdata`).
   `--from port` skips the inputs step, which would copy onto `work/EBOOT.elf` (a symlink into the player's tree).
   Profile warnings: engine `work/logs/compile-<builddir>.log`, module `<build>/module-obj/compile.log`
-  ("PGO: N function(s) changed since the profile"). Retrain: `<merge tree>/work/bench/pgotrain-mg.sh` (instrumented
-  build with `PORT_PGO=gen PORT_ENGINE_PGO=gen`, `LLVM_PROFILE_FILE=<dir>/<run>-%p-%m.profraw`, clean exit per run)
-  and `pgomerge-mg.sh` (training x3 + deck.profdata real play).
+  ("PGO: N function(s) changed since the profile"; `work/bench/pgowarn.py <log>` lists them with their discarded
+  counts).
+* PGO profiles (`E/work/pgo`; module + engine file per name; never overwrite one, a retrain gets a new name):
+  * **mg2r** (2026-11-19, agent pgo2; hd2) = mg2 training x5 + `deck.profdata` (old real play) x2. Training mix (6 runs,
+    one each, instrumented HEAD 3d974be, the player's 17:42 settings snapshot `zone2/settings-player-20261118.ini` =
+    16:10 so the short tail runs, sandbox env + 4 pool threads + play.sh's Deck env): spot 2 spin (bench-move.steps,
+    gamedata2), spot 1 standing (bench.steps, gamedata), video A and video B routes (video.steps, gamedata2, HUD on,
+    60 fps cap as vidrun.sh), the plaza walk (bench-plaza.steps, gamedata2; these 5 on the real clock = mg1's routes)
+    and **the street** (zone2/bench-street.steps + route-street.pad, zone2/gamedata3, frame-stepped clock as
+    detstreet.sh). The 5:2 weights keep the training's share of mg1r's merged counts (module 9.8 %, engine 17.9 %)
+    with the 24 % larger training (llvm-profdata weights are integers). mg2 = the training alone (weight 1).
+  * mg1r (2026-11-18; mgPr, hd1) = mg1 training (the first 5 routes, short tail off) x3 + deck.profdata x1.
+  * Retrain: instrumented build (`PORT_PGO=gen PORT_ENGINE_PGO=gen`, its own PORT_BUILD / PORT_ENGINE_BUILD, e.g.
+    work/port/build-pgogen2{,-eng}), then `work/bench/pgotrain-mg2.sh` (runs through zrun.sh = the dev tree's
+    linux_run.py: recordings in D/native/recordings, only the raws go to `E/work/pgo/train-<name>`;
+    `LLVM_PROFILE_FILE=<dir>/<run>-%p-%m.profraw` = one raw per binary per run, written at the clean exit of the
+    steps' close; ONLY=<runs> for a subset), merge with `REAL=5 REALW=2 work/bench/pgomerge-mg2.sh <name> <train dir>`
+    (training weight / real-play weight; without REAL = training only). Checks: `work/bench/pgoana.py counts
+    <profdata> <name substr>...` (a function's records and counts), `pgoana.py gain <train> <merged>` (what real play
+    adds), `pgoana.py cold <old> <new>` (what the new profile warms up); after the use build pgowarn.py on both logs
+    (expected: module 0, engine 1 = `main`, the gen build's dump code).
 * Running a merged build (engine + module): `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=1048576
   PS3_STATIC_TLS_RETRY=1` (else it re-execs and shows up as "exe", invisible to `pgrep -x Infamous2Recomp`, budget.py
   and the lock checks), `PS3_NATIVE_JOBS_THREADS=4` (play.sh sets both; the exe default is 2), and for benchmarks the
   sandbox env (`<merge tree>/work/bench/mgenv.txt`: `PS3RECOMP_VK_SHADER_CACHE`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`)
   so dev builds never write the player's config or the shared shader cache. Bench copies that do all this:
   `<merge tree>/work/bench/detab-m.sh`, `ab4.sh`, `stand.sh` (real-clock standing run), `valP.sh` (all replays).
+  Dev-tree copies that write nothing into the player's tree (2026-11-19, pgo2): `work/bench/stand2.sh <tag> <s>`
+  (`EXE=<exe dir>`; the standing run on the real clock, the player's settings snapshot with its 60 fps cap, spot 2,
+  recording in D/native/recordings, 5-minute buckets by standbuckets.py) and `work/bench/valP2.sh <exe> <tag>` (the
+  replay set on D/native/recordings/rp-* = symlinks to the player's .jrec files, so replay_report / stderr logs stay in
+  D; PS3_GAMEDATA_ROOT pointed at the sandbox).
   Fast builds leave the det route more often (5 of 14 PGO runs at the house wall near Hank's at anchor+5-7 s; the
   > 50 ms frames of those runs come after the divergence): run more rounds and discard by draws.
 * Frame-stepped clock, timed waits (2026-11-18, main1): `PS3_TB_FRAMESTEP_IDLE_US=<us>` (default 0 = off; only with
@@ -245,7 +296,8 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
   the in-game menu during the run (the HUD gets turned on): discard. The ~120 ms frames at guest 8 / 10 / 16-17 s are a
   frame-stepped-clock artifact (a guest wait for time inside a frame ends only by the 100 ms stall rule; the real
   clock shows none). Interleaved A/B: `PREFIX=<p> work/bench/abstreet.sh <rounds> "a=<exe dir>[|ENV=V ...]" "b=..."`,
-  table `python3 work/bench/ztable.py <output>`; `ZONE=plaza` = the old det plaza on the same tooling (guest 16..100 s),
+  table `python3 work/bench/ztable.py <output>` (`work/bench/abrot.sh` = the same with the label order rotated every
+  round); `ZONE=plaza` = the old det plaza on the same tooling (guest 16..100 s),
   `ZONE=street2` = a steadier variant (walk to guest 16 s, then stand + camera pans; ~41.7 fps, 1 of 6 off-route; not
   the player's pick). `work/bench/zprof.sh` = the same + perf of one thread (`PTHREAD=main|rsx|all`). Never build,
   profile-analyse or run anything heavy while a game run is going: it skews the run.
@@ -343,7 +395,7 @@ Breakdown in section 2. Ranked by the expected saving on the main thread per fra
 | M3 | Render-manager drain at the frame's end (204 x 513 at 20 us, 216 x 6 at 800 us behind a barrier): faster 204 / 216 | 0.3-0.8 | large | medium | 204 drain 0.8 + 216 barrier 0.8 ms of waiting |
 | M4 | Codegen: ctx traffic around calls (~6 % of hot guest samples) | 0.3-0.5 | large (lifter) | medium | host-stack spills (12 %) are register pressure; v20-v31 kept = no gain on SysV (section 5) |
 | M5 | Codegen: VMX special-value tests | <= 0.3 | large | high (NJ / NaN exactness) | part of the 8.5 % vector/fp alu |
-| M6 | PGO retrain (R1) with the main-thread builds | 0.2-0.5 | medium | low | help_one, usleep, ppu_timebase_now, the crash fix lost their profile |
+| M6 | DONE 2026-11-19 (pgo2, with R1): PGO retrain mg2r, build hd2 | measured 0 on the street (main 20.56 vs hd1 20.43 ms/frame, guest 4-20 s 20.51 vs 20.50), plaza -0.4 (18.98 vs 19.38) | -- | -- | the 9 changed engine functions (help_one, usleep, ppu_timebase_now, pump_messages, the crash fix's pad lock ...) have profiles again; stale after the use build: module 0, engine 1 (`main`, cold) |
 | M7 | `PS3_CPU_PLACE_MAIN=cpu` (main pinned to a CPU of its own, the sibling shared) | 0-0.5? | small (patch exists) | low | +1.6 % over guest 4-20 s in 2 runs: needs a real A/B |
 | -- | done / rejected: help-peek (neutral, section 4), HELP=2, THREADS=5, PLACE_MAIN=core, cross-manager priority, v20-v31 locals (section 5) | | | | |
 
@@ -358,7 +410,7 @@ its own breakdown. RSX candidates ranked by per-draw saving (plaza, ~7,600 draws
 
 | # | Candidate | Expected per draw | Effort | Notes |
 |---|---|---|---|---|
-| R1 | PGO retrain with the short tail on (mg2 profiles) | 0.05-0.15 us | medium (training runs, 2 builds) | fd_draw / vk_fd_record / the again path have ZERO counts in mg1r (trained at 16:10 with the short tail off): now ~80% of draws run cold code; also needed by R4 |
+| R1 | DONE 2026-11-19 (pgo2): mg2r profiles (mg1's 5 routes + the street, 16:10 snapshot), build hd2 | measured 0.04-0.07 us (street 2.14 -> 2.10, plaza 2.47 -> 2.40 us per draw vs hd1) | -- | fd_draw 1.0e8 / vk_fd_record 8.0e7 entries now (zero in mg1r); plaza **50.65 vs 49.73 fps (+1.8 %)**, street 46.08 vs 46.34 (= hd1, main-bound); R4 can now be built on mg2r |
 | R2 | Constants by draw index + multi-draw (no per-draw set bind; consecutive draws with one pipeline and set as one vkCmdDrawMultiIndexedEXT) | 0.1-0.25 us | large (VS / FS read constants at a draw-indexed base; Vulkan-only HLSL path; shader cache key) | RADV is 0.44 us per draw: draw-time flush 2.0% + DrawIndexed 1.5% + set bind; the NOBIND bound alone is ~0.09 us |
 | R3 | Index-cache successor prediction with two successors per entry (or a per-frame sequence) | 0.02-0.04 us | small (noinline helper, PGO-safe; 56 B of padding free in eng_ic_entry) | probe misses 2.0% + 0.6%: only 57.5% of links are right |
 | R4 | dl_scan with AVX2 compares (work/bench/rsx1-dlscan-simd.patch, `PS3RECOMP_ENG_DELTA_SIMD`) | ~0.04 us | small, but changes sink_end_body's PGO hash: needs R1 | rsx_draw_delta.inc:293-298 ~2% of the thread |
