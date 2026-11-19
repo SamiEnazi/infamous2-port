@@ -268,3 +268,42 @@ Every player trains their own: upstream never publishes profiles. Our PGO gain w
 **One slip:** the governor test left the CPU's energy preference at `performance` instead of `balance_performance`. Setting the governor back worked, but the driver keeps the energy preference, and only root can write it. No fps effect at the 15 W cap; slightly more battery use at light load. A reboot restores it. From now on, agents don't touch the CPU governor or any other system-wide CPU setting. The GPU clock is back at 1100 MHz.
 
 **Next:** the upstream v0.6.3 merge round, with each upstream change measured on its own against hd3.
+
+### 18:40: upstream v0.6.3 merged (deck-perf 7c3c1e8, pushed); hd4 candidate ready, not installed
+
+**What's in it:** all our changes plus everything in v0.6.3: the Flood Town freeze fix (upstream's job-runner test hangs on hd3's runner; the merged one passes all 8 cases), the controller thread, Esc = START, the Linux setup on stock SteamOS. Our optimisation files (placement, light tiles, short tail, the runtime) have no code change; the one runtime diff is upstream's comment wording.
+
+**Conflicts:** wws_runner.c (both kept: our help-peek next to upstream's checks), cellPad.c (both kept, our SDL lock reworked for the controller thread), vk_overlay.cpp (upstream's: the menu no longer calls SDL). Commits: 2335d44 (merge), 64574f3 (play.sh), 7c3c1e8 (docs).
+
+**The startup-crash fix with the controller thread** (stand-alone test program, work/bench/mg3-sdlrace.c):
+
+| Version | Runs that crash |
+|---|---|
+| v0.6.3 as released | 10 of 10 |
+| our old fix merged as is | 4 of 20 (ASan: double free in 2 of 3) |
+| the merge's lock | **0 of 20**, 0 of 10 with ~1,000 hot-plugs, ASan clean in 5 |
+
+**What upstream's additions cost** (same binary, street, guest 4–20 s, real controller on):
+
+| Setting | fps (SE) | main ms |
+|---|---|---|
+| controller thread every 1 ms (upstream's default) | 46.46 (0.26) | 19.41 |
+| no thread (the old way) | 46.58 (0.37) | 19.35 |
+| **thread every 4 ms (our Linux default now)** | **47.12** (0.22) | 19.14 |
+| Flood Town checks + stall repair off vs on (n = 8) | 46.78 vs 46.74 | 19.34 vs 19.31 |
+
+So the controller thread at upstream's 1 ms did cost us; at 4 ms it is the fastest option. The Flood Town checks cost nothing measurable. Windows keeps upstream's 1 ms.
+
+**Final A/B, hd4 candidate (work/port/mg3r, PGO retrained) vs hd3** (EPP performance in every run, replayed input):
+
+| | hd3 | hd4 candidate | Δ (SE) |
+|---|---|---|---|
+| Street, full window (clean runs) | 49.47 | 49.67 | +0.20 (0.55) |
+| Street, guest 4–20 s (8 runs) | 46.78 | 46.74 | −0.04 (0.20) |
+| Plaza, full window | 51.45 | 51.57 | +0.12 (0.53) |
+| Plaza, guest 4–20 s | 47.55 | 47.80 | +0.25 (0.29) |
+| **Standing, real controller, 60 cap, 2 × 10 min** | 59.45 / 59.52 fps, p99 19.5 ms | **59.65 / 59.69 fps, p99 18.3 ms** | faster |
+
+Equal within noise in the replayed benches. Faster with the real controller, as in play: SDL's update of the Deck's controller takes ~8 ms about once a second; hd3 does it inside the game's pad call, hd4 on its own thread. One 58 ms frame in hd4's first standing round didn't come back in the second; hd3 had none. Job replays: 213 and 216 pass 400 of 400. All 64 runs of the round exited cleanly.
+
+**Install note:** v0.6.3 rewrites an old input.toml once at first start (Esc becomes START), so back it up with the install.
