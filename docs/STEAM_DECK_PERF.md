@@ -3,6 +3,8 @@
 Status and lab notes of the Steam Deck optimisation work: what limits the frame rate, how it is measured,
 what was changed, what was tried and rejected, and what is next. The raw chronological log is
 `work/bench/NOTES.md` (local, not in git); this file is the curated summary and is kept up to date.
+Since 2026-11-19 the work continues on the local branch `deck-v063` = deck-perf + upstream v0.6.3 (section 7: the merge,
+what each upstream addition costs, the A/B against the installed hd3; build mg3r = the hd4 candidate).
 
 Hardware: Steam Deck OLED (Galileo, 90 Hz panel), Zen 2 4 cores / 8 threads, 15 W APU limit shared by CPU
 and GPU. The player's GPU clock is set manually (1400 MHz at the time of writing); benchmarks run at 1200 MHz
@@ -514,6 +516,17 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
   effective clock (user cycles / task-clock) and IPC. Settable without root: nothing per core (cpufreq / amd-pstate files
   are root-only); system-wide through steamosctl (D-Bus): CPU governor (powersave / performance = EPP balance_performance /
   performance), boost, TDP limit (3-15 W, 15 = max), CPU scheduler (none / lavd), GPU clock / performance level.
+* v0.6.3 merge round (2026-11-19, mg3; section 7): `work/bench/mg3batches.sh F|A|P|S` (the round's batches; mg3rot.sh =
+  gpu2rot2.sh with the EPP logged per run, pause file `<scratchpad>/mg3.pause`), `mg3-watch.sh <prefix>` (per run:
+  mt2-power.py PERF=0 + `mg3-padcpu.py` = CPU ms/s and context switches per thread name, anchor+12..52 s),
+  `mg3-labelsum.py <prefix> <labels>` (their means per label), `mg3table.py` (gpu2table.py + SE, and p99 / > 33 ms for
+  guest 4-20 s), `mg3build.sh <name> <module pgo> <engine pgo> <rebuild args>` (the build command above, waits for the
+  game lock), `pgotrain-mg3.sh`. SDL pads in a bench: `PS3_PAD_SDL=1` (linux_run.py sets 0); on this Deck SDL then opens
+  the physical controller through HIDAPI ("Steam Deck Controller", 28de:1205) and the game's rumble really vibrates it.
+  The sdl2-compat race outside the game: `mg3-sdlrace.c` (LOCK=0/1/2, HOTPLUG=n) with `mg3-sdlrace.sh <out> <bin> <runs>`.
+  Upstream's own tests that run here: `tests/jobrunner/test_jobrunner.py` (distrobox, PATH with E's LLVM; `--runner
+  <file> --expect-broken` for an old runner), engine/libs/input/tests/test_pad_thread.c / test_pad_hotplug.c (need stubs
+  for SDL_GetVersion and our frame-step clock hooks on Linux).
 
 ### Acceptance rules (every change, agreed with the player 2026-11-18)
 
@@ -532,6 +545,8 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
 
 | Commit | Change | Measured |
 |---|---|---|
+| (deck-v063, local) play.sh `PS3_PAD_THREAD_US=4000` | v0.6.3's controller thread every 4 ms instead of 1 ms on Linux (section 7) | ps3-pad 32 -> 13 ms of CPU a second; street guest 4-20 s 46.46 -> 47.12 fps (n = 4, 1.9 SE), SDL pads on |
+| 2335d44 (deck-v063, local) | merge of upstream v0.6.3: Flood Town runner fix + stall repair, controller thread, Esc = START, tests; our SDL lock reworked into a lock of its own for sdl2-compat's joystick list, taken by the controller thread too (section 7) | replica 0 / 20 aborts (v0.6.3 as released 10 / 10, the old lock merged as is 4 / 20); A/B vs hd3: section 7 |
 | (nothing kept; mt2, 2026-11-19) | main thread round 2: store slow path inline (`PPU_ST_LINE`, work/bench/m2-st-line.patch) and `PS3_CPU_PLACE_MAIN=cpu` (work/bench/main1-place-main.patch) measured and rejected (section 5); the tree is back at HEAD. Tools only (work/bench, not in git): m2-diag.patch (`PS3_STSTAT`), mt2-power.py / mt2-powsum.py / mt2-powwatch.sh (SMU power and clocks, perf stat per thread; section 3) | street M2 guest 4-20 s 44.96 / 44.92 / 45.09 fps (HEAD lift / inline / inline off), M7 46.96 -> 46.49 |
 | (uncommitted; work/bench/m13-216.patch, exe work/port/m13) | job 216: native selection pass 0x4D80 (new natives/spu/job216_sel_native.c, `PS3_NATIVE_J216SEL`, default 1; 0 off, 2 check mode, `J216SEL_STATS=N`): O(n^3/6) -> O(n^2) dot products (each candidate keeps its running maximum), four candidates per exact SPU helper op; BSP clipper split(): vertex sides four at a time + the crossing slots from bit masks (`PS3_NATIVE_J220_VEC`, default 1; 0 = the scalar loop, 2 = check against it) | **neutral**: 216 per job live 661 -> 595 us street, 568 -> 510 plaza (replay 415 -> 317 us); street m13s + m13t (12 rotated rounds) full window 49.80 vs 50.19 fps (4 / 6 clean of 12, main 19.41 -> 19.22 ms), guest 4-20 s 46.80 vs 47.14 (n = 12, +0.7 %, 1.5 SE; main 19.53 -> 19.32), plaza m13p 51.53 vs 51.26 (4 / 4, main 18.71 / 18.72); p99 27.1 / 27.3 (street), 23.7 / 24.0 (plaza); exact (replay 400 street jobs FULLPUT 400/400; live check 660k 0x4D80 calls and 329 M vertex sides, 0 differ). By rule 2 not a commit on its own merit; PGO: bsp / split lost their profile (changed), new TU unprofiled |
 | (uncommitted; work/bench/gpu2-lightcull.patch, exe work/port/gpu2l) | light pass per 16x16 tile (`PS3RECOMP_VK_LIGHT_CULL`, default 1; 0 = the original shader, 2 = check): a pass over 4x4-pixel position boxes and a tile pass (0.3 ms together) keep, per tile, only the lights whose sphere can reach the tile; the light shader walks those bits in order with the original loop body (rsx_vk_passes_glsl.h VK_LIGHT_GLSL, rsx_vulkan_backend.c vk_eng_light_pass) | street GPU 17.43 -> 13.17 ms (guest 4-20 s, 4 runs each), fps +3.2 %; plaza 17.58 -> 13.51 ms, 50.21 -> 51.83 fps (3 on-route rounds), +7.4 % where the GPU limited; exact (check mode: 0 bytes differ in 113 M pixels, street + plaza; end shots at noise level) |
@@ -551,6 +566,15 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
 | 4cabf54 and older | see git log (natives from the Switch fork, job 210/218/220/223 natives, draw offsets...) | |
 
 ## 5. Tried and rejected (do not retry without a new reason)
+
+* v0.6.3 merge (2026-11-19, mg3; section 7): **8833293's lock merged as it was** (the poll lock; v0.6.3's controller thread
+  does not take it) is unsafe: the replica aborts in 4 of 20 runs (v0.6.3 as released: 10 of 10). Replaced by a lock of its
+  own for the joystick list that every controller pass takes. **The controller thread under the poll lock** (the other
+  obvious fix) was not built: a pass that blocks in a driver (8 ms SDL updates of the Deck controller, a 0.5-0.8 s Bluetooth
+  open) would make the title's pad calls wait again, which is the freeze upstream's thread removes. **Upstream's 1 ms
+  controller period on Linux**: 32 ms of CPU a second on the main thread's and the pool's CPUs; 4 ms in tools/play.sh
+  (13 ms/s, +1.4 % at 1.9 SE). **Placing ps3-pad** (e.g. on the RSX core's idle sibling): not done, 13 ms/s is not worth
+  it. **`PS3_NATIVE_JOBS_NODETECT=1 HEAL=0`**: no gain (46.78 vs 46.74 fps), and they are the Flood Town fix: kept on.
 
 * Store slow path, inline line-bit test (M2, 2026-11-19, agent mt2; work/bench/m2-st-line.patch, lift switch `PPU_ST_LINE`,
   run-time `PS3_ST_LINE`; exe dirs work/port/mt2a / mt2b, no-PGO modules on both sides): counted first (`PS3_STSTAT`,
@@ -838,3 +862,128 @@ a new idea (section 5); (e) main thread (now co-limiting), GPU / power. Items 0,
 6. Graphics thread +1.4% with t13d (not consistent between batches): check with a longer A/B (2026-11-18: rb0 cut
    short, inconclusive; see the table above).
 7. Large, risky: WWS job manager natively (~7% SPU); Edge geometry on the GPU (~16% SPU).
+
+## 7. Upstream v0.6.3 merge (2026-11-19, agent mg3; branch `deck-v063`, NOTES.md "v0.6.3 merge (agent mg3)")
+
+v0.6.3 (1f407ee, with 6e7addd) on top of deck-perf 4a30160: the "Powering Up Flood Town" freeze fix in the native job
+runner, cellPad's controller thread, Esc = START, the Windows "Optimise for this PC", the Linux setup on stock SteamOS,
+upstream tests. The rule of the round: keep every upstream fix and every Deck optimisation, and measure whatever upstream
+adds to a hot path on the same binary with its switch (so PGO does not enter the per-feature numbers). EPP was
+`performance` (left by mt2) in every run of the round.
+
+**Conflicts and resolutions (merge commit 2335d44).**
+
+| File | Ours | Theirs | Resolution |
+|---|---|---|---|
+| engine/libs/spurs/wws_runner.c | help peek 365fd60 (`PS3_NATIVE_JOBS_HELP_PEEK`) | Flood Town fix: the claim path also checks the active array / table version / finished-prefix word (a manager re-created at the same address), `PS3_NATIVE_JOBS_HEAL` stall repair, `PS3_NATIVE_JOBS_NODETECT` | both. Upstream's tests/jobrunner passes on the merged runner (8 of 8, the repair included); on hd3's runner it shows the hang (`--expect-broken`: 3 HANG + 1 FAIL as expected) |
+| engine/libs/input/cellPad.c | 8833293: the window pump drains SDL's queue under cellPad's poll lock (try-lock) | the controller thread (SDL work every 1 ms on its own thread, `SDL_HINT_AUTO_UPDATE_JOYSTICKS=0`), the slow-call log | both, and our lock reworked: a lock of its own for sdl2-compat's joystick list, taken by every controller pass too (below) |
+| engine/libs/video/vk_overlay.cpp (pads_refresh) | SDL_NumJoysticks under the try-lock | the menu's controller list from cellPad's snapshot | theirs: no SDL call left there |
+| rsx_vulkan_backend.c, tools/play.sh | batched pump drain; `PS3_NATIVE_JOBS_THREADS=4`, static TLS | Esc = START; the container note | merged cleanly |
+
+Everything else upstream changed is comments (the lifted code, the natives and spu_patches.txt are unchanged: the
+module's sources are the same), Windows-only tools / libc table, the input map's layout 2 (an old input.toml is moved
+to Esc = START once and written back at the first start: the player's file will change at install) and new tests.
+
+**The SDL race with the controller thread.** v0.6.3 moves every SDL controller call (SDL_GameControllerUpdate = SDL's
+device detection, the hot-plug scan with SDL_NumJoysticks and the opens, rumble, the state reads) onto a thread of its
+own, every 1 ms, so a slow driver no longer stalls the game. That is one more thread in sdl2-compat's unlocked joystick
+list (section 2, the startup crash), and 8833293's lock was cellPad's poll lock, which the new thread never takes.
+Replica outside the game (work/bench/mg3-sdlrace.c: the window pump, cellPadInit / End 200 times a run, the controller
+thread; the system's sdl2-compat 2.32.70 over SDL3 3.4.12, Steam's virtual pad):
+
+| Variant | Runs that abort |
+|---|---|
+| v0.6.3 as released (no lock anywhere) | 10 of 10 |
+| 8833293 merged as is (init and pump locked, the controller thread not) | 4 of 20 |
+| the merge's fix (every controller pass under the same lock) | **0 of 20** (4,000 init cycles, ~81,000 passes) |
+| the merge's fix with a pad plugged in / out every 10 passes (virtual pad, ~1,000 hot-plugs) | **0 of 10**; under ASan 0 memory errors in 5 |
+| 8833293 as is, with hot-plug / under ASan | 1 of 5 abort / 2 of 3 "attempting double-free" (the thread's SDL_NumJoysticks vs the pump) |
+
+The fix (in the merge commit): a lock of its own for the joystick list (cellPad.c `s_sdl_list_lock`, behind
+`cellPad_host_sdl_trylock`) around every controller pass, the thread's device list and closes, cellPadInit's SDL work,
+and the `PS3_PAD_THREAD=0` in-call pass and its rumble; the RSX pump keeps its try-lock. Not the poll lock, so a pad
+call of the title never waits for a pass that blocks in a driver (upstream's test_pad_thread.c, slow fake SDL: slowest
+pad call 0.13 ms with the lock). Even with joystick events off, the pump still takes some out of the queue (145 in the 20
+fixed runs, 2,372 in the 10 hot-plug runs), and sdl2-compat converts each with SDL_NumJoysticks, so the lock matters in
+play, not only at start. In
+steady state it skips 2 % of the pump's passes (those events wait 4 ms more).
+
+**What each upstream addition costs (same binary mg3r, switches; street, guest 4-20 s, n = 4 per label, batch mg3f).**
+
+| Switch (all with SDL pads on, `PS3_PAD_SDL=1`) | fps (se) | main ms | ps3-pad CPU | Verdict |
+|---|---|---|---|---|
+| controller thread, upstream's 1 ms (`PS3_PAD_THREAD_US=1000`) | 46.46 (0.26) | 19.41 | 32 ms/s (755 passes of 42 us) | costs 3.2 % of a CPU on the CPUs main and the pool share |
+| no thread, SDL inside the pad call (`PS3_PAD_THREAD=0`, = v0.6.2) | 46.58 (0.37) | 19.35 | -- | = the 1 ms thread within noise |
+| thread every 4 ms (`PS3_PAD_THREAD_US=4000`) | **47.12** (0.22) | 19.14 | 13 ms/s (234 passes of 55 us) | +1.4 % vs 1 ms (1.9 SE); **now the Linux launcher's default** |
+| (hd3 with SDL pads on, its in-call reads) | 45.82 (0.41) | 19.80 | -- | reference |
+
+The bench itself runs without SDL pads (linux_run.py `PS3_PAD_SDL=0`), so the thread is absent from every other table;
+these runs had the Deck's own controller open through SDL's HIDAPI driver. Power and clock did not move between the
+variants (14.93 W, 2,940-2,970 MHz). `PS3_PAD_THREAD_US=4000` (tools/play.sh, Linux only; Windows keeps upstream's 1 ms)
+makes the snapshot a pad call reads at most ~4 ms old, the bound set for this round, against v0.6.2's at most 1 ms. The
+thread stays unplaced (it inherits CPUs 0-5; the rsxcore sweeper keeps it off the RSX core): at 13 ms of CPU a second
+there is nothing to place.
+
+**The runner's new checks (same binary).** `PS3_NATIVE_JOBS_NODETECT=1 PS3_NATIVE_JOBS_HEAL=0` (= the v0.6.2 claim path, no
+repair) vs the defaults, street batch mg3s, 8 rounds: guest 4-20 s 46.78 vs 46.74 fps (se 0.17 / 0.12), full window
+49.78 (n = 3) vs 49.67 (n = 4), main 19.34 vs 19.31 ms: nothing measurable (a few guest loads per claim). `PS3_NATIVE_JOBS_HEAL`
+alone runs the same instructions until a wait has made no progress for 1 s; no run of the round logged a `[jobs] WARN` or
+a repair. Kept as upstream wrote it (it is the Flood Town fix).
+
+**PGO retrain (mg3r).** As NOTES.md describes for mg2r: instrumented build of 2335d44, the same six training runs (spot 2
+spin, spot 1, video A / B, plaza, street; this time the street run left the route at the junction), training x5 +
+deck.profdata x2; profiles E/work/pgo/mg3{,r}-{module,engine}.profdata. Use build: module 0 stale functions, engine 1
+(`main`). The runner's changed functions (wait_until, hook_token_test, claim) are warm again; with mg2r they compiled cold.
+
+**Final A/B vs hd3 (exe work/port/gpu2l2, installed; mg3r = work/port/mg3r), rotated rounds, `PS3_TB_FRAMESTEP_IDLE_US=2000`,
+GPU 1200 MHz, EPP performance, SDL pads off (replayed input).**
+
+| | hd3 | mg3r | difference (SE) |
+|---|---|---|---|
+| Street (mg3s, 8 rounds), full window, clean runs: fps (n) | 49.47 (5) | 49.67 (4) | +0.20 (0.55) |
+| ... main / RSX / SPU ms, p99, frames > 33 ms per run | 19.44 / 16.80 / 73.4, 28.2, 3.4 | 19.34 / 17.07 / 73.2, 28.9, 4.5 | |
+| Street, guest 4-20 s, all 8 runs: fps | 46.78 | 46.74 | -0.04 (0.20) |
+| ... main / RSX ms, p99, frames > 33 ms per run | 19.38 / 18.14, 34.5, 5.5 | 19.31 / 18.27, 33.5, 5.0 | |
+| Plaza (mg3p, 6 rounds), full window, clean runs: fps (n) | 51.45 (6) | 51.57 (5) | +0.12 (0.53) |
+| ... main / RSX / SPU ms, p99, frames > 33 ms per run | 18.58 / 18.09 / 70.7, 24.4, 1.0 | 18.52 / 18.12 / 69.7, 24.4, 0.8 | |
+| Plaza, guest 4-20 s, all 6 runs: fps; main / RSX ms; p99, frames > 33 ms per run | 47.55 (se 0.11); 19.87 / 19.29; 30.4, 2.5 | 47.80 (se 0.27); 19.63 / 19.20; 30.3, 2.7 | +0.25 (0.29) |
+| Power, all-core clock (street, anchor+12..52 s) | 14.93 W, 2,949 MHz | 14.93 W, 2,943 MHz | |
+| With SDL pads on (mg3f, street, guest 4-20 s, n = 4): hd3 in-call vs mg3r with the 4 ms thread | 45.82 (se 0.41), main 19.80 | 47.12 (se 0.22), main 19.14 | +1.30 (0.47) |
+
+Off the route at the tram junction: hd3 3, mg3r 4 of 8 (street); plaza 0 / 1 of 6 (all paths replayed as usual).
+
+**Standing at spot 2 (stand2.sh, real clock, the player's settings with the 60 fps cap, GPU 1100 MHz, EPP performance,
+SDL pads ON for both = real play: hd3 reads the Deck's controller inside the pad call, mg3r on the controller thread at
+the launcher's 4 ms; both builds back to back, two rounds, order rotated, 10 min each; the earlier 59.72 fps of hd3 was
+EPP balance_performance and SDL off, not comparable).**
+
+| Run (order) | fps | p99 mean | frames > 33 / > 50 ms | worst | socket W, all-core MHz | RSS growth after 5 min |
+|---|---|---|---|---|---|---|
+| mg3r round 1 (first) | 59.65 | 18.4 | 2 / 1 | 58 ms (one frame, t = 371 s; nothing in the log there) | 14.95, 3,000 | +5.7 MB |
+| hd3 round 1 | 59.45 | 19.6 | 3 / 0 | 40 ms | 14.95, 2,990 | +6.0 MB |
+| hd3 round 2 (first) | 59.52 | 19.5 | 3 / 0 | 41 ms | 14.97, 3,000 | +4.1 MB |
+| mg3r round 2 | 59.69 | 18.3 | 3 / 0 | 38 ms | 14.94, 3,010 | +4.3 MB |
+| **20 min each** | **mg3r 59.67, hd3 59.49** | **18.35 vs 19.55** | **5 / 1 vs 6 / 0** | | | |
+
+Even capped at 60 fps the socket sits at the 15 W limit. mg3r holds 60 a little better and its p99 is 1.2 ms lower in
+both rounds. A likely reason, seen with `PS3_PAD_SLOW_LOG=1` in mg3r's round 2: about 1.2 times a second, SDL's update of
+the Deck controller (HIDAPI) takes 7.6-8.2 ms (730 passes over 10 min, all in "SDL update + device detection"). hd3 makes
+that call inside the game's pad call, so the polling thread waits for it; mg3r makes it on the controller thread, and no
+pad call waits (upstream's "controller freezes"). mg3r's single 58 ms frame (round 1) did not come back in round 2.
+Every run exited cleanly.
+
+**Exactness.** Job replays on mg3r (valP2.sh): the pass / fail table and every native line are the same as hd2's (204
+1960/1960 FULLPUT, 210 / 218, 211 / 220, 223, mgrec; 208's known nx_208 replay limit unchanged), and m13's street jobs
+recorded by the runner pass too (213 400/400, 216 400/400, FULLPUT). Upstream changed no native and no job code. The
+runner's claim logic is covered by tests/jobrunner (above).
+
+**Verdict.** mg3r (work/port/mg3r: deck-v063 2335d44 + the mg3r profiles; with tools/play.sh of 64574f3) is as fast as
+hd3 everywhere within noise, with its SE stated: street guest 4-20 s -0.04 fps (SE 0.20), full window +0.20 (SE 0.55);
+plaza full window +0.12 (SE 0.53), guest 4-20 s +0.25 (SE 0.29). With SDL pads on (real play) it is faster: street guest
+4-20 s +1.30 fps (SE 0.47), standing p99 1.2 ms lower. There is no new stutter in the det benches (p99 / slow frames
+equal) and no crash or hang in any of the round's 64 game runs (44 of the merged build: smoke, training, F, A, P, standing), all exit 0 by themselves. The one 58 ms frame in 20 min of mg3r standing (hd3: worst 41 ms)
+did not repeat in the second round. Upstream's additions cost nothing measurable except the controller thread's 1 ms
+period, which the Linux launcher now sets to 4 ms. It brings the Flood Town fix (hd3 hangs in upstream's re-creation
+test) and the SDL race fix for the controller thread. **hd4 candidate: work/port/mg3r** (engine + libInfamous2Game.so,
+with tools/play.sh of 64574f3). At install: v0.6.3 migrates the player's input.toml to Esc = START once and writes it
+back, and the in-game rumble now runs on the controller thread.
