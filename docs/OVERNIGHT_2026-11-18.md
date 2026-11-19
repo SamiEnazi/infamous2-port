@@ -175,6 +175,33 @@ The 30-minute standing run at spot 2 (same test as hd2's 58.9 fps) is running. S
 
 You approved (09:10) installing hd3 once the standing test passes, and setting the GPU clock to manual 1100 MHz after it.
 
+### 09:30: hd3 installed, GPU clock set to 1100 MHz
+
+**30-minute standing test at spot 2** (real clock, 60 fps cap, your settings, 1400 MHz like hd2's test):
+
+| | hd2 | hd3 |
+|---|---|---|
+| fps over 30 min | 58.86 | **59.31** |
+| fps, minutes 5–30 | 58.81 | **59.36** |
+| Frames over 50 ms, minutes 5–30 | 0 | 0 |
+| Worst frame, minutes 5–30 | 44 ms | 42 ms |
+
+- **First 5 minutes:** 12 frames over 50 ms (worst 89 ms). They came at the exact seconds I was committing and publishing and the jobs agent was starting, so the cause was activity on the Deck, not the game.
+- **Check run** (10 min, the installed files, 1100 MHz, nothing else running): **59.72 fps, 0 frames over 50 ms, worst 41 ms**, 5 frames over 33 ms. Clean start and exit, same log lines as before.
+- **Lesson:** during a measurement run I now do nothing else either, including commits and publishing.
+
+**Installed:** `work/port/build/Infamous2Recomp` = hd3 (deck-perf 130be5d, sha 4f660ac1…). The game module is unchanged, the same file as hd2's (sha 510aee90…).
+
+**GPU clock:** manual 1100 MHz (`steamosctl set-manual-gpu-clock 1100`). If Steam's per-game performance profile is on for the game, set 1100 there too.
+
+**To go back to hd2:**
+- copy both files from `work/port/installed-hd2-20261119/` into `work/port/build/`;
+- the launcher only gained a comment line; its backup is `tools/play.sh.installed-hd2-20261119`.
+
+### 09:40: jobs round running
+
+Faster jobs 213 / 218 / 204 / 216 (main thread, M1 / M3); estimated −0.8 to −2.3 ms on the main thread.
+
 ### Roadmap addition (09:15, your decision)
 
 **At the very end, when the implementation is final:** a one-step PGO training for Linux and Deck players, like upstream's Windows "Optimise for this PC" (`tools/setup_build.ps1 -Pgo`, `tools/pgo_train.ps1`):
