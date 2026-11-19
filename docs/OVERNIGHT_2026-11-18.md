@@ -349,3 +349,13 @@ Until now each install replaced only the two game files and patched your old lau
 **New finding for the roadmap:** the main thread's own 218 jobs don't count one for one. A 0.78 ms delay there cost only +0.12 ms of frame time, because those jobs run inside its waits for the bursts. So job 218 ~10 % faster is worth about +0.3–0.4 ms of frame (~+2 % fps), through capacity and power, not the 0.35–0.5 ms one for one.
 
 **HUD:** on in every test run from 19:30 (your request). Its cost is below noise (fps +0.5 %, SE 1.2).
+
+### 20 Nov 01:10: step 1, job 218: faster and exact, but no fps; parked
+
+- **Per job:** −8.6 % on the street (269.9 → 246.6 µs), −8.2 % on the plaza. About 1.5 ms less job CPU a frame.
+- **Exact:** 800 of 800 recorded jobs, and 0 of 7 M live calls differ.
+- **Changes:** a zero-weight shortcut in the blend, the FK first pass without per-op flushes, and a native for 0x17280. The model for that native comes from the Switch fork (MIT, credited).
+- **fps:** no change. Quick street −0.01 % (SE 0.61), plaza +0.38 % (SE 0.53). In-run, the main thread doesn't move.
+- **What it shows:** the freed job-thread time just turns into idle spin. This is the second job speed-up after 216 that doesn't reach the main thread. Making jobs faster is not the lever by itself. What the main thread actually waits for is the open question, and that's what step 2, the sizing, now has to answer before anything else gets built.
+- **Parked** as work/bench/j218-natives.patch, so it can still be a candidate in the combined round (step 6).
+- **Side note:** in replays, HEAD's engine runs 218 about 3 % slower than hd4's. To check before the next engine install.
