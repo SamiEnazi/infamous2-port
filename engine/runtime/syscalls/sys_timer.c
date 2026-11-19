@@ -17,6 +17,7 @@
  * -----------------------------------------------------------------------*/
 sys_timer_info g_sys_timers[SYS_TIMER_MAX];
 #include "../../include/ps3emu/ps3_limits.h"   /* PS3RECOMP_LIMITS: runtime gauges */
+extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 static ps3_lim s_lim_timer = PS3_LIM_INIT("timer", SYS_TIMER_MAX);
 
 #ifdef _WIN32
@@ -90,12 +91,34 @@ static _Atomic uint64_t s_fs_flip_real;    /* the real timebase at the last flip
 #define FS_STALL_TICKS (PS3_TIMEBASE_FREQ / 10)    /* 100 ms */
 static uint64_t ppu_timebase_now_real(void);
 
+/* (main1) PS3_TB_FRAMESTEP_IDLE_US=<us> (default 0 = off): a timed wait of the frame's own thread. The
+ * frame-stepped clock stands still inside a frame, so a guest wait for an mftb deadline inside a frame (inFAMOUS 2's
+ * 0xB1388: deadline = mftb + f x 1/30 s, usleep(3) polls until then unless three flags of its object allow an early
+ * exit) could only end by the 100 ms stall rule above: the street bench's fixed ~120 ms frames at guest 8 / 10 /
+ * 16-17 s. With this set, the thread that flips (the frame's producer), once it has polled with sleeps and mftb reads
+ * for longer than <us> real time in one frame, sees the clock flow with real time from the start of those polls, so
+ * the wait ends after its own length, as on the real clock. Shorter waits (and every other thread) see the stepped
+ * clock as before. Real clock (no PS3_TB_FRAMESTEP_US): nothing changes. */
+static uint64_t s_fs_idle_ticks;               /* 0 = off */
+static _Atomic uint64_t s_fs_flip_thr;         /* the flipping PPU thread's id + 1 */
+static PPU_THREAD_LOCAL uint64_t t_run_r0, t_run_v0, t_run_last, t_run_base;   /* this thread's sleep-poll run */
+static PPU_THREAD_LOCAL uint32_t t_run_reads;  /* mftb reads right after its sleeps */
+#define FS_RUN_GAP_TICKS (PS3_TIMEBASE_FREQ / 1000)   /* a run ends after 1 ms without a sleep */
+#define FS_POLL_TICKS (PS3_TIMEBASE_FREQ / 3333)      /* a read within 300 us of a sleep's end polls the clock */
+#define FS_POLL_MIN 8                                 /* clock polls before a run counts as a wait on time */
+
 static void ppu_fs_env(void)
 {
     static _Atomic int done;
     if (atomic_load_explicit(&done, memory_order_acquire)) return;
     const char* e = getenv("PS3_TB_FRAMESTEP_US");
     if (e && atoll(e) > 0) s_fs_ticks = (uint64_t)atoll(e) * PS3_TIMEBASE_FREQ / 1000000ull;
+    const char* ie = getenv("PS3_TB_FRAMESTEP_IDLE_US");
+    if (s_fs_ticks && ie && atoll(ie) > 0) {
+        s_fs_idle_ticks = (uint64_t)atoll(ie) * PS3_TIMEBASE_FREQ / 1000000ull;
+        fprintf(stderr, "[timer] PS3_TB_FRAMESTEP_IDLE_US=%lld: the flipping thread's timed waits over that long see real time\n",
+                atoll(ie));
+    }
     atomic_store_explicit(&done, 1, memory_order_release);
 }
 int ppu_timebase_framestep_arm(void)
@@ -116,6 +139,7 @@ int ppu_timebase_framestep_arm(void)
 void ppu_timebase_frame_tick(void)
 {
     if (!atomic_load_explicit(&s_fs_armed, memory_order_relaxed)) return;
+    if (s_fs_idle_ticks && g_active_ctx) atomic_store_explicit(&s_fs_flip_thr, g_active_ctx->thread_id + 1, memory_order_relaxed);
     /* the next frame starts a step after this one, or where a stalled clock already got to */
     uint64_t cur = atomic_load(&s_fs_now);
     uint64_t base = atomic_load(&s_fs_base) + s_fs_ticks;
@@ -136,6 +160,16 @@ uint64_t ppu_timebase_now(void)
     if (__builtin_expect(atomic_load_explicit(&s_fs_armed, memory_order_relaxed), 0)) {
         uint64_t v = atomic_fetch_add(&s_fs_now, 1) + 1;
         const uint64_t r = ppu_timebase_now_real(), lf = atomic_load(&s_fs_flip_real);
+        if (__builtin_expect(s_fs_idle_ticks != 0, 0) && t_run_r0 && t_run_base == atomic_load(&s_fs_base) &&
+            (int64_t)(r - t_run_last) < (int64_t)FS_POLL_TICKS && ++t_run_reads >= FS_POLL_MIN &&
+            r - t_run_r0 > s_fs_idle_ticks) {
+            /* (main1) the frame's thread has polled the clock between sleeps for longer than IDLE (a wait on time,
+             * not on another thread: 0x13ACE8's wait for the RSX sleeps without reading the clock): real time flows */
+            const uint64_t floor = t_run_v0 + (r - t_run_r0);
+            uint64_t cur = v;
+            while (cur < floor && !atomic_compare_exchange_weak(&s_fs_now, &cur, floor)) { }
+            if (v < floor) v = floor;
+        }
         if (r > lf + FS_STALL_TICKS) {                     /* a stall: real time from the frame's start */
             const uint64_t floor = atomic_load(&s_fs_base) + (r - lf - FS_STALL_TICKS);
             uint64_t cur = v;
@@ -224,9 +258,22 @@ static void write_be64(uint32_t addr, uint64_t val)
  *
  * r3 = microseconds
  * -----------------------------------------------------------------------*/
+/* (main1) PS3_TB_FRAMESTEP_IDLE_US: the flipping thread's sleep-poll run (see above) */
+static void fs_note_sleep(const ppu_context* ctx, uint64_t usec)
+{
+    if (!atomic_load_explicit(&s_fs_armed, memory_order_relaxed) ||
+        ctx->thread_id + 1 != atomic_load_explicit(&s_fs_flip_thr, memory_order_relaxed)) return;
+    const uint64_t r = ppu_timebase_now_real(), base = atomic_load(&s_fs_base);
+    if (!t_run_r0 || t_run_base != base || (int64_t)(r - t_run_last) >= (int64_t)FS_RUN_GAP_TICKS) {
+        t_run_r0 = r; t_run_v0 = atomic_load(&s_fs_now); t_run_base = base; t_run_reads = 0;
+    }
+    t_run_last = r + usec * PS3_TIMEBASE_FREQ / 1000000ull;   /* the sleep's expected end */
+}
+
 int64_t sys_timer_usleep(ppu_context* ctx)
 {
     uint64_t usec = LV2_ARG_U64(ctx, 0);
+    if (__builtin_expect(s_fs_idle_ticks != 0, 0)) fs_note_sleep(ctx, usec);
     { extern unsigned long long ps3_qpc_us(void);
       static int n=0; if (PS3_LOG_FIRST(n, 60))
         fprintf(stderr, "[WAIT] t=%lluus timer_usleep(%llu us) lr=0x%08llX cia=0x%08llX\n", ps3_qpc_us(),
