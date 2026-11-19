@@ -41,6 +41,30 @@ ran the long tail. Fixed behind `PS3RECOMP_ENG_FASTDRAW_HUD` (section 4 / 6).
 (Old build 6b300ea, ~42 fps: graphics thread 21.4 ms, SPU threads ~96 ms, main ~19 ms, GPU 15.3 ms; both the
 graphics thread and the SPU side were at the limit then.)
 
+### GPU on the street (2026-11-19, agent gpu2; NOTES.md "GPU cost on the street")
+
+hd2 with the player's 17:42 settings snapshot, GPU 1200 MHz, `PS3_TB_FRAMESTEP_IDLE_US=2000`, measured with the
+measurement build gpu2m (`PS3RECOMP_VK_GPU_PROF=2`: every timestamp interval labelled with the pass it belongs to -- an
+engine pass by its targets and their guest addresses, a backend pass by its kind -- with its draws; patch
+work/bench/gpu2-prof.patch, summed by work/bench/gpu2pass.py) over guest 4-20 s of the street walk (the stretch every run
+shares): **17.3 ms of GPU per frame**.
+
+| Pass (what it is) | GPU ms per frame | Share | Notes |
+|---|---|---|---|
+| Light pass (backend: the game's SPU light job, done on the GPU over the whole screen) | 5.05 | 29 % | every light of the frame (83-129 on the street) for every pixel; **~0.75 ms with the light tiles (section 2)** |
+| G-buffer: 3-target passes at 0x00AB8000 (~1,960 draws, 2.24 ms), 4-target decal passes (~455 draws, 0.46), rest | 2.93 | 17 % | |
+| Sun shadow maps 2048x2048 (Shadow quality High; 3 cascades, ~4,500 depth-only draws) 1.40 + their R32F copies for the shadow receivers (3 x 0.23) + gaps | 2.15 | 12 % | the copies exist because the zeta is a 1280-wide buffer and the shadow texture its 1024x1024 corner |
+| Forward / composite into 0x011C0000 (~800 draws, 6.8 passes) | 1.77 | 10 % | |
+| Post buffers 0x003B0000 / 0x00734000 (~50 draws each) | 1.35 | 8 % | the game's post chain (depth of field / edge blur / glow composite) |
+| SSAO "Full, high" (full-res depth 0.08, 24-sample AO 0.86, blur h 0.14, blur v 0.14) | 1.22 | 7 % | |
+| FXAA + CAS sharpening at present 0.54, window blit 0.07, present gap 0.08 | 0.69 | 4 % | |
+| Depth-as-RGBA8 decodes (4.9 a frame) + an R32F depth copy | 0.56 | 3 % | |
+| Small passes: half-res depth export 0.23, 0x00B9E000 0.17, 0x00E3C000 0.17, a 1280x180 pass 0.15, water reflection 256x256 0.24, glow / blur chain 320x180 .. 20x11 0.37, gaps | ~1.4 | 8 % | |
+
+Barriers: ~100 full + ~115 image barriers a frame; leaving the redundant image ones out (`PS3_RSX_BARBATCH=1`) saves no GPU
+time (section 5). The street's draws per frame (PS3RECOMP_ENG_PASSSTATS): ~7,800, of which ~4,700 depth-only into the sun
+shadow zeta 0x0F2F0000 (cascade runs ~4 / 195 / 950 / 3,510), G-buffer 1,340-1,550 + 200-270 (4 targets), forward ~1,050.
+
 ## 2. Results so far (det bench, player settings, plaza)
 
 | Build | fps | Graphics thread | SPU work |
@@ -161,6 +185,99 @@ double free), the next small malloc aborts. Rare (1 in 33 sessions), at start or
 upstream v0.6.2 have it too; the benches never reach it (PS3_PAD_SDL=0). Reproduced outside the game (20/20 runs abort,
 ASan: double free, pump thread vs SDL_InitSubSystem) and traced in the game. Fix in commit 8833293:
 the pump and the menu's controller list take cellPad's lock (try-lock; a busy pass is skipped).
+
+**What each graphics setting costs on the street (2026-11-19, agent gpu2).** hd2, GPU 1200 MHz,
+`PS3_TB_FRAMESTEP_IDLE_US=2000`, one setting changed at a time from the player's 17:42 snapshot (aniso 16, shadow softness
+2 "Softer", SSAO 2 "Full, high", shadow quality High (2048), effects resolution Full, 720p, FXAA + CAS 0.10, DOF and edge
+blur on). About half the street runs leave the route at the tram junction (onto other, fixed paths), so every setting is
+measured over guest 4-20 s, the stretch every run walks (all runs), and over the full window (guest 10-85 s) on the runs
+that stayed on the route. Batches g2a / g2b / g2c / g2f, 3-7 runs per setting (work/bench/gpu2/settings-table.txt).
+
+| Setting (from the player's) | GPU ms/frame, guest 4-20 s (runs) | GPU saved | fps, guest 4-20 s | main / RSX ms | full window, on-route runs: n, fps, GPU ms |
+|---|---|---|---|---|---|
+| none (the player's settings) | 17.32 (7, sd 0.32) | -- | 45.43 | 20.14 / 18.53 | 4: 48.64, 17.27 |
+| Texture filtering 16x -> 8x | 17.33 (3) | 0 | 45.61 | 20.03 / 18.67 | 1: 47.44, 17.31 |
+| Texture filtering -> Off | 16.90 (3) | 0.4 | 45.30 | 20.15 / 18.74 | 1: 47.24, 17.09 |
+| Shadow softness Softer (2) -> Soft (1) | 17.10 (4) | 0.2 | 45.92 | 20.00 / 18.39 | 0 |
+| Shadow softness -> PS3 (0) | 17.10 (3) | 0.2 | 45.86 | 19.94 / 18.53 | 3: 47.89, 17.15 |
+| Ambient occlusion Full, high (2) -> Full (1) | 17.15 (3) | 0.2 | 45.23 | 20.19 / 18.55 | 3: 47.72, 17.03 |
+| Ambient occlusion -> PS3 (0) | 16.80 (2) | 0.5 | 45.61 | 19.88 / 18.50 | 0 |
+| Shadow quality High (2048) -> PS3 (1024) | 16.18 (3) | **1.1** | 46.15 | 19.79 / 18.52 | 1: 47.51, 16.21 |
+| Effects resolution Full -> As game | 16.86 (3) | 0.5 | 45.73 | 19.97 / 18.72 | 0 |
+
+* No setting moves fps on the street: the main thread limits (~20 ms of a ~22 ms frame in the shared stretch; fps sd
+  0.3-0.8 between runs) and the GPU is ~75-80 % busy at 1200 MHz. A GPU saving here only buys headroom (busier views, a
+  lower GPU clock), not fps. Power is at the 15 W cap in every run (15.0-15.1 W).
+* The only setting with a sizeable GPU cost is **Shadow quality** (High -> PS3 saves ~1.1 ms: the maps and their copies
+  are 4x smaller). Everything else is worth 0.5 ms or less each; texture filtering 16x vs 8x costs nothing measurable,
+  shadow softness and SSAO "Full, high" vs "Full" ~0.2 each. Differences under ~0.3 ms are within the base's run-to-run
+  spread.
+* Not run separately (small in the breakdown above): anti-aliasing (FXAA) + sharpening (CAS) 0.54 ms together, the glow /
+  blur chain ~0.4 ms, depth of field and edge blur (terms of the game's post pass, 1.35 ms for the whole pass). Internal
+  resolution is already the lowest (720p). Upscaling (FSR) does not run: the window is the game image's size (the
+  player's swapchain is 1152x720 in Game Mode, the bench's window 1152x718).
+* End shots (cathedral balustrade, real 100 s after the start; people walk, compare the lighting and the stone):
+  work/bench/gpu2/shots/street-end-base-player-settings.png, -aniso-8, -aniso-off, -soft-shadows-0-PS3, -ssao-1-full,
+  -ssao-0-PS3 (that run had the HUD on: the menu was opened during it, numbers discarded), -shadow-quality-PS3-1024.
+* Side note: the player's sessions load the lsfg-vk layer (Lossless Scaling frame generation; decky plugin, its config has
+  multiplier 1); the bench runs without it, so whatever it costs is not in these numbers.
+
+**GPU clock on the street (2026-11-19, gpu2; hd2, player's settings, same batches; detstreet.sh sets the clock per run and
+puts the player's back).**
+
+| GPU clock | fps, on-route runs (n) | fps, guest 4-20 s (n) | GPU ms/frame (busy) | main ms, 4-20 s | frames > 33 ms per run | W |
+|---|---|---|---|---|---|---|
+| 1000 MHz | 47.96 (2) | 45.93 (4) | 20.27 (94 %) | 19.48 | 5.0 | 15.1 |
+| 1100 MHz | 49.47 (1) | 45.78 (3) | 18.57 (84 %) | 19.91 | 4.0 | 15.1 |
+| 1200 MHz | 48.64 (4) | 45.43 (7) | 17.27 (78 %) | 20.14 | 4.2 | 15.0 |
+| 1400 MHz (the player's) | 45.15 (2) | 43.17 (4) | 15.39 (61 %) | 21.19 | 6.5 | 15.0 |
+| 1600 MHz | 44.03 (1) | 41.42 (3) | 14.09 (62 %) | 22.17 | 5.0 | 15.1 |
+
+At 1400 and 1600 MHz the GPU takes power the CPU needs (main thread +1.1 / +2.0 ms per frame): -7 % / -10 % fps vs 1200.
+At 1000 MHz the GPU becomes the limit on the full walk (94 % busy, 20.3 ms). With the light tiles below (exe
+work/port/gpu2l, batch g2g + g2f, same settings) the GPU needs ~4 ms less and the optimum moves down:
+
+| GPU clock, light tiles | fps, on-route runs (n) | fps, guest 4-20 s (n) | GPU ms/frame (busy) | main ms, on route |
+|---|---|---|---|---|
+| 1000 MHz | 50.39 (2) | 46.71 (2) | 13.90 (66 %) | 19.22 |
+| 1100 MHz | 50.51 (1) | 47.16 (2) | 12.93 (58 %) | 19.18 |
+| 1200 MHz | 49.74 (1) | 46.73 (4) | 12.15 (54 %) | 19.45 |
+| 1400 MHz | 47.33 (1) | 44.79 (2) | 10.96 (49 %) | 20.49 |
+
+**Recommendation: manual GPU clock 1100 MHz** (hd2: 1100-1200 are equal and best; with the light tiles 1000-1200 are
+equal, 1100 keeps headroom for busier views). The player's 1400 MHz costs 5-7 % on the street now.
+
+**Light pass per 16x16 tile (2026-11-19, gpu2; uncommitted, work/bench/gpu2-lightcull.patch, exe work/port/gpu2l).**
+The light pass (the game's SPU light job, done on the GPU) walked every light of the frame (83-129 on the street) for every
+pixel: 5.05 ms. Now a pass over 4x4-pixel position boxes (288x180, 0.21 ms) and a tile pass (four fragments per 16x16
+tile, 0.1 ms) keep, per tile, the lights whose sphere can reach the tile's (slightly widened) box, and the light shader
+walks only those, in ascending order, with the original loop body; a light left out has outer radius < its distance to
+every pixel of the tile, so the original's own `if (w <= 0) continue` skipped it there too. Same lights, same order, same
+arithmetic: the same bytes. Light work per frame 5.05 -> ~0.75 ms (guest 4-20 s, backend passes at 1152x720 6.75 -> 2.13
+ms). Check (`PS3RECOMP_VK_LIGHT_CULL=2`: every 60th light pass also rendered with the original shader, both read back and
+compared byte for byte): street 81 checks, up to 129 lights, 67 M pixels, 0 bytes differ (the first, single-stage version:
+96 checks, 80 M pixels, 0); plaza (exe work/port/gpu2l2 = gpu2l + target cleanup at shutdown) 55 checks, up to 102 lights,
+46 M pixels, 0. End shots at noise level (street, on the route: light tiles vs hd2 3.5 / 4.3 / 9.3 % of pixels differ by >
+24, hd2 vs hd2 8.5 / 8.8 % -- people walk; plaza, same spot: 0.7 / 1.4 % vs hd2 vs hd2 0.7 / 2.9 %; g2p-lt-4 stood a step
+away from the others at the end, 28 % against every run, lighting the same).
+
+| A/B, rotated rounds, `PS3_TB_FRAMESTEP_IDLE_US=2000`, 1200 MHz | hd2 | light tiles | change |
+|---|---|---|---|
+| Street, guest 4-20 s, 4 runs each (g2f): fps | 45.28 (sd 0.35) | 46.73 (sd 0.40) | +3.2 % |
+| ... GPU ms/frame | 17.43 | 13.17 | -4.3 ms (-24 %) |
+| ... main / RSX ms/frame | 20.27 / 18.52 | 19.54 / 18.27 | -0.7 / -0.3 |
+| Street, full window, on-route runs: fps (n) | 47.97 (2) | 49.74 (1) | +3.7 % |
+| ... GPU ms (busy), p99, frames > 33 ms per run | 17.27 (77 %), 28.2, 4.5 | 12.15 (54 %), 27.0, 3.0 | -5.1 ms |
+| Plaza, on-route runs, 3 of 4 rounds (g2p): fps | 50.21 (sd 0.68) | 51.83 (sd 0.36) | +3.2 % |
+| ... GPU ms (busy), main / RSX ms, p99, frames > 33 ms per run | 17.58 (80 %), 19.01 / 18.69, 24.1, 0.7 | 13.51 (60 %), 18.36 / 18.20, 23.1, 0 | -4.1 ms |
+| Plaza, round 2 (both left the route onto the same path, 6,582 draws) | 56.65 fps, GPU 16.43 (89 %) | 60.82 fps, GPU 12.42 | +7.4 % |
+
+Where the main thread limits, fps rises ~3 % (the CPU gets the power the GPU no longer draws: main -0.65..-0.7 ms); where
+the GPU limited (plaza round 2) +7 %. The street's GPU frame at 1200 MHz is now ~12-13 ms, inside the 16.7 ms budget.
+Off-route runs on matching paths agree (street path B 11.4 vs ~13.3 ms, path C 11.6 vs 13.8). Rule 1 (exact) by
+construction and check; rule 2 GPU -24 % and fps up; rule 3 p99 and slow frames not worse (street 27.0 vs 28.2, plaza 23.1
+vs 24.1); rule 4 `PS3RECOMP_VK_LIGHT_CULL=0` restores the original shader. Not committed (orchestrator); PGO: only
+vk_eng_light_pass (cold) and vk_eng_shutdown changed.
 
 **Goal set by the player (2026-11-18): stable 60 fps, including busy areas.** Budget at 60 fps: 16.7 ms per frame
 for each single thread (the RSX thread is ~2.56 us per draw now, so 9,000 draws need ~1.6 us per draw, -35%), and
@@ -306,6 +423,22 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
   sink_end_body's hash (the build prints "PGO: N function(s) changed"). New work in a `noinline` function called from
   the hot code keeps the caller's hash (a direct call adds no edge).
 
+* GPU per pass (2026-11-19, gpu2): `PS3RECOMP_VK_GPU_PROF=2` in a build with work/bench/gpu2-prof.patch (measurement only:
+  it touches sink_end_body, so its PGO profile goes stale) labels every timestamp interval: an engine pass by colour target
+  0 / target count / depth (backend handles, formats and the guest addresses the engine bound them at), a backend pass by
+  its kind (light, lfx_* = SSAO, zr32 / zrgba_d = depth copies / decodes, the light tiles), the postfx (`post`) apart from
+  the window blit, with draws per frame. `work/bench/gpu2pass.py <rec> <g1> <g2>` sums the summaries over a guest window
+  (also works on `=1` runs, by size only). `PS3RECOMP_VK_GPU_PROF_DUMP=1` dumps one batch's raw intervals with the commands
+  in each (copies, clears, barriers, draws). `PS3_RSX_STATS=10` prints the barrier counts.
+* Settings / clock batches (gpu2): `work/bench/gpu2rot.sh` = abrot.sh + `GPUCLK=<MHz>` per label (to detstreet.sh, which
+  sets and restores the manual clock) + `COMMON="ENV=V ..."` for every label; `gpu2rot2.sh` also waits between runs while
+  `<scratchpad>/gpu2.pause` exists (pause for builds / analysis without stopping the batch). `work/bench/gpu2table.py
+  <batch .out> ... -s [-l labels]`: per label, the full window on the clean runs and (with -s) guest 4-20 s on every run
+  (SUSPECT(input) runs dropped from both) -- the street's shared stretch, usable when half the runs leave the route.
+  Killing a batch script mid-run kills its run (bash runs the TERM trap at once): use the pause file instead.
+* Light pass check (gpu2): `PS3RECOMP_VK_LIGHT_CULL=2` renders the original light shader too every 60th light pass, reads
+  both outputs back and compares them byte for byte (`[light-cull] check` lines; the run is slow, only for exactness).
+
 ### Acceptance rules (every change, agreed with the player 2026-11-18)
 
 1. Exact: SPU natives match the lifted job bit for bit (job replay exit 0, live checks 0 differences); graphics
@@ -323,6 +456,7 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
 
 | Commit | Change | Measured |
 |---|---|---|
+| (uncommitted; work/bench/gpu2-lightcull.patch, exe work/port/gpu2l) | light pass per 16x16 tile (`PS3RECOMP_VK_LIGHT_CULL`, default 1; 0 = the original shader, 2 = check): a pass over 4x4-pixel position boxes and a tile pass (0.3 ms together) keep, per tile, only the lights whose sphere can reach the tile; the light shader walks those bits in order with the original loop body (rsx_vk_passes_glsl.h VK_LIGHT_GLSL, rsx_vulkan_backend.c vk_eng_light_pass) | street GPU 17.43 -> 13.17 ms (guest 4-20 s, 4 runs each), fps +3.2 %; plaza 17.58 -> 13.51 ms, 50.21 -> 51.83 fps (3 on-route rounds), +7.4 % where the GPU limited; exact (check mode: 0 bytes differ in 113 M pixels, street + plaza; end shots at noise level) |
 | 626ab72 | `PS3_TB_FRAMESTEP_IDLE_US` (bench only, default off, work/bench/main1-fsidle.patch): the frame-stepped clock lets the flipping thread's clock-polling sleeps see real time after <us> (the game's timed wait 0xB1388 ended only by the 100 ms stall rule) | (tools) street: frames > 50 ms ~15 -> 1 per run, max ~130 -> ~60 ms; guest 4-20 s 39.5 -> ~45 fps (the artifact cost ~13 % there, ~3-8 % over guest 10-85 s); route replays (on-route runs m1s-fs-2 and m1x-xu-2: segments within 3 % of ZREF, end shots 13.7 / 13.9 %; all 8 runs agree to guest 20 s); off-route rate still high (6 of 8) |
 | 365fd60 | `PS3_NATIVE_JOBS_HELP_PEEK` (default 1, work/bench/main1-runner-peek.patch): help_one looks at the queue without the lock before taking it -- the waiters' spin took the manager lock ~15,000 times a frame | neutral: street `m1a` 46.68 vs hd1 46.66 fps (2 / 4 clean of 8), guest 4-20 s 39.76 vs 39.49 (8 runs each, sd 0.48 / 0.26); plaza `m1z`+`m1z2` 50.96 (49.72 without one outlier, 4 / 3 clean of 7) vs hd1 49.28 (2 clean of 7); exact by construction (the locked test still decides). By rule 2 not a commit on its own merit (cleanup of ~30,000 lock calls a frame) |
 | 04ddd13 | short tail for repeated draws also in a wide picture with the HUD pinned (`PS3RECOMP_ENG_FASTDRAW_HUD`, default 1): under the player's 16:10 it was off for every draw (rsx_draw_engine.c eng_fd_hud_note, rsx_draw_fast.inc fd_takes) | `rb3` 7 rounds (switch off / on, same binary): RSX 19.63 -> 18.59 ms/frame (2.57 -> 2.45 us per draw), **fps 48.44 -> 50.40**, p99 24.2 -> 23.3; final binary vs mgPr (`rb4`+`rb5`, 7 / 6 clean): RSX 19.61 -> 18.87, fps 48.03 -> 49.75, p99 24.6 -> 23.5, > 33 ms 2.7 -> 1.0 per run; exact (VERIFY=2: 13 M draws, 0 differences); main thread now co-limits; the short tail is still cold in the mg1r profile (retrain) |
@@ -369,6 +503,18 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
 * `SPU_LIFT_XFN_BI` (cross-function const `bid/bie` as tail calls): -35..40% fps measured upstream.
 * Huge pages: guest memory already mostly THP; TLB misses < 1% of cycles.
 * Vectorising frest/frsqest: the compiler already uses gathers.
+* GPU clock, street (2026-11-19, gpu2; section 2 table): with hd2 1100-1200 MHz are best (48.6-49.5 fps on the route),
+  1400 MHz (the player's) -7 %, 1600 -10 % (the main thread loses power: +1.1 / +2.0 ms), 1000 GPU-bound (20.3 ms, 94 %
+  busy). With the light tiles 1000-1200 MHz are equal (50.4 / 50.5 / 49.7 fps on the route), 1400 -5..-6 %.
+  **New recommendation: manual 1100 MHz** (was 1000-1100 on the plaza, the player plays at 1400).
+* `PS3_RSX_BARBATCH=1` on the Deck (2026-11-19, gpu2; the track-C switch that leaves out each GENERAL -> GENERAL image
+  barrier right behind a full barrier; off on AMD by default): ~115 of ~215 barriers a frame left out, but no GPU time
+  saved -- street guest 4-20 s 17.49 / 17.57 ms (bb / lcbb, one run each after discards) vs 17.32 for hd2; light tiles
+  with and without it 13.23 vs 13.14 ms. The first pair measured (17.65 -> 15.23 ms) were two different off-route paths
+  with the same draw count (the end shots showed it). Patch kept: work/bench/gpu2-barbatch.patch (turns it on under RADV).
+* Light tiles in one stage (2026-11-19, gpu2, exe work/port/gpu2t1: one fragment per half tile reading all 256 depth
+  texels): exact, but the tile pass took 0.70 ms (6,480 fragments, too few waves for 256 serial fetches each); replaced by
+  the 4x4-box stage (0.30 ms for both small passes).
 * GPU clock (2026-11-18, player settings, plaza): 1000 MHz 41.8 fps > 1100 41.2 > 1200 40.1 > 1400 38.2.
   Higher clocks take power from the CPU (at 1400 the RSX thread needs 23.2 ms and the SPUs 105 ms per frame,
   at 1000 20.7 and 95.6). Recommended: manual 1000-1100 MHz. Benchmarks stay at 1200 for comparability.
@@ -384,6 +530,25 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
   shader-generator change on its own.
 
 ## 6. Next candidates (expected gain, effort)
+
+**GPU candidates (2026-11-19, gpu2; street, 1200 MHz, after the light tiles: ~13 ms of GPU per frame on the shared
+stretch, ~12.2 on the route).** Ranked by the GPU time at stake; "exact" = the same picture by construction / by a check.
+
+| # | Candidate | GPU ms/frame at stake | Effort | Exact? | Notes |
+|---|---|---|---|---|---|
+| G1 | DONE (uncommitted): light pass per 16x16 tile | measured street -4.3 (shared stretch), -5.1 (route), plaza -4.1 | -- | yes (check: 0 bytes differ in 113 M pixels, street + plaza, final code) | section 2 / 4 |
+| G2 | Sun shadow copies: sample the shadow zeta itself instead of its R32F copy (3 x 2048^2 a frame) | 0.6-0.7 | medium-high | needs proof | the copy exists because the zeta is a 1280-wide buffer and the texture its 1024x1024 corner: sampling the zeta directly needs its own allocation at the map's size (or a coordinate change, not exact) |
+| G3 | Box + tile passes of G1 (0.30 ms): fewer, wider fragments or one pass with shared memory (a compute pass) | 0.1-0.2 | small-medium | yes (same check) | the box pass at 288x180 is 0.2 ms |
+| G4 | Depth-as-RGBA8 decodes (4.9 a frame, 0.49 ms with gaps): skip one whose depth had no write since the last decode of the same size | 0-0.2 | small | yes | every depth-writing draw invalidates them now; whether any of the five repeats is unknown |
+| G5 | Shadow quality PS3 (1024) | 1.1 | setting | no (lower-resolution shadows) | section 2 table; the player's choice |
+| G6 | SSAO "PS3", effects resolution "As game", texture filtering Off | 0.4-0.5 each | setting | no | section 2 table |
+| -- | rejected: BARBATCH on RADV (0 ms), single-stage tile pass (section 5) | | | | |
+
+Barriers, render-target formats (RGBA8 everywhere but the SSAO / depth scratch) and the post chain showed nothing
+picture-identical to take. Per-material shader patterns were not profiled (the timestamps are per pass, not per draw: the
+G-buffer and forward passes, 4.7 ms together, are where they would show); the AMD NaN rules the FP decompiler adds
+(`PS3RECOMP_VK_NAN_PRESERVE`, `RSX_FP_NAN_MODE=rsx`, ...) are correctness fixes (GitHub #27) and were left alone. With the light tiles the GPU is no longer the street's second limit at 1200 MHz (~55-60 %
+busy); the main thread (20 ms) is.
 
 **Main-thread candidates (2026-11-18, main1; street, hd1: main 20.4 ms/frame busy, target <= 16 ms, i.e. -4.4 ms).**
 Breakdown in section 2. Ranked by the expected saving on the main thread per frame:

@@ -9239,6 +9239,8 @@ enum { VK_PASS_LIGHT, VK_PASS_SSAO_HD, VK_PASS_SSAO_AO, VK_PASS_SSAO_BLUR_H, VK_
        /* [res] PS3RECOMP_VK_ZDIRECT: the depth decode reading the depth target
         * in place (with / without a stencil aspect), the R32F snapshot pass */
        VK_PASS_ZRGBA_D, VK_PASS_ZRGBA_DN, VK_PASS_ZR32,
+       /* (gpu2) PS3RECOMP_VK_LIGHT_CULL: the light pass with its exact early-out (kVkLightCullFS) */
+       VK_PASS_LIGHT_CULL, VK_PASS_LIGHT_DITHER_CULL, VK_PASS_LIGHT_TILE, VK_PASS_LIGHT_BOX,
        VK_PASS_COUNT };
 #define VK_PASS_TEXTURES  3u                /* bindings 1..3: MSL texture(0..2) */
 #define VK_SSAO_UBO_BYTES 512u              /* the engine's bound (s_gs.consts) */
@@ -9264,7 +9266,7 @@ static struct {
     VkDescriptorPool      pool;
     VkDescriptorSet       set[VK_PASS_COUNT];      /* one per pass */
     VkDescriptorSet       zset[VK_ZRGBA_SETS];     /* the depth decode's, one per decode in a batch */
-    VkRenderPass          rp_light, rp_rgba8, rp_r8, rp_r32f;
+    VkRenderPass          rp_light, rp_rgba8, rp_r8, rp_r32f, rp_mask, rp_box;   /* (gpu2) the light tiles, boxes */
     vk_buffer             light_ubo, ssao_ubo;
     /* (rsx5) VK_PASS_RING: the 2nd.. light / SSAO pass of one batch */
     VkDescriptorSet       xset[VK_PASS_RING - 1][VK_PASS_COUNT];
@@ -9819,6 +9821,86 @@ static int vk_pass_out_live(u32 handle)
     return o && o->tag == VK_TAG_PASS;
 }
 
+/* (gpu2) the light tiles' mask target and the 4x4 boxes (VK_LIGHT_GLSL): kept, remade with the size */
+static struct { vk_image img, bmin, bmax; VkFramebuffer fb, fbb; u32 w, h, bw, bh; } s_lt;
+/* (gpu2) PS3RECOMP_VK_LIGHT_CULL: 1 (default) the tiled light pass, 0 the original, 2 check */
+static int vk_light_cull_mode(void)
+{
+    static int m = -1;
+    if (m < 0) {
+        const char* e = getenv("PS3RECOMP_VK_LIGHT_CULL");
+        m = (e && *e) ? atoi(e) : 1;
+        if (m < 0 || m > 2) m = 1;
+        fprintf(stderr, "[RSX vulkan] light pass: %s (PS3RECOMP_VK_LIGHT_CULL=%d)\n",
+                m == 0 ? "the original shader" : m == 1 ? "per 16x16 tile, only the lights that can reach it (exact)"
+                                                         : "tiled, compared with the original every 60th pass", m);
+    }
+    return m;
+}
+/* (gpu2) one image (RGBA8, w x h, layout GENERAL, TRANSFER_SRC) into out: its own submission */
+static int vk_lc_read(VkImage img, u32 w, u32 h, u8* out)
+{
+    vk_buffer st = {0};
+    if (vk_create_host_buffer(&st, (VkDeviceSize)w * h * 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) { vk_destroy_buffer(&st); return -1; }
+    int rc = -1;
+    if (!vk_begin()) {
+        vk_barrier_image(img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        VkBufferImageCopy region = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { w, h, 1 } };
+        pvkCmdCopyImageToBuffer(s_vk.cmd, img, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &region);
+        VkBufferMemoryBarrier hb = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = st.buf, .offset = 0, .size = VK_WHOLE_SIZE };
+        pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1, &hb, 0, NULL);
+        if (!vk_submit_and_wait()) { vk_invalidate(&st); memcpy(out, st.ptr, (size_t)w * h * 4u); rc = 0; }
+    }
+    vk_destroy_buffer(&st);
+    return rc;
+}
+/* (gpu2) PS3RECOMP_VK_LIGHT_CULL=2: every 60th light pass, the original shader into scratch targets too,
+ * the frame's batch submitted and waited for, the four images read back and compared */
+static struct { vk_image img[2]; VkFramebuffer fb; u32 w, h; unsigned long long n, checked, px, diff_d, diff_s; } s_lc;
+static void vk_light_cull_check(VkRenderPass rp, VkPipeline orig, VkDescriptorSet set, u32 w, u32 h, int nlights)
+{
+    if (++s_lc.n % 60u) return;
+    if (!s_lc.fb || s_lc.w != w || s_lc.h != h) {
+        if (s_lc.fb) { vk_batch_flush(); vk_fif_wait_other(); pvkDestroyFramebuffer(s_vk.device, s_lc.fb, NULL); s_lc.fb = VK_NULL_HANDLE; }
+        for (u32 k = 0; k < 2; k++) {
+            vk_destroy_image(&s_lc.img[k]);
+            if (vk_create_image(&s_lc.img[k], VK_FORMAT_R8G8B8A8_UNORM, w, h,
+                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT) || vk_begin()) return;
+            vk_barrier_image(s_lc.img[k].img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+        }
+        const VkImageView v[2] = { s_lc.img[0].view, s_lc.img[1].view };
+        if (!(s_lc.fb = vk_pass_framebuffer(rp, v, 2, w, h))) return;
+        s_lc.w = w; s_lc.h = h;
+    }
+    if (vk_begin()) return;
+    vk_pass_record(rp, s_lc.fb, orig, set, w, h);
+    if (vk_submit_and_wait()) { vk_begin(); return; }
+    const size_t bytes = (size_t)w * h * 4u;
+    u8* a = (u8*)malloc(bytes * 4u);
+    if (!a) { vk_begin(); return; }
+    const VkImage im[4] = { s_eobj[s_lp.light_out[0]].im.img, s_eobj[s_lp.light_out[1]].im.img, s_lc.img[0].img, s_lc.img[1].img };
+    int ok = 1;
+    for (u32 k = 0; k < 4 && ok; k++) ok = !vk_lc_read(im[k], w, h, a + k * bytes);
+    if (ok) {
+        unsigned long long dd = 0, ds = 0;
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            dd += memcmp(a + i * 4u, a + 2u * bytes + i * 4u, 4) != 0;
+            ds += memcmp(a + bytes + i * 4u, a + 3u * bytes + i * 4u, 4) != 0;
+        }
+        s_lc.checked++; s_lc.px += (unsigned long long)w * h; s_lc.diff_d += dd; s_lc.diff_s += ds;
+        fprintf(stderr, "[light-cull] check %llu (pass %llu, %d lights, %ux%u): diffuse %llu / specular %llu pixels differ; "
+                        "total %llu checks, %llu pixels, %llu / %llu differ\n", s_lc.checked, s_lc.n, nlights, w, h, dd, ds,
+                s_lc.checked, s_lc.px, s_lc.diff_d, s_lc.diff_s);
+    } else fprintf(stderr, "[light-cull] check: readback failed\n");
+    free(a);
+    vk_begin();   /* the frame goes on in a new batch (the light pass's caller expects one open) */
+}
+
 /* rsx_draw_backend.light_pass (Metal: eng_light_pass, eng_light_fs): one
  * full-screen pass with two RGBA8 targets, diffuse and specular, kept across
  * frames and remade when the size changes. `normals` is the engine's colour
@@ -9839,6 +9921,26 @@ static u32 vk_eng_light_pass(void* user, u32 normals, u32 depth, u32 w, u32 h,
     if (ps3_lightfx_get(PS3_LFX_LIGHT_DITHER)) {
         const VkPipeline pd = vk_pass_pipeline(VK_PASS_LIGHT_DITHER, kVkLightDitherFS, "GPU light (dither)", rp, 2);
         if (pd) pipe = pd;
+    }
+    /* (gpu2) PS3RECOMP_VK_LIGHT_CULL (default 1): the tile pass, then the light pass over each tile's lights
+     * only (rsx_vk_passes_glsl.h, VK_LIGHT_GLSL); 0 = the original shader; 2 = the tiled one, and every 60th
+     * pass also the original into scratch targets, both read back and compared byte for byte ([light-cull]
+     * lines). More than 256 lights (the mask's bits) or a pipeline that cannot be built: the original. */
+    const VkPipeline pipe_orig = pipe;
+    const int lcull = vk_light_cull_mode();
+    VkPipeline ptile = VK_NULL_HANDLE, pbox = VK_NULL_HANDLE;
+    VkRenderPass rp_mask = VK_NULL_HANDLE, rp_box = VK_NULL_HANDLE;
+    if (lcull && param_bytes >= offsetof(rsx_gpu_light_params, light) &&
+        ((const rsx_gpu_light_params*)params)->count <= 256.0f && ((const rsx_gpu_light_params*)params)->width > 0.0f &&
+        ((const rsx_gpu_light_params*)params)->height > 0.0f) {
+        const int dith = pipe != s_lp.pipe[VK_PASS_LIGHT];
+        const VkPipeline pc = dith ? vk_pass_pipeline(VK_PASS_LIGHT_DITHER_CULL, kVkLightDitherCullFS, "GPU light (dither, tiled)", rp, 2)
+                                   : vk_pass_pipeline(VK_PASS_LIGHT_CULL, kVkLightCullFS, "GPU light (tiled)", rp, 2);
+        rp_mask = vk_pass_render_pass(&s_lp.rp_mask, VK_FORMAT_R32G32_UINT, 1);
+        rp_box = vk_pass_render_pass(&s_lp.rp_box, VK_FORMAT_R32G32B32A32_SFLOAT, 2);
+        ptile = rp_mask ? vk_pass_pipeline(VK_PASS_LIGHT_TILE, kVkLightTileFS, "GPU light tiles", rp_mask, 1) : VK_NULL_HANDLE;
+        pbox = rp_box ? vk_pass_pipeline(VK_PASS_LIGHT_BOX, kVkLightBoxFS, "GPU light boxes", rp_box, 2) : VK_NULL_HANDLE;
+        if (pc && ptile && pbox) pipe = pc; else ptile = VK_NULL_HANDLE;
     }
     /* [res] the pass runs per pixel of its inputs: scaled with the normals copy */
     const int lsc = normals < VK_ENG_MAX_OBJ && s_eobj[normals].scaled;
@@ -9877,9 +9979,47 @@ static u32 vk_eng_light_pass(void* user, u32 normals, u32 depth, u32 w, u32 h,
         rsx_gpu_light_params* gp = (rsx_gpu_light_params*)lubo->ptr;
         gp->width = (float)lw; gp->height = (float)lh;
     }
-    vk_pass_write_set(lset, lubo, nv, zv, VK_NULL_HANDLE);
+    /* (gpu2) the 4x4 boxes ((lw/4) x (lh/4), two RGBA32F) and the tiles' mask ((4 tx) x ty RG32UI), kept and
+     * remade with the size */
+    const u32 ltx = (lw + 15u) / 16u, lty = (lh + 15u) / 16u, lbw = (lw + 3u) / 4u, lbh = (lh + 3u) / 4u;
+    if (ptile && (!s_lt.fb || !s_lt.fbb || s_lt.w != 4u * ltx || s_lt.h != lty || s_lt.bw != lbw || s_lt.bh != lbh)) {
+        if (s_lt.fb || s_lt.fbb) {
+            vk_batch_flush(); vk_fif_wait_other();
+            if (s_lt.fb) pvkDestroyFramebuffer(s_vk.device, s_lt.fb, NULL);
+            if (s_lt.fbb) pvkDestroyFramebuffer(s_vk.device, s_lt.fbb, NULL);
+            s_lt.fb = s_lt.fbb = VK_NULL_HANDLE;
+        }
+        vk_destroy_image(&s_lt.img); vk_destroy_image(&s_lt.bmin); vk_destroy_image(&s_lt.bmax);
+        s_lt.w = s_lt.h = s_lt.bw = s_lt.bh = 0;
+        int bad = vk_pass_image(&s_lt.img, VK_FORMAT_R32G32_UINT, 4u * ltx, lty) ||
+                  vk_pass_image(&s_lt.bmin, VK_FORMAT_R32G32B32A32_SFLOAT, lbw, lbh) ||
+                  vk_pass_image(&s_lt.bmax, VK_FORMAT_R32G32B32A32_SFLOAT, lbw, lbh);
+        if (!bad) {
+            const VkImageView bv[2] = { s_lt.bmin.view, s_lt.bmax.view };
+            bad = !(s_lt.fb = vk_pass_framebuffer(rp_mask, &s_lt.img.view, 1, 4u * ltx, lty)) ||
+                  !(s_lt.fbb = vk_pass_framebuffer(rp_box, bv, 2, lbw, lbh));
+        }
+        if (bad) {
+            if (s_lt.fb) pvkDestroyFramebuffer(s_vk.device, s_lt.fb, NULL);
+            if (s_lt.fbb) pvkDestroyFramebuffer(s_vk.device, s_lt.fbb, NULL);
+            s_lt.fb = s_lt.fbb = VK_NULL_HANDLE;
+            vk_destroy_image(&s_lt.img); vk_destroy_image(&s_lt.bmin); vk_destroy_image(&s_lt.bmax);
+            ptile = VK_NULL_HANDLE; pipe = pipe_orig;
+        } else { s_lt.w = 4u * ltx; s_lt.h = lty; s_lt.bw = lbw; s_lt.bh = lbh; }
+    }
+    if (ptile) {
+        const VkDescriptorSet bset = lk ? s_lp.xset[lk - 1u][VK_PASS_LIGHT_BOX] : s_lp.set[VK_PASS_LIGHT_BOX];
+        const VkDescriptorSet tset = lk ? s_lp.xset[lk - 1u][VK_PASS_LIGHT_TILE] : s_lp.set[VK_PASS_LIGHT_TILE];
+        vk_pass_write_set(bset, lubo, VK_NULL_HANDLE, zv, VK_NULL_HANDLE);
+        vk_pass_write_set(tset, lubo, s_lt.bmin.view, s_lt.bmax.view, VK_NULL_HANDLE);
+        vk_pass_write_set(lset, lubo, nv, zv, s_lt.img.view);
+        if (vk_begin()) return 0;
+        vk_pass_record(rp_box, s_lt.fbb, pbox, bset, lbw, lbh);
+        vk_pass_record(rp_mask, s_lt.fb, ptile, tset, 4u * ltx, lty);
+    } else vk_pass_write_set(lset, lubo, nv, zv, VK_NULL_HANDLE);
     if (vk_begin()) return 0;
     vk_pass_record(rp, s_lp.light_fb, pipe, lset, lw, lh);
+    if (lcull == 2 && pipe != pipe_orig) vk_light_cull_check(rp, pipe_orig, lset, lw, lh, (int)((const rsx_gpu_light_params*)params)->count);
     if (s_batch.recording) s_batch.light_pending = (int)lk + 1;
     else if (vk_submit_and_wait()) return 0;
     *spec_out = s_lp.light_out[1];
@@ -10290,6 +10430,13 @@ static void vk_eng5_shutdown(void)
         for (u32 k = 0; k < 4; k++) if (s_lp.ssao_fb[k]) pvkDestroyFramebuffer(d, s_lp.ssao_fb[k], NULL);
         for (u32 k = 0; k < 3; k++) if (s_lp.lfx_fb[k]) pvkDestroyFramebuffer(d, s_lp.lfx_fb[k], NULL);
         if (s_lp.tone_fb) pvkDestroyFramebuffer(d, s_lp.tone_fb, NULL);
+        /* (gpu2) the light tiles' targets and the check's scratch */
+        if (s_lt.fb) pvkDestroyFramebuffer(d, s_lt.fb, NULL);
+        if (s_lt.fbb) pvkDestroyFramebuffer(d, s_lt.fbb, NULL);
+        if (s_lc.fb) pvkDestroyFramebuffer(d, s_lc.fb, NULL);
+        s_lt.fb = s_lt.fbb = s_lc.fb = VK_NULL_HANDLE;
+        vk_destroy_image(&s_lt.img); vk_destroy_image(&s_lt.bmin); vk_destroy_image(&s_lt.bmax);
+        vk_destroy_image(&s_lc.img[0]); vk_destroy_image(&s_lc.img[1]);
         vk_destroy_image(&s_lp.lfx_hd);
         vk_destroy_image(&s_lp.lfx_a);
         vk_destroy_image(&s_lp.lfx_b);
