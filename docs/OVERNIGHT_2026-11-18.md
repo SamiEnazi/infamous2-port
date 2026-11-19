@@ -331,3 +331,21 @@ Until now each install replaced only the two game files and patched your old lau
 - **Start test with the real launcher** (sound off, ~1 min, then closed): window up, settings applied from the folder, PGO module loaded, placement and controller thread on, no errors.
 - **Rollback:** the old launcher is committed on branch `backup/v057-launcher-20261119`. The hd3 files are in work/port/installed-hd3-20261119/.
 - **Next installs:** switch the branch `installed` to the new tag and copy in the two game files.
+
+### 22:45: faster testing round finished (agent ft1; commits dc67c5b, b2c9763, 483d0a6)
+
+| Tool | How long | Validated against known results | Good for |
+|---|---|---|---|
+| **Builds** (incremental, byte-identical to a clean build) | 1–2 s for one native or engine file (was ~15 min); a re-lift ~7 min | identical objects | everything |
+| **Quick street run** (route to guest ~30 s) | 68 s per run (was 142 s), every run usable | — | every A/B |
+| **Route steering** (closed loop past the tram gate) | — | 11 of 11 runs on the old path (was ~50 %); draws within 2 % | full-window street runs |
+| **Early stopping** (min 3, max 8 pairs, ±3 SE) | big effects decided at pair 3: ~7 min | light tiles decided at pair 3; old neutral results stay inconclusive, as they were | effects of ~2 % or more |
+| **A/B inside one run** | one 3–4 min run | light tiles: right sign and mechanism (GPU −5 ms, clock +125 MHz); controller 4 ms vs 1 ms: agrees; main-thread pinning: **not** reproduced | power, clock, GPU and thread questions; fps effects of 2–3 % or more |
+| **Work counters** (reject-only filter) | 4+4 runs, ~9 min | noise ~1 % per thread group | ruling out code changes that change no work |
+| **Slow-it-down test** (job delay, low-power wait) | one run | the 0.2 rule reproduced: 0.19 ms per ms of pool job time | sizing a candidate before building it |
+
+**The honest limit:** fps effects of 0.5–1 % still need many runs with any method, because the crowd makes each run's fps vary by ~1 %. The gains are fast builds, every run usable, quick runs, and fast answers for anything ≥ 2 % or about mechanisms.
+
+**New finding for the roadmap:** the main thread's own 218 jobs don't count one for one. A 0.78 ms delay there cost only +0.12 ms of frame time, because those jobs run inside its waits for the bursts. So job 218 ~10 % faster is worth about +0.3–0.4 ms of frame (~+2 % fps), through capacity and power, not the 0.35–0.5 ms one for one.
+
+**HUD:** on in every test run from 19:30 (your request). Its cost is below noise (fps +0.5 %, SE 1.2).
