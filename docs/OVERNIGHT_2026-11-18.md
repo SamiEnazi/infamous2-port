@@ -316,3 +316,18 @@ Equal within noise in the replayed benches. Faster with the real controller, as 
 - Smoke test of the installed files (street route, real controller, a copy of your input.toml): exited cleanly by itself, no errors.
 - Your input.toml changes once at the first start: keyboard START becomes Esc instead of Enter (`start = "Escape"`, `layout = 2`). The controller's buttons don't change. F2 > Controls changes it back.
 - **Rollback:** copy the two files from installed-hd3-20261119/ back to work/port/build/, and the two .installed-hd3 files back.
+
+### 19:15: full install of our latest version (your request)
+
+Until now each install replaced only the two game files and patched your old launcher by hand. The rest of your folder was still upstream **v0.5.7** source from 15 Nov, with the v0.5.7 launcher. Now:
+- **Your folder is one version:** tag `hd4` (deck-perf 22a90db, pushed to the fork), on a local branch `installed`. The launcher is our branch's `tools/play.sh`: v0.6.3's launcher plus all our Deck settings (4 job threads, thread placement, the TLS fix, controller every 4 ms).
+- **Unchanged:** the hd4 game files (already installed), saves, game data, shader cache, DLC.
+- **What the new launcher did at its first start:**
+  - copied your settings.ini into the game folder (the original stays in ~/.config/infamous2-port);
+  - backed up your saves to saves-backup/;
+  - found your 26 DLC unlock files;
+  - made the dlc/ and mods/ folders.
+- **input.toml:** updated once: keyboard START = Esc (was Enter). The backup is input.toml.installed-hd3-20261119.
+- **Start test with the real launcher** (sound off, ~1 min, then closed): window up, settings applied from the folder, PGO module loaded, placement and controller thread on, no errors.
+- **Rollback:** the old launcher is committed on branch `backup/v057-launcher-20261119`. The hd3 files are in work/port/installed-hd3-20261119/.
+- **Next installs:** switch the branch `installed` to the new tag and copy in the two game files.
