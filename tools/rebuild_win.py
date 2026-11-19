@@ -632,11 +632,21 @@ def step_port():
             for ln in open(os.path.join(PORT_PATCHES, p), encoding="utf-8"):
                 if ln.startswith("+++ b/"):
                     patched.add(ln[6:].strip())
+    # (ft1, 2026-11-19) the patched files are made in a scratch folder (the source + every patch on it) and copied over
+    # only when the result differs from the port's copy: an unchanged patched file keeps its mtime, so its units are
+    # not compiled again on every build (before: the source was copied and patched in place, a new mtime each time)
+    stage = os.path.join(PORT, ".port_stage")
+    if os.path.isdir(stage):
+        shutil.rmtree(stage)
     for s, d in pairs:
         if not os.path.isfile(s):
             continue
         rel = os.path.relpath(d, PORT).replace("\\", "/")
-        if rel not in patched and os.path.isfile(d) and open(s, "rb").read() == open(d, "rb").read():
+        if rel in patched:
+            os.makedirs(os.path.dirname(os.path.join(stage, rel)), exist_ok=True)
+            shutil.copy(s, os.path.join(stage, rel))
+            continue
+        if os.path.isfile(d) and open(s, "rb").read() == open(d, "rb").read():
             continue   # unchanged files keep their mtime: no needless recompile
         shutil.copy(s, d)   # a changed file gets a fresh mtime: copy2 kept the source's, and a source older
                             # than the object ninja built from another version was never recompiled
@@ -649,14 +659,26 @@ def step_port():
             files = [ln[6:].strip() for ln in open(os.path.join(PORT_PATCHES, p), encoding="utf-8")
                      if ln.startswith("+++ b/")]
             try:
-                apply_patch(os.path.join(PORT_PATCHES, p), PORT, strip=1)
+                apply_patch(os.path.join(PORT_PATCHES, p), stage, strip=1)
             except PatchError as e:
                 raise StepError(f"patch {p} does not apply: {e}")
             for f in files:   # never trust a silent apply
                 src = os.path.join(PORT_SRC, f)
-                if os.path.isfile(src) and open(src, "rb").read() == open(os.path.join(PORT, f), "rb").read():
+                if os.path.isfile(src) and open(src, "rb").read() == open(os.path.join(stage, f), "rb").read():
                     raise StepError(f"patch {p} reported success but {f} is unchanged")
             print(f"  applied {p}")
+    kept = 0
+    for rel in sorted(patched):
+        a, d = os.path.join(stage, rel), os.path.join(PORT, rel)
+        if not os.path.isfile(a):
+            continue
+        if os.path.isfile(d) and open(a, "rb").read() == open(d, "rb").read():
+            kept += 1
+            continue
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+        shutil.copy(a, d)
+    shutil.rmtree(stage, ignore_errors=True)
+    print(f"  patched files: {kept} unchanged (kept their times), {len(patched) - kept} written")
     # The exe's icon: tools/make_icon.ps1 makes work/icon/app.ico from the player's own
     # PS3_GAME/ICON0.PNG; the port's CMakeLists compiles app.rc when it exists.
     ico = os.path.join(WORK, "icon", "app.ico")
@@ -786,11 +808,11 @@ def step_compile():
 
 def step_module():
     """The game module (tools/build_module.py) into PORT_BUILD, next to the engine."""
-    if not IS_WIN:
-        spu_rewrites()
-    else:
-        spu_rewrites()
-        lift_restore_times()   # (PORT_LIFT_REUSE) after spu_rewrites: its spu/zz_native_* files count too
+    spu_rewrites()
+    # (PORT_LIFT_REUSE) after spu_rewrites: its spu/zz_native_* files count too. (ft1, 2026-11-19) on Linux too: without
+    # it every lifted file compiled with its new time, and main() gave the old times back AFTER the compile, so the next
+    # build found every dependency stamp changed and compiled the whole module a second time.
+    lift_restore_times()
     build = module_build_dir()
     os.makedirs(build, exist_ok=True)
     # the engine beside it: a prebuilt one (PORT_ENGINE_EXE) or the one step_engine built elsewhere
