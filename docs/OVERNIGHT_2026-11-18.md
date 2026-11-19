@@ -172,3 +172,15 @@ With light tiles: 1000 → 50.4, 1100 → 50.5, 1200 → 49.7, 1400 → 47.3 fps
 ### 09:00: install candidate "hd3" = hd2 + light tiles
 
 The 30-minute standing run at spot 2 (same test as hd2's 58.9 fps) is running. Since you are back, I'll ask before installing.
+
+You approved (09:10) installing hd3 once the standing test passes, and setting the GPU clock to manual 1100 MHz after it.
+
+### Roadmap addition (09:15, your decision)
+
+**At the very end, when the implementation is final:** a one-step PGO training for Linux and Deck players, like upstream's Windows "Optimise for this PC" (`tools/setup_build.ps1 -Pgo`, `tools/pgo_train.ps1`):
+1. build the instrumented game;
+2. let it play scripted routes by itself (plaza, street, standing, the videos);
+3. merge the counts;
+4. rebuild with the profile.
+
+Every player trains their own: upstream never publishes profiles. Our PGO gain was about 15% (plaza 42.1 → 48.9 fps). This is also a candidate pull request for upstream.
