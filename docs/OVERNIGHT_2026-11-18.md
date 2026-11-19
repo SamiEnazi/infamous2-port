@@ -104,3 +104,71 @@ On the street the GPU takes 17.5 ms per frame with your settings (at 1200 MHz), 
 - looks for GPU savings that leave the picture identical.
 
 If you want to play in the meantime: the agent stops starting test runs while the game lock is held. When you're back, tell me in the session and I'll hold it for you.
+
+### 08:50: GPU round finished (GPU −4 ms per frame, picture identical)
+
+**Where the GPU time goes on the street** (hd2, your settings, 1200 MHz): 17.3 ms per frame.
+
+| Step | ms per frame |
+|---|---|
+| Lighting (adds up all 83–129 lights for every pixel) | 5.05 |
+| Geometry into the hidden buffers | 2.93 |
+| Sun shadow maps (2048², 3 cascades) and their copies | 2.15 |
+| Transparent objects and composite | 1.77 |
+| Post-processing buffers (depth of field, edge blur, glow) | 1.35 |
+| SSAO "Full, high" | 1.22 |
+| FXAA + sharpen + present | 0.69 |
+| Depth decodes | 0.56 |
+| Small passes (water reflection, glow chain, ...) | ~1.4 |
+
+**Kept: light list per screen tile** (commit 130be5d; switch `PS3RECOMP_VK_LIGHT_CULL`, on by default).
+- **How:** a small pass works out, for each 16×16-pixel tile, which lights can reach it. The lighting step then adds only those lights, in the same order and with the same math.
+- **Exactness:** a check mode also renders the original every 60th frame and compares the two. 0 bytes differed over 113 million pixels (street and plaza).
+
+| | hd2 | Light tiles |
+|---|---|---|
+| Street, first 16 s (4 runs each): GPU | 17.4 ms | **13.2 ms** |
+| … fps | 45.3 | **46.7 (+3.2%)** |
+| … main thread | 20.3 ms | 19.5 ms |
+| Plaza (3 clean rounds): GPU | 17.6 ms | **13.5 ms** |
+| … fps | 50.2 | **51.8 (+3.2%)** |
+| Plaza, a stretch where the GPU limited: fps | 56.7 | **60.8 (+7.4%)** |
+
+Every light-tile run was faster than every hd2 run. The main thread got faster too: the GPU now uses less of the shared 15 W, which leaves more for the CPU.
+
+**Rejected: skipping duplicate GPU waits** (`PS3_RSX_BARBATCH`): 0 ms on the Deck (17.49 vs 17.32). The first −2.4 ms reading compared two different walks; I had passed that number on before it was checked.
+
+**What each graphics setting costs** (street, GPU ms saved per frame, one change at a time):
+
+| Setting change | GPU ms saved |
+|---|---|
+| Shadow quality 2048 → 1024 | **1.1** |
+| SSAO → PS3 | 0.5 |
+| Effects resolution Full → As game | 0.5 |
+| Texture filtering 16× → Off | 0.4 |
+| SSAO "Full, high" → "Full" | 0.2 |
+| Soft shadows → off | 0.2 |
+| Texture filtering 16× → 8× | 0 |
+
+None of them changes fps on the street, because the main thread is the limit there. Screenshots for each are in `work/bench/gpu2/shots/`. The resolution is already 720p, the lowest.
+
+**GPU clock:** best is **manual 1100 MHz** (1000–1200 are about equal; 1100 keeps headroom for busier views). At 1400 the GPU takes power from the CPU and the street loses 5–7% fps.
+
+| Clock (hd2, street) | fps | GPU ms | main thread ms |
+|---|---|---|---|
+| 1000 | 47.96 | 20.27 | 19.48 |
+| 1100 | 49.47 | 18.57 | 19.91 |
+| 1200 | 48.64 | 17.27 | 20.14 |
+| 1400 | 45.15 | 15.39 | 21.19 |
+| 1600 | 44.03 | 14.09 | 22.17 |
+
+With light tiles: 1000 → 50.4, 1100 → 50.5, 1200 → 49.7, 1400 → 47.3 fps.
+
+**Next GPU candidates (picture-identical):**
+- reading the shadow map directly instead of copying it first: 0.6–0.7 ms;
+- cheaper tile passes: 0.1–0.2 ms;
+- fewer repeated depth decodes: up to 0.2 ms.
+
+### 09:00: install candidate "hd3" = hd2 + light tiles
+
+The 30-minute standing run at spot 2 (same test as hd2's 58.9 fps) is running. Since you are back, I'll ask before installing.
