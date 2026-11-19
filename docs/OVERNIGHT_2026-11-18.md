@@ -202,6 +202,22 @@ You approved (09:10) installing hd3 once the standing test passes, and setting t
 
 Faster jobs 213 / 218 / 204 / 216 (main thread, M1 / M3); estimated −0.8 to −2.3 ms on the main thread.
 
+### 11:20: jobs round finished (job 216 faster, main thread not; parked)
+
+- **Job 216:** two exact changes made it 10–16% shorter (exact by job replay and a live check over 660,000 calls). But the main thread didn't get faster beyond noise:
+  - street 46.80 → 47.14 fps over the first 16 s (+0.7%, not significant);
+  - plaza 51.53 → 51.26 fps.
+- **Why:** both job bursts per frame are limited by total CPU across ~4.5 threads. A shorter job lets its successors start sooner, but the burst still ends when all its work is done. Rule of thumb: **1 ms less CPU in a burst = only ~0.2 ms less main thread.** Work done on the main thread itself counts one for one.
+- **Kept as a patch only** (`work/bench/m13-216.patch`, local), not committed: no fps gain, more code to carry.
+- **Job 213 native: rejected.** Its own code is only about a quarter of a 213 job. The rest is waiting for many small memory transfers, which a native would still have to do.
+- **What this changes in the plan:** single-job speedups are worth much less than estimated. The levers now are work on the main thread itself, and less CPU and GPU work overall, which leaves more of the shared 15 W for the main thread (the light tiles made the main thread 0.7 ms faster this way).
+
+### 11:25: main thread round 2 started
+
+1. The guest store slow path (~1 ms on the main thread itself).
+2. A real A/B of pinning the main thread to a CPU of its own.
+3. Measuring the clock the main thread really runs at vs the job threads, to see how much power is the limit.
+
 ### Roadmap addition (09:15, your decision)
 
 **At the very end, when the implementation is final:** a one-step PGO training for Linux and Deck players, like upstream's Windows "Optimise for this PC" (`tools/setup_build.ps1 -Pgo`, `tools/pgo_train.ps1`):
