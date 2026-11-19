@@ -201,6 +201,12 @@ export PS3RECOMP_GCM_SPIN_US PS3RECOMP_VK_TQ_SPIN_US PS3RECOMP_VK_PIPE_THREADS P
 # (deck-merge) v0.6's native job runner: 4 pool threads (its default, physical cores - 2, is 2 here). Det bench at the
 # plaza, 2026-11-18: 2 threads 37.8 fps (the main thread runs jobs in its waits: 26 ms/frame), 3 40.8, 4 41.0.
 : "${PS3_NATIVE_JOBS_THREADS:=4}"; export PS3_NATIVE_JOBS_THREADS
+# (deck-v063) v0.6.3's controller thread reads the pads every 1 ms by default: here every 4 ms. On the Deck's controller
+# (SDL HIDAPI) a pass costs 40-55 us, so 1 ms = 32 ms of CPU a second (755 passes), 4 ms = 13 ms (234 passes), on the
+# CPUs the main thread and the job pool share; street det bench with SDL pads on, guest 4-20 s, 4 runs each: 46.46 vs
+# 47.12 fps (main 19.41 vs 19.14 ms). A pad call then copies a snapshot at most ~4 ms old (1 ms with upstream's default;
+# v0.6.2 read the pads inside the call, at most every 1 ms), against a 17-20 ms frame. Windows keeps upstream's 1 ms.
+: "${PS3_PAD_THREAD_US:=4000}"; export PS3_PAD_THREAD_US
 # The RSX (draw) thread alone on a core, every other thread on the rest (engine host_place.c, Linux):
 # 30.5 -> 33.0 fps on the Deck, 34.7 with the job 210 native. PS3_CPU_PLACE=0 = the OS decides.
 : "${PS3_CPU_PLACE:=rsxcore}"; export PS3_CPU_PLACE
