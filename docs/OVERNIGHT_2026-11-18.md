@@ -307,3 +307,12 @@ So the controller thread at upstream's 1 ms did cost us; at 4 ms it is the faste
 Equal within noise in the replayed benches. Faster with the real controller, as in play: SDL's update of the Deck's controller takes ~8 ms about once a second; hd3 does it inside the game's pad call, hd4 on its own thread. One 58 ms frame in hd4's first standing round didn't come back in the second; hd3 had none. Job replays: 213 and 216 pass 400 of 400. All 64 runs of the round exited cleanly.
 
 **Install note:** v0.6.3 rewrites an old input.toml once at first start (Esc becomes START), so back it up with the install.
+
+### 18:50: hd4 installed (your OK)
+
+- Files: engine 5fecd563…, module 508d9e5c… (work/port/mg3r, PGO mg3r) in work/port/build/.
+- Your launcher is kept as it was, plus the one new setting: the controller thread every 4 ms.
+- Backups: work/port/installed-hd3-20261119/ (both files), tools/play.sh.installed-hd3-20261119, input.toml.installed-hd3-20261119.
+- Smoke test of the installed files (street route, real controller, a copy of your input.toml): exited cleanly by itself, no errors.
+- Your input.toml changes once at the first start: keyboard START becomes Esc instead of Enter (`start = "Escape"`, `layout = 2`). The controller's buttons don't change. F2 > Controls changes it back.
+- **Rollback:** copy the two files from installed-hd3-20261119/ back to work/port/build/, and the two .installed-hd3 files back.

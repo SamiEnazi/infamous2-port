@@ -199,6 +199,8 @@ things, all `PS3_TB_FRAMESTEP_IDLE_US=2000`, rotated rounds:
   where it was (2,941 / 2,955 / 2,962 MHz on the route; section 6, P1). The watts go into real work: pool 3.3 CPUs, main 1,
   RSX 0.8 -- so a faster job (M1 / M3 / M8) helps twice, by capacity and by power.
 
+**Installed 2026-11-19 18:50: hd4** (deck-perf 7c3c1e8 = hd3 + upstream v0.6.3, PGO mg3r; exe dir work/port/mg3r: engine 5fecd563..., module 508d9e5c...) replaces hd3 in the player's folder; the player's launcher kept, plus `PS3_PAD_THREAD_US=4000`. Backups: `<player>/work/port/installed-hd3-20261119/` (both files), `tools/play.sh.installed-hd3-20261119`, `input.toml.installed-hd3-20261119` (v0.6.3 rewrites input.toml once: START = Esc instead of Enter, `layout = 2`). Smoke test of the installed files (street route, real controller, a copy of the player's input.toml): exited cleanly by itself, no errors, controller thread on.
+
 **Installed 2026-11-19 05:30: hd2** (code 3d974be, PGO mg2r) replaces mgPr in the player's folder. Backups: `<player>/work/port/installed-mgPr-20261119/` (both files) and `tools/play.sh.installed-mgPr-20261119`; older: `work/port/Infamous2Recomp.installed-4cabf54`. Smoke test of the installed files (sandbox, street route): ran and exited cleanly, no errors.
 
 Real clock, standing at spot 2 (player's settings with the 60 fps cap, GPU 1400): mgPr 57.84 fps over 30 min (5-min
