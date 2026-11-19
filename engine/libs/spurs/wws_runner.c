@@ -39,6 +39,7 @@
  *                                   waits, claim->start latency, and a health line (queues, stalls, warnings)
  *   PS3_NATIVE_JOBS_HELP=0|1|2      waiters run queued jobs: never / only the ones they wait for (default) / any
  *   PS3_NATIVE_JOBS_STICKY=0|1      a pool thread takes the next job of the manager it just ran first (default 1)
+ *   PS3_NATIVE_JOBS_HELP_PEEK=0|1   a waiter looks at the queue without the lock before it takes it (default 1)
  *   PS3_NATIVE_JOBS_WAITSTAT=1      a line per 10 s: time in the four job waits (runner on or off)
  *   PS3_NATIVE_JOBS_LOG=1           managers as they are first seen, ownership, dependency cells
  * Always on (cheap): a loud first-occurrence warning ([jobs] WARN, the first 8 of each kind, then every
@@ -96,6 +97,7 @@ enum {
 
 /* ---- configuration ------------------------------------------------------------------------- */
 static int s_on, s_all, s_threads, s_wait, s_stats, s_log, s_waitstat, s_help, s_sticky, s_stats_sec = 10;
+static int s_help_peek;   /* (main1) PS3_NATIVE_JOBS_HELP_PEEK, see help_one */
 static unsigned char s_mod_on[256];
 
 static int env_int(const char* n, int dflt) { const char* e = getenv(n); return e && *e ? atoi(e) : dflt; }
@@ -128,6 +130,7 @@ static void cfg_init(void)
     s_sticky = env_int("PS3_NATIVE_JOBS_STICKY", 1);   /* 0 = waiters never run jobs, 1 = only jobs they wait for, 2 = any */
     s_log = env_int("PS3_NATIVE_JOBS_LOG", 0);
     s_waitstat = env_int("PS3_NATIVE_JOBS_WAITSTAT", 0);
+    s_help_peek = env_int("PS3_NATIVE_JOBS_HELP_PEEK", 1);
 }
 
 /* ---- managers ------------------------------------------------------------------------------- */
@@ -579,9 +582,22 @@ static SPU_THREAD_LOCAL wws_worker* t_helper;
 /* The waiter runs the manager's oldest queued job only if it needs it: a job of the array it waits on,
  * below the index it waits for (PS3_NATIVE_JOBS_HELP=1). Any other job would only delay it: a pool thread
  * runs it. The queue is in claim order, so its head is the lowest such index. */
+/* PS3_NATIVE_JOBS_HELP_PEEK (main1, default 1): look at the queue without the lock first. The waiter's spin calls
+ * this on every turn -- ~15,000 times a frame on the main thread in the city (street bench, LD_PRELOAD count of the
+ * pthread_rwlock calls: the main thread's 3.4% in pthread_rwlock_* were these) -- and each locked look took the
+ * manager's lock away from the pool threads that finish and claim its jobs. Head and tail only change under the lock;
+ * a stale look skips one turn or takes the lock for nothing, and the locked test below still decides. */
 static int help_one(mgr_state* m, uint32_t slot, uint32_t below)
 {
     if (!s_help) return 0;
+    if (s_help_peek) {
+        const uint32_t qh = __atomic_load_n(&m->qh, __ATOMIC_ACQUIRE), qt = __atomic_load_n(&m->qt, __ATOMIC_ACQUIRE);
+        if (qh == qt) return 0;
+        if (s_help < 2) {
+            const qjob* h = &m->q[qh % MQ_CAP];
+            if (__atomic_load_n(&h->slot, __ATOMIC_RELAXED) != slot || __atomic_load_n(&h->index, __ATOMIC_RELAXED) >= below) return 0;
+        }
+    }
     qjob q;
     int got = 0;
     AcquireSRWLockExclusive(&m->lock);
