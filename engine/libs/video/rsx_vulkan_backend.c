@@ -65,6 +65,7 @@
 #include "../../include/ps3emu/ps3_lightfx.h"   /* [light] the menu's Lighting page: AO, light dither */
 #include "../../include/ps3emu/ps3_hitchcatch.h" /* PS3RECOMP_HITCHCATCH: stacks of the frozen frames */
 #include "../../include/ps3emu/ps3_achievements.h" /* ps3_rl_ach_frame: RecompLauncher achievements */
+#include "../../include/ps3emu/ps3_liveab.h"     /* (ft1) PS3_LIVEAB: the in-run A/B (bench only) */
 #include "vk_overlay.h"                          /* [overlay] HUD + settings menu (vk_overlay.cpp) */
 #include "rsx_image_io.h"                        /* [fx] texture-pack PNGs */
 
@@ -1239,6 +1240,7 @@ static void vk_gprof_collect(void)
         s_gp.kms[k] += ms; s_gp.kcnt[k]++;
     }
     s_gp.total_ms += (double)(ts[n - 1] - ts[0]) * s_gp.ns_per_tick / 1e6;
+    g_ps3_liveab_gpu_ns += (unsigned long long)((double)(ts[n - 1] - ts[0]) * s_gp.ns_per_tick);   /* (ft1) PS3_LIVEAB */
     s_gp.batches++;
     const uint64_t now = ps3_ft_now();
     if (!s_gp.t_print) s_gp.t_print = now;
@@ -4747,11 +4749,19 @@ static void vk_present_async(void)
  * RenderDoc brackets it): with threaded recording, drain the worker and record
  * directly until it is done. */
 static void vk_mg_frame(void);   /* PS3RECOMP_VK_MERGE_STATS */
+/* (deck) PS3_DBG_PRESENT_DELAY_US: a busy wait per present (gcm_dbg_spin); (ft1) PS3_LIVEAB's value when it sets one.
+ * Its own function: vk_present_window keeps its PGO profile. */
+static __attribute__((noinline)) void vk_dbg_present_delay(void)
+{
+    extern void gcm_dbg_spin(const char* name, int* us);
+    static int us = -1;
+    int lab = g_ps3_lab[PS3_LAB_PRESENT_DELAY];
+    gcm_dbg_spin("PS3_DBG_PRESENT_DELAY_US", lab >= 0 ? &lab : &us);
+}
 static void vk_present_window(void)
 {
     vk_callstats_frame();                       /* (deck) PS3RECOMP_VK_CALLSTATS */
-    { extern void gcm_dbg_spin(const char* name, int* us); static int us = -1;
-      gcm_dbg_spin("PS3_DBG_PRESENT_DELAY_US", &us); }   /* (deck) causal test, cellGcmSys.c */
+    vk_dbg_present_delay();                     /* (deck) causal test, cellGcmSys.c */
     vk_mg_frame();
     vk_vram_frame();                            /* (lowend) PS3RECOMP_VRAM_LOG */
 #ifndef VK_TQ_NO_ASYNC_PRESENT
@@ -9824,8 +9834,10 @@ static int vk_pass_out_live(u32 handle)
 /* (gpu2) the light tiles' mask target and the 4x4 boxes (VK_LIGHT_GLSL): kept, remade with the size */
 static struct { vk_image img, bmin, bmax; VkFramebuffer fb, fbb; u32 w, h, bw, bh; } s_lt;
 /* (gpu2) PS3RECOMP_VK_LIGHT_CULL: 1 (default) the tiled light pass, 0 the original, 2 check */
-static int vk_light_cull_mode(void)
+static __attribute__((noinline)) int vk_light_cull_mode(void)   /* (ft1) noinline: vk_eng_light_pass keeps its PGO profile */
 {
+    const int lab = g_ps3_lab[PS3_LAB_LIGHT_CULL];   /* (ft1) PS3_LIVEAB's value, if it sets one */
+    if (lab >= 0) return lab;
     static int m = -1;
     if (m < 0) {
         const char* e = getenv("PS3RECOMP_VK_LIGHT_CULL");
@@ -11456,6 +11468,15 @@ int rsx_vulkan_backend_pump_messages(void)
     return quit ? -1 : 0;
 }
 
+/* (ft1) PS3_LIVEAB: the frame for the in-run A/B (and its HUD switch); one test of a global while it is off */
+void vk_overlay_liveab_hud(void);   /* vk_overlay.cpp */
+static __attribute__((noinline)) void vk_liveab_frame(void)
+{
+    if (__builtin_expect(g_ps3_liveab_on, 0)) {
+        vk_overlay_liveab_hud();
+        ps3_liveab_present(rsx_vulkan_backend_guest_draws());
+    }
+}
 void rsx_vulkan_backend_present(void)
 {
     vk_shot_arm();                   /* (rsx5) a test's screenshot request: its buffer */
@@ -11475,6 +11496,7 @@ void rsx_vulkan_backend_present(void)
       s_io_ns += ps3_ft_now() - t0; }
     vk_playlog_frame();
     ps3_rl_ach_frame();              /* RecompLauncher achievements: a no-op unless it started the game */
+    vk_liveab_frame();               /* (ft1) PS3_LIVEAB (a call, no branch here: the function keeps its PGO profile) */
 }
 
 u32 rsx_vulkan_backend_debug_color(void) { return s_vk.clear_argb; }

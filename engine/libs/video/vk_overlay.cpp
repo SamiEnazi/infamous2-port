@@ -25,6 +25,7 @@
 #include "backends/imgui_impl_sdl2.h"
 
 #include "../../include/ps3emu/ps3_settings.h"
+#include "../../include/ps3emu/ps3_liveab.h"   /* (ft1) PS3_LIVEAB=PS3_OVERLAY_HUD=<a>|<b>: the HUD flipped in-run */
 #include "../../include/ps3emu/ps3_title_view.h"   /* (dofov) the Depth of field page: does the title tell gameplay from cutscenes */
 #include "../../include/ps3emu/ps3_lightfx.h"   /* [light] the Lighting page (vk_overlay_light.inc) */
 #include "../../include/ps3emu/ps3_game_mods.h" /* [mods] the Mods page: runtime/ppu/ppu_fs_mods.h */
@@ -2030,6 +2031,21 @@ static bool fb_for(uint32_t idx, VkImage image, VkExtent2D ext)
     return true;
 }
 
+/* (ft1) PS3_LIVEAB's HUD value, when it sets one (bench only); back to the HUD's own state when it ends. Called by the
+ * present (rsx_vulkan_backend.c vk_liveab_frame) every frame: the draw entry below only runs while the overlay is active. */
+extern "C" void vk_overlay_liveab_hud(void)
+{
+    if (!s_enabled) return;
+    static int s_own = -1;   /* the HUD's state before the in-run A/B first changed it */
+    const int lab = g_ps3_lab[PS3_LAB_HUD];
+    if (lab >= 0) {
+        if (s_own < 0) s_own = s_hud ? 1 : 0;
+        if ((lab != 0) != (s_hud != 0)) { set_hud(lab != 0); fprintf(stderr, "[overlay] HUD %s (PS3_LIVEAB)\n", lab ? "on" : "off"); }
+    } else if (s_own >= 0) {
+        if ((s_own != 0) != (s_hud != 0)) set_hud(s_own != 0);
+        s_own = -1;
+    }
+}
 extern "C" int vk_overlay_draw(VkCommandBuffer cmd, uint32_t index, VkImage image, VkExtent2D ext,
                                VkImageLayout layout, VkPipelineStageFlags stage, VkAccessFlags access)
 {

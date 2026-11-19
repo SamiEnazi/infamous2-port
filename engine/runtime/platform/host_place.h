@@ -62,6 +62,9 @@ int ps3_host_cores(void);         /* physical cores in the mask */
 int ps3_host_core_scarce(void);
 void ps3_host_place_self_once(int role);   /* no-op if this thread was placed */
 int  ps3_host_place_rsx_sibling(void);      /* (deck, Linux rsxcore) this thread on the RSX core's other CPU */
+/* (main1, ft1; Linux rsxcore, bench only) PS3_CPU_PLACE_MAIN while the game runs: 0 off, 1 core, 2 cpu (host_place.c);
+ * PS3_LIVEAB (runtime/diag/ps3_liveab.c) calls it at its flips. Returns the mode in force afterwards. */
+int  ps3_host_place_main_live(int mode);
 
 #ifdef __cplusplus
 }

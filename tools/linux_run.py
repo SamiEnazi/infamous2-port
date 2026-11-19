@@ -369,7 +369,10 @@ class Run:
             "GCM_SEMA_ACQUIRE": "1", "GCM_SEMA_ACQUIRE_MS": "200", "GCM_PARK_GRACE_MS": "1000",
             "PS3RECOMP_ENG_GPU_LIGHT": "07000B80:07384B80", "PS3RECOMP_ENG_GPU_SSAO": "0F800000",
             "PS3RECOMP_VK_WINDOW": "1", "PS3RECOMP_VK_GUEST_PROGRAMS": "1", "PS3RECOMP_KEEP_AWAKE": "0",
-            "PS3_OVERLAY_INI": os.path.join(rec, "settings.ini"), "PS3_OVERLAY_HUD": "0",
+            "PS3_OVERLAY_INI": os.path.join(rec, "settings.ini"),
+            # (ft1, 2026-11-19) the performance HUD (F1) on in every test run, as the player plays (their request:
+            # watch the screen); --env PS3_OVERLAY_HUD=0 turns it off. Measured cost: docs/STEAM_DECK_PERF.md section 3.
+            "PS3_OVERLAY_HUD": "1",
             "PS3RECOMP_SHOT_REQ": os.path.join(rec, "shot.req"),
             "DISPLAY": os.environ.get("DISPLAY") or ":0",
         }

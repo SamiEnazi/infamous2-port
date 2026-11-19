@@ -20,6 +20,7 @@
 #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
 #include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline */
 #include "../../include/ps3emu/ps3_toggles.h" /* GCM_STALL_GAP_MS, live */
+#include "../../include/ps3emu/ps3_liveab.h"  /* (ft1) PS3_LIVEAB: the in-run A/B (bench only) */
 #include "gcm_fifo_decode.h"                   /* JUMP forms */
 #include "../../runtime/platform/host_place.h" /* PS3_CPU_PLACE: the draining thread's cores */
 #include "rsx_split.h"                         /* (rsx-par) PS3RECOMP_RSX_SPLIT */
@@ -3476,9 +3477,16 @@ void gcm_dbg_spin(const char* name, int* us)
     do { __builtin_ia32_pause(); clock_gettime(CLOCK_MONOTONIC, &t); }
     while ((t.tv_sec - t0.tv_sec) * 1000000ll + (t.tv_nsec - t0.tv_nsec) / 1000 < *us);
 }
+/* PS3_DBG_FLIP_DELAY_US; (ft1) PS3_LIVEAB's value when it sets one. Its own function: gcm_flip_request keeps its PGO profile. */
+static __attribute__((noinline)) void gcm_dbg_flip_delay(void)
+{
+    static int us = -1;
+    int lab = g_ps3_lab[PS3_LAB_FLIP_DELAY];
+    gcm_dbg_spin("PS3_DBG_FLIP_DELAY_US", lab >= 0 ? &lab : &us);
+}
 static s32 gcm_flip_request(u32 bufferId, int in_fifo)
 {
-    { static int us = -1; gcm_dbg_spin("PS3_DBG_FLIP_DELAY_US", &us); }   /* both kinds: the guest's PPU thread */
+    gcm_dbg_flip_delay();             /* both kinds: the guest's PPU thread */
     { extern void ppu_timebase_frame_tick(void); ppu_timebase_frame_tick(); }   /* (deck) PS3_TB_FRAMESTEP_US */
     /* GCM_FLIPCOUNT=1: every flip, with a timestamp. FLIP_DBG caps at 20 lines,
      * which answers "did it ever flip?" and not "is it still flipping, and how

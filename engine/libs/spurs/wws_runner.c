@@ -69,6 +69,7 @@
 #endif
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
+#include <x86intrin.h>   /* (ft1) __rdtsc: PS3_JOBDELAY */
 #define CPU_PAUSE() _mm_pause()
 #else
 #define CPU_PAUSE() ((void)0)
@@ -110,6 +111,75 @@ static unsigned char s_mod_on[256];
 
 static int env_int(const char* n, int dflt) { const char* e = getenv(n); return e && *e ? atoi(e) : dflt; }
 
+/* (ft1) PS3_JOBDELAY=<module>:<us>[:all|main|pool][:mwait|spin] (bench only, default off): a causal test -- every job of
+ * that module takes <us> longer: after its code, before its completion is published (so whoever waits for it waits
+ * that much more). `main` = only the jobs the process thread (the main PPU thread) runs itself in its waits, `pool` =
+ * only the pool threads' (ps3-spuj*), `all` = both. `mwait` (default): MONITORX + MWAITX with a TSC timeout (user mode
+ * on Zen 2; the thread sleeps in C0 without issuing work, so the delay draws little power and leaves the core to its
+ * SMT sibling), `spin` = a PAUSE loop (the power of a busy thread). PS3_LIVEAB can change <us> while the game runs
+ * (PS3_JOBDELAY_US=<a>|<b>). Read once; off = one compare per job. */
+static int s_jd_mod = -1, s_jd_us, s_jd_where, s_jd_spin;
+static double s_jd_tsc_us;
+static volatile long s_jd_n[2];
+#if defined(__GNUC__) && defined(__linux__)
+extern volatile int g_ps3_lab[] __attribute__((weak));   /* ps3_liveab.c (absent from tests/jobrunner's build) */
+extern volatile unsigned long long g_ps3_liveab_ev __attribute__((weak));   /* ditto: the delays, per liveab block */
+#endif
+static SPU_THREAD_LOCAL int t_jd_pool, t_jd_main = -1;
+static void jd_cfg(void)
+{
+    const char* e = getenv("PS3_JOBDELAY");
+    if (!e || !*e) return;
+    int mod = 0, us = 0; char where[16] = "all", kind[16] = "mwait";
+    if (sscanf(e, "%d:%d:%15[a-z]:%15[a-z]", &mod, &us, where, kind) < 2 || mod < 200 || mod > 255 || us < 0) {
+        fprintf(stderr, "[jobdelay] cannot read PS3_JOBDELAY=%s (<module>:<us>[:all|main|pool][:mwait|spin])\n", e);
+        return;
+    }
+#if defined(__x86_64__) && defined(__linux__)
+    struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a); const uint64_t r0 = __rdtsc();
+    do clock_gettime(CLOCK_MONOTONIC, &b); while ((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec) < 20000000ll);
+    s_jd_tsc_us = (double)(__rdtsc() - r0) / (((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)) / 1000.0);
+    s_jd_mod = mod; s_jd_us = us; s_jd_where = !strcmp(where, "main") ? 1 : !strcmp(where, "pool") ? 2 : 0;
+    s_jd_spin = !strcmp(kind, "spin");
+    fprintf(stderr, "[jobdelay] PS3_JOBDELAY: every job of module %d %d us longer (%s, %s; TSC %.1f MHz)\n", mod, us,
+            s_jd_where == 1 ? "only those the main thread runs" : s_jd_where == 2 ? "only the pool's" : "on every thread",
+            s_jd_spin ? "PAUSE spin" : "MONITORX/MWAITX", s_jd_tsc_us);
+#else
+    fprintf(stderr, "[jobdelay] PS3_JOBDELAY: x86-64 Linux only, off\n");
+#endif
+}
+#if defined(__x86_64__) && defined(__linux__)
+static void jd_job(void)
+{
+    if (t_jd_main < 0) t_jd_main = (pid_t)syscall(SYS_gettid) == getpid();
+    if ((s_jd_where == 1 && !t_jd_main) || (s_jd_where == 2 && !t_jd_pool)) return;
+    int us = s_jd_us;
+#if defined(__GNUC__)
+    if (g_ps3_lab) { const int lab = g_ps3_lab[5 /* PS3_LAB_JOBDELAY_US */]; if (lab >= 0) us = lab; }
+#endif
+    if (us <= 0) return;
+    const long n = __atomic_add_fetch(&s_jd_n[t_jd_main ? 0 : 1], 1, __ATOMIC_RELAXED);
+    if (n == 1 || n % 100000 == 0) fprintf(stderr, "[jobdelay] %ld delays on %s so far (%d us)\n", n, t_jd_main ? "the main thread" : "other threads", us);
+#if defined(__GNUC__)
+    if (&g_ps3_liveab_ev) __atomic_add_fetch(&g_ps3_liveab_ev, 1, __ATOMIC_RELAXED);
+#endif
+    const uint64_t t0 = __rdtsc(), len = (uint64_t)(us * s_jd_tsc_us);
+    if (s_jd_spin) { while (__rdtsc() - t0 < len) CPU_PAUSE(); return; }
+    char line[128] __attribute__((aligned(64)));   /* a line nobody writes: MWAITX ends by its timer */
+    for (;;) {
+        const uint64_t el = __rdtsc() - t0;
+        if (el >= len) break;
+        const uint64_t left = len - el;
+        __asm__ volatile(".byte 0x0f,0x01,0xfa" :: "a"(line + 64), "c"(0), "d"(0) : "memory");   /* monitorx */
+        __asm__ volatile(".byte 0x0f,0x01,0xfb" :: "a"(0xF0), "b"((uint32_t)(left > 0xFFFFFFFFull ? 0xFFFFFFFFull : left)),
+                         "c"(2) : "memory");                                                       /* mwaitx, timer on */
+    }
+}
+#else
+static void jd_job(void) {}
+#endif
+static __attribute__((noinline)) void jd_after(int module) { if (__builtin_expect(s_jd_mod >= 0, 0) && module == s_jd_mod) jd_job(); }
+
 static void cfg_init(void)
 {
     const char* e = getenv("PS3_NATIVE_JOBS");
@@ -141,6 +211,7 @@ static void cfg_init(void)
     s_help_peek = env_int("PS3_NATIVE_JOBS_HELP_PEEK", 1);
     s_heal = env_int("PS3_NATIVE_JOBS_HEAL", 1);
     s_nodetect = env_int("PS3_NATIVE_JOBS_NODETECT", 0);
+    jd_cfg();                         /* (ft1) PS3_JOBDELAY */
 }
 
 /* ---- managers ------------------------------------------------------------------------------- */
@@ -560,6 +631,7 @@ static void run_one(wws_worker* w, uint32_t own_spu, mgr_state* m, const qjob* q
     /* Track B2: a native job module (wws_njob.c, PS3_NATIVE_CULL) instead of the lifted job; 0 = declined */
     const int nat = wws_njob_try(w, &j, q->module, &r);
     if (!nat) wws_native_run(w, &j, &r);
+    jd_after(r.module);               /* (ft1) PS3_JOBDELAY (a call, no branch here: run_one keeps its PGO profile) */
     if (tok != 0xFF) token_give(tok);
     if (s_stats) {
         const uint64_t d = now_ns() - t0;
@@ -597,6 +669,7 @@ static DWORD WINAPI pool_main(LPVOID arg)
      * the pool's own name, still in work/bench/budget.py's "ps3-spu" group, so perf / top tell them apart */
     { char nm[16]; snprintf(nm, sizeof nm, "ps3-spuj%u", idx); pthread_setname_np(pthread_self(), nm); }
 #endif
+    t_jd_pool = 1;                    /* (ft1) PS3_JOBDELAY's `pool` */
     wws_worker* w = wws_worker_create(idx % 6);
     mgr_state* last = NULL;
     for (;;) {

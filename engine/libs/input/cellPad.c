@@ -15,6 +15,7 @@
 #include "../../include/ps3emu/log_first.h"   /* PS3_LOG_FIRST */
 #include <time.h>
 #include "cellPad.h"
+#include "../../include/ps3emu/ps3_liveab.h"   /* (ft1) PS3_LIVEAB: the in-run A/B (bench only) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1048,6 +1049,7 @@ static void pad_sdl_thread_body(void)
 {
     long us = 1000;
     { const char* e = getenv("PS3_PAD_THREAD_US"); if (e && *e) us = atol(e); if (us < 250) us = 250; }
+    const long us_set = us;   /* (ft1) PS3_LIVEAB may change the period while the game runs */
 #ifdef _WIN32
     /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Windows 10 1803+): a wait of 1 ms
      * is 1 ms whatever the system tick is; without it, Sleep(1). */
@@ -1061,6 +1063,7 @@ static void pad_sdl_thread_body(void)
     pad_sdl_list_unlock();
     while (!__atomic_load_n(&s_sdl_thr_stop, __ATOMIC_ACQUIRE)) {
         pad_sdl_service();   /* the first pass opens what is connected */
+        { const int lab = g_ps3_lab[PS3_LAB_PAD_US]; us = lab >= 250 ? lab : us_set; }   /* (ft1) PS3_LIVEAB */
 #ifdef _WIN32
         LARGE_INTEGER due;
         due.QuadPart = -(LONGLONG)us * 10;
@@ -2754,6 +2757,77 @@ static unsigned long long pad_route_us(void)
     return (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000ull;
 #endif
 }
+/* (ft1, 2026-11-19) closed-loop steering of a replayed route (bench only; off unless PS3_PAD_STEER / _REC are set).
+ * The street route splits at the cathedral gate because Cole moves relative to the follow camera, whose heading differs
+ * by a few degrees from run to run. PS3_PAD_STEER_REC=<ea>:<file> logs, at every replayed pad read, the route's guest ms
+ * and the two horizontal floats of a guest position vector at <ea> (big-endian; inFAMOUS 2's (x, y, height, 1) in cm,
+ * e.g. 0x00A75560 on the street save); PS3_PAD_STEER=<ea>:<file>[:<gain>[:<from ms>:<to ms>]] reads such a file of an
+ * on-route run and, between <from> and <to> (guest ms of the route), adds to the left stick's x the heading error toward
+ * the reference point 600 ms ahead (the actual heading from the last ~200 ms of movement): x = 0x80 + gain * angle (rad),
+ * limited to +-0x30. Positive gain = push right for a target on the right (the sign is the world's; a negative gain flips it). */
+static void pad_route_steer(unsigned int ms, CellPadData* data)
+{
+    static int s_on = -1; static uint32_t s_ea; static FILE* s_rec;
+    static float (*s_ref)[3]; static int s_nref, s_from = 6000, s_to = 40000; static double s_gain = 160.0;
+    static float s_hx[16], s_hy[16]; static unsigned int s_ht[16]; static int s_hn, s_said;
+    if (__builtin_expect(s_on == 0, 1)) return;
+    if (s_on < 0) {
+        s_on = 0;
+        const char* r = getenv("PS3_PAD_STEER_REC"); const char* e = getenv("PS3_PAD_STEER");
+        char path[512];
+        if (r && *r && sscanf(r, "%x:%511s", &s_ea, path) == 2 && (s_rec = fopen(path, "w")) != NULL) {
+            s_on = 1; printf("[cellPad] PS3_PAD_STEER_REC: position at 0x%08X -> %s\n", s_ea, path);
+        } else if (e && *e) {
+            char* q; s_ea = (uint32_t)strtoul(e, &q, 16);
+            if (*q == ':') {
+                q++; char* c = strchr(q, ':'); size_t n = c ? (size_t)(c - q) : strlen(q);
+                if (n < sizeof path) { memcpy(path, q, n); path[n] = 0; }
+                if (c) { s_gain = atof(c + 1); c = strchr(c + 1, ':'); if (c) { s_from = atoi(c + 1); c = strchr(c + 1, ':'); if (c) s_to = atoi(c + 1); } }
+                FILE* f = fopen(path, "r");
+                if (f) {
+                    int cap = 0; unsigned int t; float x, y;
+                    while (fscanf(f, "%u %f %f", &t, &x, &y) == 3) {
+                        if (s_nref == cap) { cap = cap ? cap * 2 : 4096; s_ref = (float (*)[3])realloc(s_ref, cap * sizeof *s_ref); }
+                        s_ref[s_nref][0] = (float)t; s_ref[s_nref][1] = x; s_ref[s_nref][2] = y; s_nref++;
+                    }
+                    fclose(f);
+                    if (s_nref > 10) s_on = 2;
+                }
+                printf("[cellPad] PS3_PAD_STEER: position at 0x%08X, %d reference points from %s, gain %.0f, guest %d..%d ms: %s\n",
+                       s_ea, s_nref, path, s_gain, s_from, s_to, s_on == 2 ? "on" : "OFF (no reference)");
+            }
+        }
+        fflush(stdout);
+        if (!s_on) return;
+    }
+    const float px = vm_read_f32(s_ea), py = vm_read_f32(s_ea + 4);
+    if (s_on == 1) { fprintf(s_rec, "%u %.3f %.3f\n", ms, px, py); if ((ms / 1000) % 5 == 0) fflush(s_rec); return; }
+    /* history: positions of the last reads (about one per frame) */
+    s_hx[s_hn & 15] = px; s_hy[s_hn & 15] = py; s_ht[s_hn & 15] = ms; s_hn++;
+    if ((int)ms < s_from || (int)ms > s_to || s_hn < 8) return;
+    int j = s_hn - 1, k = j;
+    while (k > s_hn - 16 && k > 0 && ms - s_ht[(k - 1) & 15] <= 200) k--;
+    const float vx = px - s_hx[k & 15], vy = py - s_hy[k & 15];
+    if (vx * vx + vy * vy < 25.0f) return;                 /* < 5 cm in 200 ms: standing */
+    const float tq = (float)ms + 600.0f;
+    int a = 0; while (a + 1 < s_nref && s_ref[a + 1][0] <= tq) a++;
+    float tx = s_ref[a][1], ty = s_ref[a][2];
+    if (a + 1 < s_nref && s_ref[a + 1][0] > s_ref[a][0]) {
+        const float w = (tq - s_ref[a][0]) / (s_ref[a + 1][0] - s_ref[a][0]);
+        if (w > 0 && w < 1) { tx += w * (s_ref[a + 1][1] - tx); ty += w * (s_ref[a + 1][2] - ty); }
+    }
+    const float dx = tx - px, dy = ty - py;
+    const double ang = atan2((double)vx * dy - (double)vy * dx, (double)vx * dx + (double)vy * dy);   /* + = target to the left (x right, y forward) */
+    int sx = (int)lround(-s_gain * ang);
+    if (sx > 0x30) sx = 0x30; if (sx < -0x30) sx = -0x30;
+    const int lx = (int)data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X] + sx;
+    data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X] = (u16)(lx < 0 ? 0 : lx > 0xFF ? 0xFF : lx);
+    if (!s_said || (ms / 1000) != (unsigned)s_said) {
+        if (ms % 1000 < 40) printf("[cellPad] steer %u ms: pos %.0f %.0f ref %.0f %.0f err %.1f deg stick x %+d\n", ms, px, py, tx, ty, ang * 57.2958, sx);
+        s_said = (int)(ms / 1000);
+    }
+}
+
 static void pad_route_apply(u32 port_no, CellPadData* data)
 {
     static int s_init = 0, s_mode = 0;           /* 1 record, 2 replay */
@@ -2828,6 +2902,7 @@ static void pad_route_apply(u32 port_no, CellPadData* data)
         return;
     }
     memcpy(&data->button[2], &s_w[s_i][2], (PAD_ROUTE_WORDS - 2) * sizeof(u16));   /* words 0-1 stay live */
+    pad_route_steer(ms, data);   /* (ft1) PS3_PAD_STEER / PS3_PAD_STEER_REC (bench only, off by default) */
 }
 
 static s32 pad_get_data(u32 port_no, CellPadData* data_guest)
