@@ -94,3 +94,13 @@ hd2 contains:
 **To go back to the previous build:**
 - copy both files from `work/port/installed-mgPr-20261119/` into `work/port/build/`;
 - the launcher backup is `tools/play.sh.installed-mgPr-20261119`; the launcher itself only gained a comment line.
+
+### 05:45: GPU round started
+
+On the street the GPU takes 17.5 ms per frame with your settings (at 1200 MHz), which is over the 16.7 ms a 60 fps frame allows. This round:
+- measures where that GPU time goes;
+- measures what each of your graphics settings costs (texture filtering, soft shadows, SSAO and the others), with screenshots, so you can choose;
+- re-checks the best GPU clock on the street;
+- looks for GPU savings that leave the picture identical.
+
+If you want to play in the meantime: the agent stops starting test runs while the game lock is held. When you're back, tell me in the session and I'll hold it for you.
