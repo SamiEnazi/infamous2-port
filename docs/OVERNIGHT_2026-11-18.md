@@ -31,3 +31,37 @@ Street, hd1:
 ## Log
 
 (entries are added as results come in)
+
+### 01:40: main-thread round finished (no fps gain; it shows where the time goes)
+
+**Where the main thread's 20.4 ms per frame goes on the street:**
+
+| Item | ms per frame |
+|---|---|
+| The game's own code (recompiled PPU) | 14.0 |
+| Jobs the main thread runs itself | 2.7 |
+| Waiting for jobs | 2.5 |
+| Guest store slow path | ~1.0 |
+| Other | ~0.5 |
+| Idle | 1.2 |
+
+- **The game's own code:** 69% of the thread. It is spread across many functions, the top one being only 1.6%. Most of its time is spent waiting for memory (cache misses), not on any one instruction pattern the recompiler could avoid.
+- **Waiting for jobs:** about a quarter of the frame. The 4 job threads are fully busy twice per frame:
+  - the animation burst: jobs 213, 218 and 200, ~22.5 ms of CPU;
+  - the render-list burst: jobs 204, 216, 210, 208 and 201, ~20 ms of CPU.
+
+  The main thread waits at the end of each burst. More job threads did not help, because a 5th thread takes power from the others at 15 W. Neither did letting the main thread run any queued job: it then ran long jobs while the short one it waited for had already finished. **The way forward is faster jobs on those paths, mainly 213, 218, 204 and 216.**
+
+**Kept:**
+- 365fd60: the waiting threads check the job queue before taking its lock. That removes ~30,000 lock calls per frame. The output is identical and fps is unchanged (street 46.68 vs 46.66).
+- 626ab72: a benchmark-only clock fix, off by default. It removes the fixed ~120 ms frames that the test mode caused on the street.
+
+**Rejected:**
+
+| Variant | Street fps | Note |
+|---|---|---|
+| Main thread may run any queued job | 45.58 vs 46.66 | |
+| 5 job threads | 46.11 | |
+| Main thread alone on a core | −3.6% | |
+
+**Next:** retrain the PGO profiles on the plaza and the street with everything above, build the install candidate "hd2", A/B it against the installed build and hd1, then a 30-minute standing run and the job replays. If it passes, I install it.
