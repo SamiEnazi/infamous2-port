@@ -65,3 +65,32 @@ Street, hd1:
 | Main thread alone on a core | −3.6% | |
 
 **Next:** retrain the PGO profiles on the plaza and the street with everything above, build the install candidate "hd2", A/B it against the installed build and hd1, then a 30-minute standing run and the job replays. If it passes, I install it.
+
+### 05:30: new build "hd2" installed
+
+hd2 contains:
+- the graphics-thread fast path at 16:10 (04ddd13);
+- the startup-crash fix (8833293);
+- the job-queue lock change (365fd60);
+- an optimization profile (PGO) retrained on the plaza and the street with all of the above.
+
+**Benchmarks** (frame-stepped tests, your settings, GPU 1200 MHz):
+
+| | Old installed (mgPr) | hd2 | Change |
+|---|---|---|---|
+| Plaza | 48.2 fps | **50.7 fps** | +5.2% |
+| Street (to the cathedral) | 45.8 fps | **46.1 fps** | +0.5% (within noise) |
+| Street, first 16 s (the stretch every run shares) | 39.2 fps | **40.1 fps** | +2.3% |
+| Standing at spot 2, real clock, 60 fps cap, 30 min | 57.1 fps (15-min control) | **58.9 fps** | +3% |
+
+**Standing run:** no frame over 50 ms; worst frame 44 ms. Frames over 33 ms: 0.36 per minute vs 0.54 for the old build. No crash or hang.
+
+**Correctness:** the job replays (exact-output checks of the background jobs) give the same results as the old build.
+
+**Why the street barely moves:** the main game thread limits it (20.5 ms per frame), and hd2 speeds up the graphics thread, not the main thread.
+
+**Smoke test of the installed files:** the street route, run from your install folder against a separate test copy of the game data: clean start and exit, no errors.
+
+**To go back to the previous build:**
+- copy both files from `work/port/installed-mgPr-20261119/` into `work/port/build/`;
+- the launcher backup is `tools/play.sh.installed-mgPr-20261119`; the launcher itself only gained a comment line.
