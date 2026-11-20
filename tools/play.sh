@@ -218,6 +218,11 @@ export PS3RECOMP_GCM_SPIN_US PS3RECOMP_VK_TQ_SPIN_US PS3RECOMP_VK_PIPE_THREADS P
 # With both and the store lift (Linux builds: tools/rebuild_win.py) + the mg5r profiles = build hd5c, against hd4: street
 # +1.65 % (SE 0.46, guest 4-20 s) / +2.63 % (SE 1.11, full route), plaza +1.70 % (SE 0.47), standing 60 fps equal.
 : "${PS3_NATIVE_JOBS_PRIO:=1}" "${PS3RECOMP_ENG_R8:=3}"; export PS3_NATIVE_JOBS_PRIO PS3RECOMP_ENG_R8
+# (deck-perf, hd6, 2026-11-20) The Vulkan recording worker: the RSX thread queues its vkCmd* calls and a second thread
+# records them, placed on the RSX core's SMT sibling (CPU 7, kept clear by PS3_CPU_PLACE=rsxcore). It lost on 2026-11-17
+# with the old RSX thread; on hd5 (agent sz2, abseq, PRIO=1 R8=3 both sides) quick street +2.12 % (SE 0.69, ACCEPT after
+# 3 pairs), RSX thread 18.14 -> 16.32 ms; plaza +2.4..+3.4 %. =0 = recording on the RSX thread itself, as before.
+: "${PS3RECOMP_VK_THREADED:=1}" "${PS3_CPU_PLACE_VKW:=1}"; export PS3RECOMP_VK_THREADED PS3_CPU_PLACE_VKW
 # The RSX (draw) thread alone on a core, every other thread on the rest (engine host_place.c, Linux):
 # 30.5 -> 33.0 fps on the Deck, 34.7 with the job 210 native. PS3_CPU_PLACE=0 = the OS decides.
 : "${PS3_CPU_PLACE:=rsxcore}"; export PS3_CPU_PLACE
