@@ -28,6 +28,9 @@
  *                             pool thread always takes the ready ring's next ticket, 1 = its last manager's next job first)
  *   PS3_NATIVE_JOBS_PRIO      (s1) the runner's priority classes (wws_runner.c, "priority classes"; 0 = one FIFO, 1 = other
  *                             threads' long-job managers (Edge) last; 2-5 bench modes)
+ *   PS3RECOMP_ENG_R8          (r8, 2026-11-20) the RSX thread's texture / program draw cuts, a bit mask (rsx_draw_engine.c
+ *                             "R8"; rsx_vulkan_backend.c "R5": 1 = descriptor sets kept across frames, 2 = the fragment
+ *                             program's structural memo); the backend takes its bit at the next frame
  */
 #ifndef PS3EMU_PS3_LIVEAB_H
 #define PS3EMU_PS3_LIVEAB_H
@@ -51,6 +54,7 @@ enum {
     PS3_LAB_GPUCLK,
     PS3_LAB_STICKY,
     PS3_LAB_JOBPRIO,
+    PS3_LAB_R8,
     PS3_LAB_N
 };
 /* The in-run A/B's value of each switch; -1 = not overridden (the site uses its own setting). */

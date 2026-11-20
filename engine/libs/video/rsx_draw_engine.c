@@ -45,6 +45,7 @@
 #include "../../include/ps3emu/ps3_settings.h"  /* the PC menu's live settings (PS3RECOMP_DOF, ...) */
 #include "../../include/ps3emu/ps3_lightfx.h"   /* the menu's Lighting page (PS3RECOMP_SOFT_SHADOWS, ...) */
 #include "../../include/ps3emu/ps3_title_view.h" /* (dofov) PS3RECOMP_DOF=play: the title says gameplay or cutscene */
+#include "../../include/ps3emu/ps3_liveab.h"    /* (r8) PS3RECOMP_ENG_R8 flips live with PS3_LIVEAB */
 
 /* Knobs PS3_TOGGLE_FILE can change while the game runs (their watchers only
  * store; the RSX thread reads). */
@@ -3911,6 +3912,86 @@ static const eng_vp_memo* eng_vp_current(void)
     return m;
 }
 
+/* (r8) PS3RECOMP_ENG_R8: the texture / program draw cuts, a bit mask (default 0 = none; live through PS3_LIVEAB).
+ * Bit 1 is the backend's (rsx_vulkan_backend.c, R5: descriptor sets kept across frames); bit 2 the structural memo
+ * below. PS3RECOMP_ENG_R8_VERIFY=1: every structural-memo hit is also analysed the whole way and compared ([r8-verify]
+ * lines; the whole way's result is the one used). */
+static int eng_r8(void)
+{
+    const int lab = g_ps3_lab[PS3_LAB_R8];
+    if (lab >= 0) return lab;
+    static int env = -1;
+    if (__builtin_expect(env < 0, 0)) { const char* e = getenv("PS3RECOMP_ENG_R8"); env = e ? (int)strtol(e, NULL, 0) : 0; }
+    return env;
+}
+/* (r8) bit 2, the fragment program's STRUCTURAL memo. The game uploads ~170 fragment programs a frame on the street
+ * whose bytes the content memo (PROG_CMEMO) has not seen -- the same programs with other inline constants -- and each
+ * paid the whole analysis: the structural hash a byte at a time and four more microcode walks (texture mask, sampled
+ * units, gamma and sign-expansion candidates), ~2 % of the RSX thread. Those five results depend on the instruction
+ * blocks alone when the program has no branch instruction (DWORD2 bit 31): every walk then splits the program into
+ * the same instruction blocks and inline-constant payloads (a payload follows each instruction with a constant
+ * source; rsx_fp_program_size's rule, which the unit walks also follow without a branch), and the structural hash
+ * hashes the instruction blocks and the two counts only. So one walk copies the instruction blocks out; a table entry
+ * with the same blocks (compared in full), size and counts hands over the five results. The constants are still
+ * collected from the program's own bytes, as before. A program with a branch is analysed the whole way. */
+#define ENG_FPS_SIZE 1024u
+typedef struct {
+    u64 h; u32 size, ni, np;               /* size 0: empty */
+    u8* ib; u32 icap;                      /* the instruction blocks (ni x 16 bytes) */
+    u64 structural; u32 tex_mask, sampled_units, gamma_cand, expand_cand;
+} eng_fps_entry;
+static eng_fps_entry s_fps[ENG_FPS_SIZE];
+static u8 s_fps_buf[ENG_FP_MAX_BYTES];
+static u64 s_fpsn[5];                      /* hits, misses (filled), branch programs, verify checks, verify differences */
+static int s_r8_verify = -1;
+/* The entry for `uc`'s (size bytes) instruction blocks: *hit = 1 when it holds them, else it is the slot to fill
+ * (NULL: a program with a branch, or one the walk does not end where the size says). */
+static eng_fps_entry* eng_fps_find(const u8* uc, u32 size, int* hit)
+{
+    *hit = 0;
+    u32 off = 0, ni = 0, np = 0, end = 0;
+    while (off + 16u <= size) {
+        const u32 w0 = rsx_fp_read_word(uc + off), w1 = rsx_fp_read_word(uc + off + 4),
+                  w2 = rsx_fp_read_word(uc + off + 8), w3 = rsx_fp_read_word(uc + off + 12);
+        if (w2 >> 31) { s_fpsn[2]++; return NULL; }
+        memcpy(s_fps_buf + (size_t)ni * 16u, uc + off, 16);
+        ni++;
+        off += 16u;
+        if (((w1 & 3u) == 2u || (w2 & 3u) == 2u || (w3 & 3u) == 2u) && off + 16u <= size) { off += 16u; np++; }
+        if (w0 & 1u) { end = 1; break; }
+    }
+    if (!end || off != size) return NULL;
+    const u64 h = eng_khash(s_fps_buf, ni * 16u, 0x3C6EF372FE94F82Bull ^ size);
+    eng_fps_entry* e = &s_fps[(u32)(h >> 40) & (ENG_FPS_SIZE - 1u)];
+    if (e->size == size && e->h == h && e->ni == ni && e->np == np && e->ib && !memcmp(e->ib, s_fps_buf, (size_t)ni * 16u)) {
+        *hit = 1;
+        return e;
+    }
+    if (!e->ib || e->icap < ni * 16u) {
+        u8* b = (u8*)realloc(e->ib, (size_t)ni * 16u);
+        if (!b) return NULL;
+        e->ib = b; e->icap = ni * 16u;
+    }
+    e->size = 0;                            /* filled by the caller after the analysis */
+    e->h = h; e->ni = ni; e->np = np;
+    memcpy(e->ib, s_fps_buf, (size_t)ni * 16u);
+    return e;
+}
+static void eng_fps_report(void)
+{
+    static u32 last = ~0u;
+    if (g.frames / 600u == last) return;
+    static int on = -1;
+    if (on < 0) { const char* l = getenv("PS3RECOMP_LIMITS"); on = (l && *l && *l != '0') || getenv("PS3RECOMP_ENG_PROG_STATS"); }
+    if (on && last != ~0u)
+        fprintf(stderr, "[r8-fp] frames %u..%u: structural memo hits %llu, misses %llu, programs with a branch %llu;"
+                        " verify %llu checked, %llu differ\n", last * 600u, g.frames,
+                (unsigned long long)s_fpsn[0], (unsigned long long)s_fpsn[1], (unsigned long long)s_fpsn[2],
+                (unsigned long long)s_fpsn[3], (unsigned long long)s_fpsn[4]);
+    last = g.frames / 600u;
+    memset(s_fpsn, 0, sizeof s_fpsn);
+}
+
 /* The bound fragment program's memo entry, or NULL when there is none (no
  * program, unmapped, or no end flag within ENG_FP_MAX_BYTES). */
 static const eng_fp_memo* eng_fp_current(void)
@@ -4027,7 +4108,16 @@ static const eng_fp_memo* eng_fp_current(void)
             return m;
         }
     }
-    m->structural = rsx_fp_structural_hash(uc, size, 1469598103934665603ull);
+    /* (r8) PS3RECOMP_ENG_R8 bit 2: the five structure-only results from the structural memo */
+    eng_fps_entry* fse = NULL;
+    int fs_hit = 0;
+    if (eng_r8() & 2) {
+        eng_fps_report();
+        fse = eng_fps_find(uc, size, &fs_hit);
+        if (__builtin_expect(s_r8_verify < 0, 0)) { const char* v = getenv("PS3RECOMP_ENG_R8_VERIFY"); s_r8_verify = v && *v == '1'; }
+    }
+    const int fs_take = fs_hit && !s_r8_verify;
+    m->structural = fs_take ? fse->structural : rsx_fp_structural_hash(uc, size, 1469598103934665603ull);
     m->constants.count = 0;
     /* (rsx-vtx) PS3RECOMP_ENG_FPK_LEAN (default 1; 0 = clear the whole 32 KB
      * block first, as before): a memo miss (new or re-uploaded program, ~170
@@ -4039,11 +4129,35 @@ static const eng_fp_memo* eng_fp_current(void)
     m->constants_ok = (fpk_lean ? rsx_fp_collect_constants_lean(uc, size, &m->constants)
                        : ce     ? eng_fp_collect_lean(uc, size, &m->constants)
                                 : rsx_fp_collect_constants(uc, size, &m->constants)) >= 0;
+    if (fs_take) {
+        s_fpsn[0]++;
+        m->tex_mask = fse->tex_mask; m->sampled_units = fse->sampled_units;
+        m->gamma_cand = fse->gamma_cand; m->expand_cand = fse->expand_cand;
+    } else {
     m->tex_mask = rsx_fp_texture_mask(uc, size);
     static const u8 all[RSX_DSP_NUM_TEXTURES] = { 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1 };
     m->sampled_units = rsx_fp_texture_units(uc, size);
     m->gamma_cand = rsx_fp_texture_gamma_units(uc, size, all);
     m->expand_cand = rsx_fp_texture_expand_units(uc, size, all);
+    if (fs_hit) {                           /* (r8) VERIFY: what the memo would have handed over */
+        s_fpsn[3]++;
+        if (fse->structural != m->structural || fse->tex_mask != m->tex_mask || fse->sampled_units != m->sampled_units ||
+            fse->gamma_cand != m->gamma_cand || fse->expand_cand != m->expand_cand) {
+            static u32 nd;
+            s_fpsn[4]++;
+            if (nd++ < 32u)
+                fprintf(stderr, "[r8-verify] fp structural memo #%u: loc %u off 0x%08X size %u: hash %016llx/%016llx"
+                                " tex %X/%X units %X/%X gamma %X/%X expand %X/%X\n", nd, loc, off, size,
+                        (unsigned long long)fse->structural, (unsigned long long)m->structural, fse->tex_mask, m->tex_mask,
+                        fse->sampled_units, m->sampled_units, fse->gamma_cand, m->gamma_cand, fse->expand_cand, m->expand_cand);
+        }
+    } else if (fse) {                       /* (r8) remembered for the next program with these blocks */
+        s_fpsn[1]++;
+        fse->structural = m->structural; fse->tex_mask = m->tex_mask; fse->sampled_units = m->sampled_units;
+        fse->gamma_cand = m->gamma_cand; fse->expand_cand = m->expand_cand;
+        fse->size = size;
+    }
+    }
     if (ce) {                               /* remembered for the next upload of these bytes */
         const u32 nk = m->constants.count;
         u8* cb = ce->bytes;

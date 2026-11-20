@@ -405,6 +405,7 @@ typedef struct vk_buffer {
     void*          ptr;
     VkDeviceSize   size;
     int            coherent;
+    u32            r5ref;   /* (r8) R5: a kept descriptor set names this buffer (vk_destroy_buffer: s_vkill) */
 } vk_buffer;
 
 typedef struct vk_image {
@@ -418,6 +419,9 @@ typedef struct vk_image {
     VkImageUsageFlags  usage;
     VkImageAspectFlags aspect;
     u32                sub;     /* non-zero: `mem` is a texture block, this its slot (vk_ts_alloc) */
+    u32                r5ser;   /* (r8) R5: this image's serial for the kept descriptor sets' keys (0: none given
+                                 * yet). It travels with the image (the dead lists, the recycle pool: the same view)
+                                 * and goes when the struct is cleared, which every path that lets go of a view does */
 } vk_image;
 
 #define VK_SAMPLER_CACHE 32
@@ -1010,6 +1014,7 @@ static int vk_create_image_levels(vk_image* im, VkFormat fmt, u32 w, u32 h, u32 
     };
     VK_CHECK(pvkCreateImageView(s_vk.device, &vci, NULL, &im->view), "vkCreateImageView");
     im->fmt = fmt; im->w = w; im->h = h; im->levels = levels; im->usage = usage; im->aspect = aspect;
+    im->r5ser = 0;                          /* (r8) R5: a new view, no serial yet */
     return 0;
 }
 
@@ -1025,6 +1030,12 @@ static void vk_destroy_image_now(vk_image* im);
 /* Bumped whenever an image (and with it a view) goes away or an engine object
  * is released: the descriptor memo (vk_eng_batch_set) holds views by handle. */
 static u32 s_eobj_gen = 1;
+/* (r8) PS3RECOMP_ENG_R8 bit 1 (R5, vk_eng_batch_set): bumped whenever a buffer a kept descriptor set names (the
+ * uniform arena) or a sampler is really destroyed: a set kept across frames names them by handle value, and a new
+ * object may get a dead one's value, so the kept sets are given up then. Views carry serials instead (r5ser). */
+static u32 s_vkill = 1;
+static u32 s_r5ser_next = 1;
+static unsigned long long s_r5kn[4];   /* views destroyed: named by kept sets / not; buffers: named / not */
 static u32 vk_dead_img_cap(void)
 {
     static u32 cap;
@@ -1079,7 +1090,7 @@ static void vk_destroy_image_now(vk_image* im)
 static void vk_ts_free(u32 sub);
 static void vk_destroy_image_real(vk_image* im)
 {
-    if (im->view) pvkDestroyImageView(s_vk.device, im->view, NULL);
+    if (im->view) { pvkDestroyImageView(s_vk.device, im->view, NULL); s_r5kn[im->r5ser ? 0 : 1]++; }   /* (r8) R5 */
     if (im->img)  pvkDestroyImage(s_vk.device, im->img, NULL);
     if (im->sub)       vk_ts_free(im->sub);      /* a slot of a shared block: never freed itself */
     else if (im->mem)  pvkFreeMemory(s_vk.device, im->mem, NULL);
@@ -1137,7 +1148,7 @@ static void vk_destroy_buffer(vk_buffer* b)
     if (s_batch.recording && b->buf) vk_batch_flush();
     if (b->buf) vk_fif_wait_other();         /* the other slot's frame may read it */
     if (b->ptr) pvkUnmapMemory(s_vk.device, b->mem);
-    if (b->buf) pvkDestroyBuffer(s_vk.device, b->buf, NULL);
+    if (b->buf) { pvkDestroyBuffer(s_vk.device, b->buf, NULL); if (b->r5ref) { s_vkill++; s_r5kn[2]++; } else s_r5kn[3]++; }   /* (r8) R5 */
     if (b->mem) pvkFreeMemory(s_vk.device, b->mem, NULL);
     memset(b, 0, sizeof *b);
 }
@@ -1348,6 +1359,14 @@ static void vk_flush_note(int line, u32 draws)
 static void vk_batch_completed(void);
 static void vk_vb_free_now(u32 h);
 static u32 s_dset_gen;
+/* (r8) R5 (vk_eng_batch_set, "the sets kept across frames"): each slot's kept-table generation and kill mark */
+#define VK_R5_RESET (VK_BATCH_SETS / 2u)   /* a slot's pool past this at a completion is reset (room for a whole frame) */
+static struct { u32 gen, kill; } s_r5s[VK_FIF_MAX];
+static u32 s_r5_genc = 0x80000000u;
+static int s_r5_mode = -1;                  /* -1 unread; 0 off; 1 on (the open frame's) */
+static u32 s_r5_fno;                        /* frames seen (vk_r5_frame) */
+static unsigned long long s_r5n[6];         /* hits, new sets, tables given up (kill), pool resets, kept at completion, frames */
+static void s_r5c_drop(void);               /* (r8) R5 check: captures whose sets a pool reset freed */
 static void vk_reuse_stats(void);
 static int vk_submit_and_wait_at(int line)
 {
@@ -1407,9 +1426,15 @@ static void vk_batch_completed(void)
         for (u32 k = 0; k < s_batch.n_dead_vb; k++)
             vk_vb_free_now(s_batch.dead_vb[k]);
         s_batch.n_dead_vb = 0;
-        if (s_batch.dpool && s_batch.dsets) {
+        /* (r8) R5: with the sets kept across frames the pool is reset only when it fills up (its kept table goes
+         * with it); every set in it belongs to this slot, whose submission just completed */
+        if (s_batch.dpool && s_batch.dsets && s_r5_mode > 0 && s_batch.dsets < VK_R5_RESET) s_r5n[4]++;
+        else if (s_batch.dpool && s_batch.dsets) {
             pvkResetDescriptorPool(s_vk.device, s_batch.dpool, 0);
             s_batch.dsets = 0;
+            s_r5s[s_fif_cur].gen = ++s_r5_genc;   /* (r8) R5: the slot's kept sets are gone */
+            s_r5c_drop();                         /* (r8) R5 check: and what was captured with them */
+            if (s_r5_mode > 0) s_r5n[3]++;
         }
         s_dset_gen++;                           /* vk_eng_batch_set's table: those sets are gone */
         static int stats = -1;   /* PS3RECOMP_VK_BATCH_STATS=<every n flushes> (1 = 2000) */
@@ -4558,6 +4583,7 @@ static void vk_rdoc_poll(void)
 
 /* Blit the offscreen target into the next swapchain image and present it. */
 static void vk_present_window_body(void);
+static void vk_r5c_replay(void);
 /* (freeze) outside the async-present block below: vk_present_window uses them on every path, and builds
  * without the async present (VK_TQ_NO_ASYNC_PRESENT, e.g. Linux) did not see them (v0.5.4 Linux build error) */
 static int vk_pa_hold_take(void);     /* (freeze) vk_pipe_async.inc */
@@ -4713,6 +4739,9 @@ static void vk_present_async(void)
     const int was_batch = s_batch.recording;
     if (was_batch) vk_flush_note(__LINE__, s_batch.draws);
     if (vk_begin()) return;                 /* batched: ends the open pass */
+#ifdef R8_CHECK
+    vk_r5c_replay();                        /* (r8) R5 check: the captured draws repeated both ways */
+#endif
     s_batch.recording = 0;
     vk_image* const di = vk_disp_img();     /* [res] the scaled display image when on */
     vk_barrier_image(di->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
@@ -4808,6 +4837,9 @@ static void vk_present_window_body(void)
     const int was_batch = s_batch.recording;
     if (was_batch) vk_flush_note(__LINE__, s_batch.draws);
     if (vk_begin()) return;                 /* batched: ends the open pass */
+#ifdef R8_CHECK
+    vk_r5c_replay();                        /* (r8) R5 check: the captured draws repeated both ways */
+#endif
     s_batch.recording = 0;
     vk_image* const di = vk_disp_img();     /* [res] the scaled display image when on */
     const u32 di_w = vk_disp_w(), di_h = vk_disp_h();
@@ -5116,7 +5148,7 @@ static u32 vk_eng_alloc(void)
     for (u32 n = 1; n < VK_ENG_MAX_OBJ; n++) {
         const u32 i = cur;
         cur = cur + 1 < VK_ENG_MAX_OBJ ? cur + 1 : 1u;
-        if (s_eobj[i].kind == VK_ENG_FREE) return i;
+        if (s_eobj[i].kind == VK_ENG_FREE) { s_eobj[i].im.r5ser = 0; return i; }   /* (r8) R5: a new object, no serial */
     }
     { static int said; if (!said++) VK_LOG("engine: object table full (%d)\n", VK_ENG_MAX_OBJ); }
     rsx_lim_event(RSX_LIM_VK_OBJ, 0, "object table full: a texture/target/copy is not made");
@@ -7354,6 +7386,7 @@ static void vk_eng2_shutdown(void* user)
     memset(&s_e2, 0, sizeof s_e2);
     for (u32 i = 0; i < s_esamp_count; i++) pvkDestroySampler(s_vk.device, s_esamp[i].s, NULL);
     s_esamp_count = 0;
+    s_vkill++;   /* (r8) R5 */
 }
 
 /* Constants go straight into the shared UBO: vertex at 0, pixel at ps_off.
@@ -7812,6 +7845,273 @@ typedef struct {
 static struct { u32 gen; vk_dset_key key; VkDescriptorSet set; } s_dset_tab[VK_DSET_CACHE];
 static u32 s_dset_gen = 1;
 static unsigned long long s_dset_hit, s_dset_miss;
+/* (r8) R5, PS3RECOMP_ENG_R8 bit 1 (default off; live through PS3_LIVEAB, taken at the next frame): the sets kept
+ * across frames. Off, the table above is the open batch's pool's and empties with every pool reset or slot swap
+ * (s_dset_gen): on the street ~600 sets a frame were allocated and written again (vkAllocateDescriptorSets +
+ * vkUpdateDescriptorSets of 34 descriptors, ~0.75 us each) for the same views, samplers and blocks as the frame
+ * before. On, each frame-in-flight slot keeps its own table (s_r5tab) of sets from its own pool, which is no longer
+ * reset at each completion (vk_batch_completed) but only past VK_R5_RESET sets; the table's generation
+ * (s_r5s[slot].gen, from s_r5_genc: never a value s_dset_gen takes) moves only with such a reset or when a buffer
+ * or sampler a set names was destroyed (s_vkill). Why it is exact:
+ *  - a set is written once, at its allocation, and never updated again; its key is everything written into it
+ *    (the uniform buffer and the two block sizes, the sixteen views and samplers as vk_eng_image_infos chose them)
+ *    plus each unit's image serial, so a key match is a set with the same descriptors of the same live objects;
+ *  - a slot's sets are bound only by that slot's command buffer (lookups use the active slot's table; the
+ *    memos m / dsm compare the generation, distinct per slot), and a slot records only after its previous
+ *    submission completed (vk_fif_advance waits for its fence; a mid-frame flush waits too): no set is reset or
+ *    freed while a pending command buffer uses it (the reset is in vk_batch_completed, after the wait);
+ *  - a view dies only through vk_destroy_image_real (deferred until no frame uses it), and every path that lets go
+ *    of a view clears its vk_image (serial 0; a new object or view starts at 0 too): a new view that got a dead
+ *    one's handle value gets a new serial, so it never meets a set made for the dead one (one view a frame dies on
+ *    the street; giving the tables up for it, the first try, kept nothing). A pooled image (vk_destroy_image_now's
+ *    recycling) keeps its view and serial: a set naming it samples whatever the image now holds, as a new set would.
+ *    The uniform arena kept sets name is marked (vk_buffer.r5ref): its destruction (arena growth) bumps s_vkill, and
+ *    a table whose kill mark is older is given up before its next lookup; samplers die only at shutdown (s_vkill).
+ * The arena epoch s_dset_gen (constant windows, the fast-draw token) moves as before. */
+#define VK_R5_N 8192u
+typedef struct { u32 gen, born; vk_dset_key key; u32 ser[RSX_MAX_TEXTURES]; VkDescriptorSet set; } vk_r5_ent;
+static vk_r5_ent s_r5tab[VK_FIF_MAX][VK_R5_N];
+/* (r8) R5's check, PS3RECOMP_ENG_R8_CHECK=<n> (with bit 1 on; default 0 = off): on every n-th frame the first draw
+ * that binds a KEPT set made in an earlier frame (a table or memo hit) is captured as recorded -- the pass, the
+ * pipeline, the set and its dynamic offsets, the vertex / index buffers and offsets, viewport, scissor, stencil
+ * reference, depth bias, the indexed draw -- together with a twin set allocated and written now from the same views,
+ * samplers and blocks (what the per-frame table would have bound). At the frame's end (the present, no pass open) the
+ * draw is repeated twice into scratch targets of the pass's formats and size (colour 0, depth 1.0, stencil 0 before),
+ * once with each set; after the submit (the next frame's start: a device wait) colour, depth and stencil are read
+ * back and compared byte for byte ([r8-check] lines). Only draws of the engine's own passes without signed blend,
+ * input attachments or target copies are taken. */
+#define VK_R5C_MAX 2u
+static VkDescriptorSet vk_batch_alloc_set(void);
+typedef struct {
+    VkRenderPass rp; u32 w, h, k;
+    VkPipeline pipe; VkDescriptorSet set[2]; u32 dyn[2];
+    VkBuffer vb, ib; VkDeviceSize vo, io;
+    VkViewport vp; VkRect2D sc; u32 sref; int bias; float bc, bs;
+    u32 icount, ifirst; int32_t vofs;
+} vk_r5c_cap;
+typedef struct {
+    u32 k, w, h;
+    VkImage img[2][RSX_BE_MAX_COLOR_TARGETS + 1]; VkDeviceMemory mem[2][RSX_BE_MAX_COLOR_TARGETS + 1];
+    VkImageView view[2][RSX_BE_MAX_COLOR_TARGETS + 1]; VkFramebuffer fb[2];
+    VkDeviceSize off[2], bytes;
+} vk_r5c_job;
+static struct {
+    int every;                              /* -1 unread, 0 off */
+    VkDescriptorSet arm, fresh;             /* the kept set the next draw record is captured with, its twin */
+    vk_r5c_cap cap[VK_R5C_MAX]; u32 ncap;
+    vk_r5c_job job[VK_R5C_MAX]; u32 njob; int recorded;
+    VkBuffer buf; VkDeviceMemory bmem; void* ptr; VkDeviceSize bcap, used;
+    unsigned long long runs, bytes, diff, cov, skipped, failed;
+} s_r5c = { .every = -1 };
+static int vk_r5c_want(void)
+{
+#ifndef R8_CHECK
+    return 0;                               /* (r8) a check build only: no capture site here */
+#endif
+    if (__builtin_expect(s_r5c.every < 0, 0)) { const char* e = getenv("PS3RECOMP_ENG_R8_CHECK"); s_r5c.every = e ? atoi(e) : 0; }
+    return s_r5c.every > 0 && s_r5_fno % (u32)s_r5c.every == 0 && !s_r5c.arm && !s_r5c.recorded && s_r5c.ncap < VK_R5C_MAX;
+}
+/* a kept set made before this frame is about to be bound: arm the capture with a twin written now */
+static void vk_r5c_arm(VkDescriptorSet kept, VkBuffer ubuf, const VkDescriptorImageInfo* ii, const VkDescriptorImageInfo* si)
+{
+    VkDescriptorSet tw = vk_batch_alloc_set();
+    if (!tw) { s_r5c.failed++; return; }
+    vk_eng_write_set(tw, ubuf, ii, si);
+    s_r5c.arm = kept; s_r5c.fresh = tw;
+}
+static void vk_r5c_free_job(vk_r5c_job* j)
+{
+    for (int sd = 0; sd < 2; sd++) {
+        if (j->fb[sd]) pvkDestroyFramebuffer(s_vk.device, j->fb[sd], NULL);
+        for (u32 i = 0; i <= RSX_BE_MAX_COLOR_TARGETS; i++) {
+            if (j->view[sd][i]) pvkDestroyImageView(s_vk.device, j->view[sd][i], NULL);
+            if (j->img[sd][i]) pvkDestroyImage(s_vk.device, j->img[sd][i], NULL);
+            if (j->mem[sd][i]) pvkFreeMemory(s_vk.device, j->mem[sd][i], NULL);
+        }
+    }
+    memset(j, 0, sizeof *j);
+}
+static int vk_r5c_image(VkFormat fmt, u32 w, u32 h, int depth, VkImage* img, VkDeviceMemory* mem, VkImageView* view)
+{
+    VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt,
+        .extent = { w, h, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                 (depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                        : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) };
+    if (pvkCreateImage(s_vk.device, &ici, NULL, img) != VK_SUCCESS) return -1;
+    VkMemoryRequirements req; u32 type;
+    pvkGetImageMemoryRequirements(s_vk.device, *img, &req);
+    if (vk_find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &type) &&
+        vk_find_memory_type(req.memoryTypeBits, 0, &type)) return -1;
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type };
+    if (pvkAllocateMemory(s_vk.device, &mai, NULL, mem) != VK_SUCCESS || pvkBindImageMemory(s_vk.device, *img, *mem, 0) != VK_SUCCESS)
+        return -1;
+    VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = *img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = fmt, .subresourceRange = { depth ? VK_DS_ASPECT : VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    return pvkCreateImageView(s_vk.device, &vci, NULL, view) == VK_SUCCESS ? 0 : -1;
+}
+static void vk_r5c_barrier(VkCommandBuffer cb)
+{
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                           .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+    pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+static void s_r5c_drop(void) { s_r5c.skipped += s_r5c.ncap; s_r5c.ncap = 0; s_r5c.arm = VK_NULL_HANDLE; }
+/* the present, before postfx (the frame's command buffer, no pass open): record the repeats */
+static void vk_r5c_replay(void)
+{
+    if (!s_r5c.ncap) return;
+    VkCommandBuffer cb = s_vk.cmd;
+    if (!s_r5c.buf) {                       /* the readback buffer, once: 256 MB host-visible, host-cached */
+        s_r5c.bcap = 256ull << 20;
+        VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = s_r5c.bcap,
+                                   .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+        VkMemoryRequirements req; u32 type;
+        const VkMemoryPropertyFlags hv = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        if (pvkCreateBuffer(s_vk.device, &bci, NULL, &s_r5c.buf) != VK_SUCCESS) { s_r5c.every = 0; s_r5c.ncap = 0; return; }
+        pvkGetBufferMemoryRequirements(s_vk.device, s_r5c.buf, &req);
+        mai.allocationSize = req.size;
+        if ((vk_find_memory_type(req.memoryTypeBits, hv | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, &type) &&
+             vk_find_memory_type(req.memoryTypeBits, hv, &type)) ||
+            (mai.memoryTypeIndex = type, pvkAllocateMemory(s_vk.device, &mai, NULL, &s_r5c.bmem)) != VK_SUCCESS ||
+            pvkBindBufferMemory(s_vk.device, s_r5c.buf, s_r5c.bmem, 0) != VK_SUCCESS ||
+            pvkMapMemory(s_vk.device, s_r5c.bmem, 0, VK_WHOLE_SIZE, 0, &s_r5c.ptr) != VK_SUCCESS) {
+            VK_LOG("[r8-check] no readback buffer: check off\n"); s_r5c.every = 0; s_r5c.ncap = 0; return;
+        }
+    }
+    s_r5c.used = 0; s_r5c.njob = 0;
+    const VkFormat df = s_vk.depth_format;
+    const int stencil = (VK_DS_ASPECT & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+    for (u32 ci = 0; ci < s_r5c.ncap; ci++) {
+        const vk_r5c_cap* r = &s_r5c.cap[ci];
+        const u32 k = r->k, w = r->w, h = r->h;
+        const VkDeviceSize side = (VkDeviceSize)w * h * (4u * k + 4u + (stencil ? 1u : 0u));
+        if (s_r5c.used + 2u * side > s_r5c.bcap) { s_r5c.skipped++; continue; }
+        vk_r5c_job* j = &s_r5c.job[s_r5c.njob];
+        memset(j, 0, sizeof *j);
+        j->k = k; j->w = w; j->h = h; j->bytes = side;
+        int ok = 1;
+        for (int sd = 0; sd < 2 && ok; sd++) {
+            for (u32 i = 0; i <= k && ok; i++)
+                ok = !vk_r5c_image(i < k ? VK_FORMAT_R8G8B8A8_UNORM : df, w, h, i == k, &j->img[sd][i], &j->mem[sd][i], &j->view[sd][i]);
+            if (!ok) break;
+            VkFramebufferCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = r->rp,
+                                            .attachmentCount = k + 1, .pAttachments = j->view[sd], .width = w, .height = h, .layers = 1 };
+            ok = pvkCreateFramebuffer(s_vk.device, &fci, NULL, &j->fb[sd]) == VK_SUCCESS;
+            j->off[sd] = s_r5c.used + (VkDeviceSize)sd * side;
+        }
+        if (!ok) { vk_r5c_free_job(j); s_r5c.failed++; continue; }
+        s_r5c.used += 2u * side;
+        VkImageMemoryBarrier ib[2 * (RSX_BE_MAX_COLOR_TARGETS + 1)]; u32 nb = 0;
+        for (int sd = 0; sd < 2; sd++)
+            for (u32 i = 0; i <= k; i++)
+                ib[nb++] = (VkImageMemoryBarrier){ .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = j->img[sd][i],
+                    .subresourceRange = { i < k ? VK_IMAGE_ASPECT_COLOR_BIT : VK_DS_ASPECT, 0, 1, 0, 1 } };
+        pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, nb, ib);
+        const VkClearColorValue c0 = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } };
+        const VkClearDepthStencilValue z1 = { 1.0f, 0 };
+        for (int sd = 0; sd < 2; sd++)
+            for (u32 i = 0; i <= k; i++) {
+                const VkImageSubresourceRange rr = { i < k ? VK_IMAGE_ASPECT_COLOR_BIT : VK_DS_ASPECT, 0, 1, 0, 1 };
+                if (i < k) pvkCmdClearColorImage(cb, j->img[sd][i], VK_IMAGE_LAYOUT_GENERAL, &c0, 1, &rr);
+                else pvkCmdClearDepthStencilImage(cb, j->img[sd][i], VK_IMAGE_LAYOUT_GENERAL, &z1, 1, &rr);
+            }
+        vk_r5c_barrier(cb);
+        for (int sd = 0; sd < 2; sd++) {    /* 0: the kept set, 1: its twin written this frame */
+            const VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = r->rp,
+                                               .framebuffer = j->fb[sd], .renderArea = { { 0, 0 }, { w, h } } };
+            pvkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+            pvkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, r->pipe);
+            pvkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_g.pipe_layout, 0, 1, &r->set[sd], 2, r->dyn);
+            pvkCmdBindVertexBuffers(cb, 0, 1, &r->vb, &r->vo);
+            pvkCmdBindIndexBuffer(cb, r->ib, r->io, VK_INDEX_TYPE_UINT32);
+            pvkCmdSetViewport(cb, 0, 1, &r->vp);
+            pvkCmdSetScissor(cb, 0, 1, &r->sc);
+            pvkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, r->sref);
+            if (r->bias) pvkCmdSetDepthBias(cb, r->bc, 0.0f, r->bs);
+            pvkCmdDrawIndexed(cb, r->icount, 1, r->ifirst, r->vofs, 0);
+            pvkCmdEndRenderPass(cb);
+        }
+        vk_r5c_barrier(cb);
+        for (int sd = 0; sd < 2; sd++) {    /* read back: colour targets, depth, stencil */
+            VkDeviceSize o = j->off[sd];
+            for (u32 i = 0; i <= k; i++) {
+                VkBufferImageCopy bc = { .bufferOffset = o, .imageSubresource = { i < k ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
+                                         .imageExtent = { w, h, 1 } };
+                pvkCmdCopyImageToBuffer(cb, j->img[sd][i], VK_IMAGE_LAYOUT_GENERAL, s_r5c.buf, 1, &bc);
+                o += (VkDeviceSize)w * h * 4u;
+                if (i == k && stencil) {
+                    bc.bufferOffset = o; bc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+                    pvkCmdCopyImageToBuffer(cb, j->img[sd][i], VK_IMAGE_LAYOUT_GENERAL, s_r5c.buf, 1, &bc);
+                    o += (VkDeviceSize)w * h;
+                }
+            }
+        }
+        vk_r5c_barrier(cb);
+        s_r5c.njob++;
+    }
+    s_r5c.ncap = 0;
+    if (s_r5c.njob) s_r5c.recorded = 1;
+}
+/* the next frame's start (its command buffer was submitted): wait, compare, free */
+static void vk_r5c_compare(void)
+{
+    if (!s_r5c.recorded) return;
+    pvkDeviceWaitIdle(s_vk.device);
+    unsigned long long diff = 0, bytes = 0, cov = 0;
+    for (u32 ji = 0; ji < s_r5c.njob; ji++) {
+        vk_r5c_job* j = &s_r5c.job[ji];
+        const u8* a = (const u8*)s_r5c.ptr + j->off[0];
+        const u8* b = (const u8*)s_r5c.ptr + j->off[1];
+        for (VkDeviceSize i = 0; i < j->bytes; i++) diff += a[i] != b[i];
+        const VkDeviceSize cbytes = (VkDeviceSize)j->w * j->h * 4u * j->k;
+        for (VkDeviceSize i = 0; i < cbytes; i++) cov += a[i] != 0;
+        const float* z = (const float*)(const void*)(a + cbytes);
+        for (VkDeviceSize i = 0, nz = (VkDeviceSize)j->w * j->h; i < nz; i++) cov += z[i] != 1.0f;
+        bytes += j->bytes;
+        vk_r5c_free_job(j);
+    }
+    s_r5c.runs += s_r5c.njob; s_r5c.bytes += bytes; s_r5c.diff += diff; s_r5c.cov += cov;
+    fprintf(stderr, "[r8-check] %u draws repeated with the kept set and a twin written now: %llu bytes compared, %llu differ;"
+                    " drawn %llu bytes/texels; total %llu draws, %llu bytes, %llu differ, drawn %llu (skipped %llu, failed %llu)\n",
+            s_r5c.njob, bytes, diff, cov, s_r5c.runs, s_r5c.bytes, s_r5c.diff, s_r5c.cov, s_r5c.skipped, s_r5c.failed);
+    s_r5c.recorded = 0; s_r5c.njob = 0;
+}
+static int vk_r5_switch(void)
+{
+    const int lab = g_ps3_lab[PS3_LAB_R8];
+    if (lab >= 0) return lab & 1;
+    static int env = -1;
+    if (env < 0) { const char* e = getenv("PS3RECOMP_ENG_R8"); env = e ? (int)(strtol(e, NULL, 0) & 1) : 0; }
+    return env;
+}
+static void vk_r5_frame(void)               /* the frame's mode; a switch on gives both slots fresh tables */
+{
+    vk_r5c_compare();                       /* (check) the repeats of the frame just submitted */
+    s_r5c.arm = VK_NULL_HANDLE;
+    const int was = s_r5_mode, now = vk_r5_switch();
+    if (now && was != 1)
+        for (u32 k = 0; k < VK_FIF_MAX; k++) { s_r5s[k].gen = ++s_r5_genc; s_r5s[k].kill = s_vkill; }
+    if (was < 0 || now != was)
+        fprintf(stderr, "[RSX vulkan] (r8) descriptor sets kept across frames: %s (PS3RECOMP_ENG_R8 bit 1)\n", now ? "on" : "off");
+    s_r5_mode = now;
+    s_r5n[5]++; s_r5_fno++;
+    static int stats = -1;
+    if (stats < 0) { const char* l = getenv("PS3RECOMP_LIMITS"); stats = (l && *l && *l != '0') || getenv("PS3RECOMP_VK_R8_STATS"); }
+    if (stats && s_r5n[5] >= 300) {
+        const double f = (double)s_r5n[5];
+        fprintf(stderr, "[r8-dset] %s: per frame: table hits %.1f, new sets %.1f, tables given up %.2f, pool resets %.3f,"
+                        " pools kept at a completion %.2f; destroyed: views with a serial %.2f, other views %.2f,"
+                        " buffers named %.2f, other buffers %.2f (%.0f frames)\n", s_r5_mode ? "on" : "off",
+                s_r5n[0] / f, s_r5n[1] / f, s_r5n[2] / f, s_r5n[3] / f, s_r5n[4] / f,
+                s_r5kn[0] / f, s_r5kn[1] / f, s_r5kn[2] / f, s_r5kn[3] / f, f);
+        memset(s_r5n, 0, sizeof s_r5n); memset(s_r5kn, 0, sizeof s_r5kn);
+    }
+}
 static VkDescriptorSet vk_batch_alloc_set(void);
 static VkDescriptorSet vk_eng_batch_set(VkBuffer ubuf)
 {
@@ -7829,6 +8129,7 @@ static VkDescriptorSet vk_eng_batch_set(VkBuffer ubuf)
     typedef struct {
         int valid, aniso;
         u32 obj_gen, dset_gen, pipeline, tex_mask, vs, ps;
+        u32 born;                           /* (r8) R5: the frame the set was written in (its check) */
         VkBuffer ubuf;
         u32 tex[RSX_MAX_TEXTURES];
         rsx_be_sampler_desc samp[RSX_MAX_TEXTURES];
@@ -7852,13 +8153,27 @@ static VkDescriptorSet vk_eng_batch_set(VkBuffer ubuf)
 #define VK_BSET(k) do { if (bs_on) { const u64 _t = vk_fd_tsc(); g_eng_bset[g_eng_bst_path][k] += _t - bs_t; bs_t = _t; } } while (0)
     const u32 m_vs = s_e2.vs_bytes ? s_e2.vs_bytes : 16u, m_ps = s_e2.ps_bytes ? s_e2.ps_bytes : 16u;
     const int m_aniso = memo ? vk_postfx_aniso() : 0;
-    if (memo && m.valid && m.obj_gen == s_eobj_gen && m.dset_gen == s_dset_gen && m.ubuf == ubuf &&
+    /* (r8) R5: the kept table of the active slot (given up first if an object it may name died), else the pool's */
+    if (__builtin_expect(s_r5_mode < 0, 0)) vk_r5_frame();
+    const int keep = s_r5_mode > 0 && reuse;
+    if (keep && s_r5s[s_fif_cur].kill != s_vkill) {
+        s_r5s[s_fif_cur].kill = s_vkill; s_r5s[s_fif_cur].gen = ++s_r5_genc; s_r5n[2]++;
+    }
+    const u32 tg = keep ? s_r5s[s_fif_cur].gen : s_dset_gen;
+    if (memo && m.valid && m.obj_gen == s_eobj_gen && m.dset_gen == tg && m.ubuf == ubuf &&
         m.vs == m_vs && m.ps == m_ps && m.pipeline == s_e2.pipeline && m.tex_mask == s_e2.tex_mask &&
         m.aniso == m_aniso && !memcmp(m.tex, s_e2.tex, sizeof m.tex)) {
         int same = 1;
         for (u32 u = 0; u < RSX_MAX_TEXTURES && same; u++)
             if (((s_e2.tex_mask >> u) & 1u) && memcmp(&m.samp[u], &s_e2.samp[u], sizeof m.samp[u])) same = 0;
-        if (same) { s_dset_hit++; VK_BSET(0); if (bs_on) g_eng_bsetn[g_eng_bst_path][0]++; return m.set; }
+        if (same) {
+            s_dset_hit++; VK_BSET(0); if (bs_on) g_eng_bsetn[g_eng_bst_path][0]++;
+            if (__builtin_expect(keep && m.born != s_r5_fno, 0) && vk_r5c_want()) {   /* (r8) R5 check */
+                VkDescriptorImageInfo cii[RSX_MAX_TEXTURES], csi[RSX_MAX_TEXTURES];
+                vk_eng_image_infos(cii, csi); vk_r5c_arm(m.set, ubuf, cii, csi);
+            }
+            return m.set;
+        }
     }
     /* (fastdraw) the memo of recent sets: the slot from the units' handles */
     const int two = memo && s_fdb.two > 0;
@@ -7872,7 +8187,7 @@ static VkDescriptorSet vk_eng_batch_set(VkBuffer ubuf)
         dslot = (u32)dh & (VK_DSM_N - 1u);
         g_eng_fd2[1]++;
         const vk_dsm* d = &dsm[dslot];
-        if (d->valid && d->obj_gen == s_eobj_gen && d->dset_gen == s_dset_gen && d->ubuf == ubuf &&
+        if (d->valid && d->obj_gen == s_eobj_gen && d->dset_gen == tg && d->ubuf == ubuf &&
             d->vs == m_vs && d->ps == m_ps && d->pipeline == s_e2.pipeline && d->tex_mask == s_e2.tex_mask &&
             d->aniso == m_aniso && !memcmp(d->tex, s_e2.tex, sizeof d->tex)) {
             int same = 1;
@@ -7883,6 +8198,10 @@ static VkDescriptorSet vk_eng_batch_set(VkBuffer ubuf)
                 m = *d;                                 /* the last set again is this one */
                 s_dset_hit++; g_eng_fd2[0]++;
                 VK_BSET(0); if (bs_on) g_eng_bsetn[g_eng_bst_path][0]++;
+                if (__builtin_expect(keep && d->born != s_r5_fno, 0) && vk_r5c_want()) {   /* (r8) R5 check */
+                    VkDescriptorImageInfo cii[RSX_MAX_TEXTURES], csi[RSX_MAX_TEXTURES];
+                    vk_eng_image_infos(cii, csi); vk_r5c_arm(d->set, ubuf, cii, csi);
+                }
                 return d->set;
             }
         }
@@ -7924,6 +8243,45 @@ static VkDescriptorSet vk_eng_batch_set(VkBuffer ubuf)
         } else if (memo) {
             g_eng_fd2[0]++;   /* the memo was right: what it would have handed over, by the table's path below */
         }
+    }
+    if (keep) {   /* (r8) R5: the same steps on the slot's kept table */
+        /* each unit's view by its image's serial too (0: a stand-in view, never destroyed): a dead view's handle
+         * value given to a new view never matches a set made for the dead one */
+        u32 ser[RSX_MAX_TEXTURES];
+        for (u32 u = 0; u < RSX_MAX_TEXTURES; u++) {
+            const u32 hh = ((s_e2.tex_mask >> u) & 1u) ? s_e2.tex[u] : 0u;
+            vk_image* const im = (hh && hh < VK_ENG_MAX_OBJ && ii[u].imageView && ii[u].imageView == vk_eng_sample_view(hh))
+                               ? &s_eobj[hh].im : NULL;
+            if (im && !im->r5ser) { im->r5ser = s_r5ser_next++; if (!s_r5ser_next) s_r5ser_next = 1u; }
+            ser[u] = im ? im->r5ser : 0u;
+        }
+        vk_r5_ent* const te = &s_r5tab[s_fif_cur][(u32)(h ^ (h >> 23)) & (VK_R5_N - 1u)];
+        if (te->gen == tg && !memcmp(&te->key, &k, sizeof k) && !memcmp(te->ser, ser, sizeof ser)) {
+            s_dset_hit++; s_r5n[0]++;
+            if (__builtin_expect(te->born != s_r5_fno, 0) && vk_r5c_want()) vk_r5c_arm(te->set, ubuf, ii, si);   /* (r8) check */
+            if (memo) { m.set = te->set; m.dset_gen = tg; m.valid = m.obj_gen == s_eobj_gen; m.born = te->born; }
+            if (two && m.valid) {
+                dsm[dslot] = m;
+                if (s_fdb.verify) { dsm_key[dslot] = k; dsm_key_ok[dslot] = 1; } else dsm_key_ok[dslot] = 0;
+            }
+            VK_BSET(2); if (bs_on) g_eng_bsetn[g_eng_bst_path][1]++;
+            return te->set;
+        }
+        VK_BSET(2);
+        VkDescriptorSet set = vk_batch_alloc_set();
+        if (!set) return VK_NULL_HANDLE;
+        vk_eng_write_set(set, ubuf, ii, si);
+        te->gen = tg; te->born = s_r5_fno; te->key = k; memcpy(te->ser, ser, sizeof ser); te->set = set;
+        if (ubuf == s_batch.uarena.buf) s_batch.uarena.r5ref = 1;   /* the buffer it names */
+        else s_vkill++;                     /* (cannot happen: a buffer it cannot mark) -- give the table up next time */
+        s_dset_miss++; s_r5n[1]++;
+        if (memo) { m.set = set; m.dset_gen = tg; m.valid = m.obj_gen == s_eobj_gen; m.born = s_r5_fno; }
+        if (two && m.valid) {
+            dsm[dslot] = m;
+            if (s_fdb.verify) { dsm_key[dslot] = k; dsm_key_ok[dslot] = 1; } else dsm_key_ok[dslot] = 0;
+        }
+        VK_BSET(3); if (bs_on) g_eng_bsetn[g_eng_bst_path][2]++;
+        return set;
     }
     const u32 slot = (u32)h & (VK_DSET_CACHE - 1u);
     if (s_dset_tab[slot].gen == s_dset_gen && !memcmp(&s_dset_tab[slot].key, &k, sizeof k)) {
@@ -8859,6 +9217,21 @@ static void vk_eng_draw_ex_body(rsx_topology topology, const void* vertices, VkB
             else         pvkCmdDraw(s_vk.cmd, vertex_count, 1, (u32)vofs, 0);
         }
     }
+#ifdef R8_CHECK   /* (r8) the R5 check's capture is compiled only into check builds (CEXTRA=-DR8_CHECK): this function keeps its PGO profile */
+    if (__builtin_expect(s_r5c.arm != VK_NULL_HANDLE, 0) && set == s_r5c.arm) {   /* (r8) R5 check: this draw */
+        u32 kk = 0;
+        for (u32 c = 1; c <= RSX_BE_MAX_COLOR_TARGETS && !kk; c++) if (s_e2.rp[c] && s_e2.rp[c] == s_batch.rp_rp) kk = c;
+        if (batched && s_batch.rp_open && kk && has_idx && !P->sblend && !P->fbf_in && !P->fbf_mask && s_r5c.ncap < VK_R5C_MAX) {
+            vk_r5c_cap* c = &s_r5c.cap[s_r5c.ncap++];
+            c->rp = s_batch.rp_rp; c->w = s_batch.rp_w; c->h = s_batch.rp_h; c->k = kk;
+            c->pipe = pipe; c->set[0] = set; c->set[1] = s_r5c.fresh; c->dyn[0] = (u32)ubase; c->dyn[1] = (u32)ps_dyn;
+            c->vb = s_ecs.vb; c->vo = s_ecs.vo; c->ib = s_ecs.ib; c->io = s_ecs.io;
+            c->vp = vp; c->sc = sc; c->sref = sref; c->bias = use_bias; c->bc = bias_c; c->bs = bias_s;
+            c->icount = index_count; c->ifirst = ifirst; c->vofs = vofs;
+        } else s_r5c.skipped++;
+        s_r5c.arm = VK_NULL_HANDLE;
+    }
+#endif
     VK_BST(6);
     if (__builtin_expect(s_fdc.on, 0)) {   /* (fastdraw) VERIFY: what this draw recorded */
         s_fdc.drawn = 1; s_fdc.cont = cont; s_fdc.known = known; s_fdc.rec = rec;
@@ -9593,6 +9966,7 @@ static void vk_pass_record(VkRenderPass rp, VkFramebuffer fb, VkPipeline pipe, V
  * this one was recorded -- then free what that frame held. */
 static void vk_fif_advance(void)
 {
+    vk_r5_frame();                             /* (r8) R5: the next frame's mode (before the slot's completion) */
     const u32 out = s_fif_cur, in = out ^ 1u;
 #define FIF_SW(f) s_fif_bs[out].f = s_batch.f; s_batch.f = s_fif_bs[in].f;
     FIF_SW(varena) FIF_SW(iarena) FIF_SW(uarena) FIF_SW(sarena) FIF_SW(garena)

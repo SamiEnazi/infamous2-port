@@ -15,7 +15,7 @@
  * the `other` group: ~0.1 % of one CPU. */
 #include "ps3emu/ps3_liveab.h"
 
-volatile int g_ps3_lab[PS3_LAB_N] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+volatile int g_ps3_lab[PS3_LAB_N] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 volatile int g_ps3_liveab_on = 1;
 volatile unsigned long long g_ps3_liveab_gpu_ns;
 volatile unsigned long long g_ps3_liveab_ev;
@@ -49,6 +49,7 @@ static const struct { const char* name; int id; } k_sw[] = {
     { "PS3_DBG_DRAW_DELAY_NS", PS3_LAB_DRAW_DELAY }, { "PS3_DBG_DMA_DELAY_NS", PS3_LAB_DMA_DELAY },
     { "PS3_KICKDELAY_US", PS3_LAB_KICKDELAY_US }, { "PS3_LAB_GPUCLK", PS3_LAB_GPUCLK },
     { "PS3_NATIVE_JOBS_STICKY", PS3_LAB_STICKY }, { "PS3_NATIVE_JOBS_PRIO", PS3_LAB_JOBPRIO },
+    { "PS3RECOMP_ENG_R8", PS3_LAB_R8 },
 };
 /* (sz1) PS3_NATIVE_JOBS_STICKY: the runner's own static, through its exported pointer (absent: the switch does nothing) */
 extern int* const g_wws_sticky_ptr __attribute__((weak));
