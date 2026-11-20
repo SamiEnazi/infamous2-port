@@ -524,3 +524,9 @@ The recording worker lost in the 17 Nov test with the old graphics thread; with 
 | Standing at spot 2, real controller, 5 min each | 59.87 vs 59.81 fps; 1 frame > 33 ms each; none > 50 ms | |
 
 - **Reading:** the worker does its job, taking 1.8–2.4 ms off the graphics thread, but the main thread (~18.5–19 ms) is now the only limit on both scenes, so fps barely moves. The sizing round's +2.1 % came from a test that stopped after 3 pairs, which tends to overestimate. hd6 isn't slower anywhere and gives the graphics thread the headroom it needs once the main thread gets faster (Edge, next).
+
+### 20 Nov 21:20: hd6 installed (your OK), full install
+
+- **Tag `hd6`** = deck-perf 9abaf38, pushed. Your folder is on branch `installed` = hd6, launcher included (recording worker on).
+- **Backups:** work/port/installed-hd5-20261120/ (the two hd5 files), input.toml / settings.ini `.installed-hd5-20261120`. Rollback: `git switch -C installed hd5` in the folder, then copy the two files back.
+- **Start test with the real launcher:** the PGO module loaded, threaded recording was on with the worker on the graphics core's other CPU, all settings active, no errors.
