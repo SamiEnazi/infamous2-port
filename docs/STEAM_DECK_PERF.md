@@ -5,6 +5,8 @@ what was changed, what was tried and rejected, and what is next. The raw chronol
 `work/bench/NOTES.md` (local, not in git); this file is the curated summary and is kept up to date.
 Since 2026-11-19 the work continues on the local branch `deck-v063` = deck-perf + upstream v0.6.3 (section 7: the merge,
 what each upstream addition costs, the A/B against the installed hd3; build mg3r = the hd4 candidate).
+2026-11-20, roadmap step 6 (agent hd5): today's three pieces combined, defaults decided (play.sh PRIO 1 + R8 3, the store
+lift on Linux builds), PGO retrain mg5r; build work/port/hd5c = the hd5 candidate (section 6 "Step 6 result", section 4).
 
 Hardware: Steam Deck OLED (Galileo, 90 Hz panel), Zen 2 4 cores / 8 threads, 15 W APU limit shared by CPU
 and GPU. The player's GPU clock is set manually (1400 MHz at the time of writing); benchmarks run at 1200 MHz
@@ -524,6 +526,11 @@ above: main-thread-bound at ~46 fps / 8,300 draws).
   ("PGO: N function(s) changed since the profile"; `work/bench/pgowarn.py <log>` lists them with their discarded
   counts).
 * PGO profiles (`E/work/pgo`; module + engine file per name; never overwrite one, a retrain gets a new name):
+  * **mg5r** (2026-11-20, agent hd5; the hd5 candidate hd5c) = mg5 training x5 + `deck.profdata` x2, as mg3r. mg5 = mg3's
+    six runs (work/bench/pgotrain-mg5.sh: RUNENV = `PS3_NATIVE_JOBS_PRIO=1 PS3RECOMP_ENG_R8=3` in every run) on the
+    instrumented build pgogen5 with the store lift (HEAD 1ffe5c6 + rebuild_win.py's Linux default); raws train-mg5. With
+    the store lift every lifted function with a store has a new CFG hash: deck.profdata's records for them match nothing
+    (the training alone trains them). mg3r = hd4's (2026-11-19, agent mg3: the same recipe on 2335d44).
   * **mg2r** (2026-11-19, agent pgo2; hd2) = mg2 training x5 + `deck.profdata` (old real play) x2. Training mix (6 runs,
     one each, instrumented HEAD 3d974be, the player's 17:42 settings snapshot `zone2/settings-player-20261118.ini` =
     16:10 so the short tail runs, sandbox env + 4 pool threads + play.sh's Deck env): spot 2 spin (bench-move.steps,
@@ -799,6 +806,18 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
   `PPU_ST_RUNS` lift's text. Note: PORT_LIFT_JOBS is in the lift fingerprint (cg1build.sh uses 4, ft1build.sh 2): changing
   it re-lifts once (byte-identical).
 
+* **Combination / gate tools** (2026-11-20, agent hd5; NOTES.md "combined check and hd5 (agent hd5)"):
+  `work/bench/hd5rot.sh <rounds> "<label>=<exe dir>[|ENV=V ...]" ...` = mg3rot.sh's rotated rounds for any number of labels
+  with abseq.sh's output line (`ZONE`, `G`, `COMMON`, `PREFIX`, `FIRST`; `REV=1`: even rounds backwards, so with 3+ labels
+  each pair runs in both orders; pause file `<scratchpad>/hd5.pause`); `work/bench/hd5pair.py <out>... --base <label>
+  [--win g1:g2] [--keep-suspect]` = per label means and every label against the base paired by round (fps %, main / RSX
+  / GPU / W / p99 / max / > 33 / > 50 / draws, SE over the rounds; `--win` recomputes with zstat.py over another guest
+  window, e.g. the street's 4:20 next to its full window); `work/bench/hd5-longf.py <rec>... [-g g1:g2] [-t ms]` = the
+  long frames with their guest time (the street's guest-16.4 s frame is in every run: the frame-stepped clock's
+  artifact). Gate driver `work/bench/hd5-gate.sh "<steps>"` (st / pl / sd / rp / jr; HD5ENV = the candidate's switches).
+  NOTE: hd4's engine (mg3r) predates PS3_PAD_STEER, so in a gate against hd4 its street runs are unsteered (about half
+  leave the route after the junction): plan ~2x the rounds for its full window, or use guest 4-20 s.
+
 ### Acceptance rules (every change, agreed with the player 2026-11-18)
 
 1. Exact: SPU natives match the lifted job bit for bit (job replay exit 0, live checks 0 differences); graphics
@@ -816,6 +835,7 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
 
 | Commit | Change | Measured |
 |---|---|---|
+| (uncommitted in D: tools/play.sh, tools/rebuild_win.py; exe dir **work/port/hd5c** = HEAD 1ffe5c6 + the store lift + mg5r profiles; hd5, 2026-11-20; section 6 "Step 6 result") | **hd5 candidate, the step-6 defaults**: tools/play.sh sets `PS3_NATIVE_JOBS_PRIO=1` and `PS3RECOMP_ENG_R8=3` (Linux launcher; `:=` defaults, =0 from outside = the old paths); tools/rebuild_win.py lifts Linux builds with `PPU_ST_CMPB=1 PPU_ST_RUNS=1` (step_ppu, `sys.platform` linux; Windows builds keep the old lift; =0 in the environment = the old lift; the change is in the lift fingerprint: one re-lift); PGO retrain mg5r (mg3's training with the two runtime switches, x5 + deck.profdata x2) | in combination (no-PGO modules, 6 rotated rounds of 5 configs): all on vs none street +2.6 % (SE 0.51), plaza +2.1 % (SE 1.07); all on minus PRIO / store lift / R8: street -0.76 (0.48) / -2.39 (0.73) / -1.69 % (0.45), plaza -0.56 (1.01) / -0.22 (0.84) / -1.42 % (0.92); gate vs hd4: street full window +2.63 % (SE 1.11, 6 pairs), guest 4-20 s +1.65 % (SE 0.46, 13 pairs, main -0.40 ms, RSX -0.43, p99 -1.4), plaza +1.70 % (SE 0.47, 4 pairs), standing 2 x 10 min 59.80 vs 59.75 fps (p99 17.8 / 17.8, > 33 ms 3 / 2, > 50 0 / 0); replays identical, jobrunner 15/15, stale profiles: module 0, engine `main` only |
 | (uncommitted in D; work/bench/r8-cuts.patch, exe dirs work/port/r8 = this engine + hd4's PGO module (measured), r8f = the final tree (r8 + two cold lines), r8c / r8cf = their check builds (`CEXTRA=-DR8_CHECK`); r8, 2026-11-20) | the texture- and program-changed draws (R8) + R5 (section 1 "Texture- and program-changed draws"), `PS3RECOMP_ENG_R8` = bit mask (**default 0** = HEAD's code paths; flips live with PS3_LIVEAB): **bit 1 = R5, descriptor sets kept across frames** (rsx_vulkan_backend.c: a table per frame-in-flight slot of sets from that slot's pool, the pool reset only past 8,192 sets; key = the old key + each unit's image serial, so a dead view's handle value never meets an old set; the uniform arena's destruction gives the tables up) -- new sets ~520-600 -> 40-69 a frame on the street, 67 on the plaza; **bit 2 = the fragment program's structural memo** (rsx_draw_engine.c: after a content-memo miss, a program whose instruction blocks were analysed before -- the same program uploaded again with other inline constants -- takes the structural hash and the four unit masks from a 1,024-entry table; the constants are still collected from its bytes; programs with a branch the whole way) -- 95-96 % of the ~190 whole analyses a frame; `PS3RECOMP_ENG_R8_VERIFY=1` (memo hits analysed and compared), `PS3RECOMP_ENG_R8_CHECK=<n>` (check build: every n-th frame a draw with a kept set from an earlier frame repeated with it and with a twin written now, compared) | in-run (PRIO 1): street-still **RSX -0.51 ms (SE 0.13)**, fps +0.21 % (0.93), main -0.03 (0.17); spot 2 standing **fps +1.96 % (SE 0.62)**, RSX -0.46 (0.10), main -0.24 (0.09); walking crossover RSX -0.33 (0.19), fps +0.13 % (0.81); counters (4 + 4 quick street) **RSX cycles -1.52 % (SE 0.39)**, instructions -1.31 % (0.36), per draw -2.5 % / -2.3 %, other groups and power equal; quick street abseq (8 pairs) INCONCLUSIVE **+0.89 %** (SE 0.42; pairs 0.34), **RSX -0.41 ms (SE 0.05)**, main -0.03 (0.08), GPU -0.06 (0.05), p99 +0.2 (1.8), > 33 ms 6.1 -> 5.4, > 50 ms 1.1 -> 1.0 a run; plaza abseq (8 pairs, 7 on route) INCONCLUSIVE -0.21 % (SE 0.85), on-route -0.73 % (0.77) with +0.9 % draws, RSX -0.08 (0.10; per draw -1.3 %, 0.5), main +0.43 (0.18), p99 -0.14 (0.24), max 40.8 -> 36.7 ms, > 33 ms 1.0 / 1.0; by the stage marks R5 ~-0.17 ms (set work -0.14 / -0.36 us a texture- / program-changed draw, the set bind +0.07-0.09: RADV reads a cold kept set), the memo ~-0.15 ms (layout -0.65 us a program-changed draw); exact: R5 check 2,870 draws (street, plaza, final tree) repeated both ways, 23.7 GB compared, 0 bytes differ; memo verify 865,841 hits, 0 differ; RSX semaphore waits equal (street 17 / 14, plaza 35 / 21 in 8 runs, the same labels), no Vulkan error; PGO: vk_eng_batch_set, eng_guest_programs, vk_batch_completed (+ cold ones) lose their profile, sink_end_body and vk_eng_draw_ex_body keep theirs |
 | (uncommitted in D; work/bench/cg1-store.patch, exe dirs work/port/cg1a = HEAD's lift / cg1b = both switches, no-PGO modules, s1c's engine (= HEAD's) in both; cg1, 2026-11-20) | the store page-map test in fewer instructions, two lift-time switches in engine/tools/ppu_fastpath.py (**default off**: HEAD's lift is unchanged; set them in the lift's environment): `PPU_ST_CMPB=1` the test and its re-check as one `cmpb $1, (map, page)` each (asm goto: the same byte read at the same point); `PPU_ST_RUNS=1` three or more stores off one guest register in straight-line code (prologue saves, structure fills) take one test of the run's two end pages, plain byte-swapped stores and one re-check (if a page went slow meanwhile, ppu_store_pm_recheck for every store of the run); the stretch is emitted twice, the careful copy (the original lines) for a run whose pages are not fast; `PPU_ST_RUN_MIN`, `PPU_ST_RUNS_VERIFY=1` = the check lift. 210,309 of 417,714 store sites grouped (35,039 runs), module .text +4.5 % (the cold copies) | counters (4 + 4 quick street, PRIO 1): **main instructions -6.2 % (SE 1.1), cycles -2.4 % (SE 0.85)**, CPU ms -1.4 %, IPC 0.99 -> 0.95, other groups and power equal; quick street abseq (PRIO 1, 8 pairs) INCONCLUSIVE **+0.96 %** (SE 0.42; pairs 0.28), **main -0.42 ms (SE 0.07)**, RSX +0.18 (0.06), p99 -0.25 (0.27), > 33 ms 6.1 / 6.0, > 50 ms 1.25 / 1.0 a run; plaza abseq (PRIO 1, 8 pairs) -0.22 % (SE 0.55), main -0.14 (0.14), RSX +0.29 (0.12), max 45 -> 37 ms, > 33 ms 1.6 -> 0.5; street PRIO 0 (8 pairs) -0.05 % (SE 0.42), main -0.14 (0.05), RSX +0.28 (0.07), p99 +1.1 (0.4); plaza counters (on-path runs, A 2 / B 4): main instructions -8.0 %, cycles -3.3 %; exact: an independent check of the lift text (all 35,039 run blocks: same statements, same stores, offsets = the original addresses) 0 differences, the verify lift (every grouped store checks its own address: 0 reports on the quick street and the plaza), the steered full street route on the path with the end shot at 6.3 % (A 7.2 %), 69 game runs without a crash, hang or error, draws equal; PGO: every lifted function with a store changes its CFG (a retrain with the lift; both sides here no PGO) |
 | (parked, not in the tree: work/bench/r2-multidraw.patch, exe work/port/r2 = hd4's module + this engine; r2, 2026-11-20) | Vulkan entry-point wrappers, `PS3RECOMP_VK_MULTIDRAW` (**default: unset** = HEAD's code path, nothing installed; flips live with PS3_LIVEAB): 1 = a vkCmdBindDescriptorSets equal to the bound one (set and dynamic offsets) with only draws / buffer binds / dynamic state since is left out; 2 = 1 + neighbouring indexed draws with nothing recorded between them recorded as one vkCmdDrawMultiIndexedEXT (VK_EXT_multi_draw, enabled at device creation only with the switch); 3 = 2 + a replay check (captured runs drawn both ways into scratch targets, read back, compared); 9 = sizing only (wrong picture: offsets ignored, the "+constants by draw index" tier); `PS3RECOMP_VK_MULTIDRAW_STATS=1` = [multidraw] lines. No recording function changes (PGO: only rsx_vulkan_backend_init loses its profile) | mode 2 joins 24-32 % of draws (street 2,000-2,650 a frame, plaza 2,300-2,500), leaves out as many binds; Vulkan-call time in the backend's draws -0.13..-0.17 ms a frame; in-run street-still PRIO 1 (2 runs) RSX -0.07 ms (SE 0.14), frame -0.02 (0.15), fps +0.18 % (0.74); PRIO 0 RSX -0.44 (0.19), fps +1.31 % (1.04); walking crossover (unsteered, off-route) RSX -0.78 (0.63); quick street abseq (PRIO 1 both, 8 pairs) INCONCLUSIVE +0.43 % (SE 0.47), RSX -0.03 ms (SE 0.10), main -0.06 (0.10), p99 -0.75 (0.64), > 33 ms 6.1 -> 4.6 a run (SE 0.95), > 50 ms 1.0 / 1.0; plaza abseq (PRIO 1 both) over the 6 on-route pairs of 8 -0.44 % (SE 0.60), RSX +0.03 ms (SE 0.11), main +0.14 (0.16), p99 -0.37 (0.25), > 33 ms 0.50 -> 0.33, > 50 ms 0 / 0; counters (4 + 4 quick street runs) RSX cycles a frame -0.32 % (SE 0.65), instructions -1.14 % (SE 0.58): no group moves; exact: 420 runs / 2,884 draws replayed both ways, 8.1 GB of colour / depth / stencil, 0 bytes differ; RSX semaphore waits: quick street equal (in the window 8 vs 9 in 8 runs each), plaza more with the switch (in the window 10 vs 26 over 6 on-route pairs, 4.0 vs 12.8 ms in total, < 0.001 ms a frame; labels 0x870 / 0x890 as without it: read as the RSX reaching the light jobs' acquire a little earlier, a watch item). Sizing mode 9: 76 % of draws join, RSX -0.69 ms (SE 0.15) = the most the shader-side form could save. By rule 2 not worth turning on alone |
@@ -1044,6 +1064,51 @@ quick street against the main thread's ~19.2: on the walking street the main thr
 successors, dl_scan in AVX2: ~0.5 ms together), a per-(index entry, vertex signature) table in front of the vertex-cache
 probe for draws whose index lists serve several vertex buffers (pair-memo signature misses ~1,150 a frame: <= ~0.2 ms),
 the FIFO walk (3.7 ms); all in sink_end_body, i.e. before step 6's PGO retrain.
+
+**Step 6 result (hd5, 2026-11-20; NOTES.md "combined check and hd5 (agent hd5)"): the combined check.** The three kept
+pieces in one build, each measured inside the combination (all on minus that piece), no PGO module on either side (one
+engine binary, HEAD's with mg3r's engine profile; modules: HEAD's lift = cg1a's byte for byte, and the store lift = cg1b's),
+6 rotated rounds of 5 configurations per scene (work/bench/hd5rot.sh, REV=1; pairs by round: hd5pair.py), EPP performance,
+HUD on in every run:
+
+| Piece | All on minus it: quick street (steered, guest 4-20 s) | Plaza (G 16-100 s; 5-6 on-route pairs) | Slow frames | Decision |
+|---|---|---|---|---|
+| `PS3_NATIVE_JOBS_PRIO=1` (runner priority) | -0.76 % (SE 0.48), main +0.21 ms | -0.56 % (SE 1.01), main +0.18 | > 33 ms: street 34 (on) vs 37 (without), plaza 7 vs 2 (1.4 SE: the watch item, all 41-46 ms frames); none > 50 ms | **on** |
+| store lift `PPU_ST_CMPB=1 PPU_ST_RUNS=1` | **-2.39 % (SE 0.73)**, main +0.56 ms, RSX +0.25 | -0.22 % (SE 0.84) | equal | **on** |
+| `PS3RECOMP_ENG_R8=3` | **-1.69 % (SE 0.45)**, RSX +0.60 ms | -1.42 % (SE 0.92), RSX +0.45, p99 +1.06 ms | equal | **on** |
+| all three vs none | **+2.6 % (SE 0.51)**: 46.27 vs 45.09 fps, main -0.56 ms, RSX -0.66 | **+2.1 % (SE 1.07)**: 50.81 vs 49.74, main -0.41, RSX -0.63, p99 -0.67 | standing 10 min each (real controller, 60 cap): 59.59 / 59.61 fps, p99 18.0 / 17.9, > 33 ms 1 / 1, worst 35 / 39 ms, > 50 ms 0 / 0 | |
+
+The pieces add up on the street (alone today: +0.96 / +1.25 / +0.89 %; together +2.6 %): with R8's RSX saving the store
+lift's main-thread saving reaches the frame (main -0.56 ms in the combination vs -0.42 alone, and the RSX no longer gets
+busier). Defaults (uncommitted in D): tools/play.sh sets `PS3_NATIVE_JOBS_PRIO=1` and `PS3RECOMP_ENG_R8=3` (Linux launcher;
+each can be set from outside, =0 = the old path); tools/rebuild_win.py lifts with `PPU_ST_CMPB=1 PPU_ST_RUNS=1` on Linux
+builds only (`sys.platform` linux; Windows builds keep the old lift; `PPU_ST_CMPB=0` / `PPU_ST_RUNS=0` in the environment =
+the old lift).
+
+PGO retrain **mg5r** (E/work/pgo, new files): instrumented build pgogen5 made with NO lift variable in the environment (the
+new Linux default produced the store lift: 35,039 runs = cg1b's), mg3's six training runs with `PS3_NATIVE_JOBS_PRIO=1
+PS3RECOMP_ENG_R8=3` in every run (pgotrain-mg5.sh; raws E/work/pgo/train-mg5), mg5 = the training, mg5r = training x5 +
+deck.profdata x2 (as mg3r). Use build **hd5c** (work/port/hd5c): stale-profile report module 0 ("every compiled function
+matched its profile"), engine 1 = `main` (the gen build's dump code, as always); vk_eng_batch_set, pool_main,
+eng_guest_programs, hook_token_test are warm again.
+
+**The full gate, hd5c vs hd4 (work/port/mg3r = installed), one batch, label order rotated** (hd5c with PRIO 1 / R8 3 =
+the launcher's new defaults; hd4's engine has neither and predates the steering, so its street runs are unsteered: 6 of
+13 on the route, hd5c 13 of 13):
+
+| Test | hd4 | hd5c | hd5c vs hd4 (paired by round) |
+|---|---|---|---|
+| Street, full window (guest 10-85 s, clean runs) | 49.12 fps (n 6, sd 1.53), main 19.67, RSX 17.31, p99 28.8 | 50.44 (n 13, sd 1.02), main 19.15, RSX 16.84, p99 28.5 | **+2.63 % (SE 1.11, 6 pairs)**; unpaired +2.7 %; main -0.50 ms, RSX -0.55; > 33 ms 5.7 / 5.2 a run, > 50 1.17 / 1.15 |
+| Street, guest 4-20 s (all 26 runs) | 46.61 (sd 0.58), main 19.45, RSX 18.47 | 47.37 (sd 0.51), main 19.05, RSX 18.04 | **+1.65 % (SE 0.46, 13 pairs)**; p99 -1.38 ms (0.92); > 33 equal; > 50 1.08 / 1.15 (the frame-stepped clock's guest-16.4 s frame in every run) |
+| Plaza (G 16-100 s) | 51.29 (n 5, sd 0.47), main 18.63, RSX 18.36 | 52.12 (n 4, sd 0.75), main 18.26, RSX 18.05 | **+1.70 % (SE 0.47, 4 pairs)**; p99 -0.30; > 33 ms 2 vs 3 in all; > 50 0 / 0 |
+| Standing, 2 x 10 min each (real clock, spot 2, 60 cap, real controller; order hd5c hd4 hd4 hd5c) | 59.73 / 59.77 fps, p99 17.9 / 17.7, > 33 ms 1 / 1, worst 35 / 34 | 59.77 / 59.82, p99 17.9 / 17.7, > 33 ms 3 / 0, worst 38 / 33 | equal; > 50 ms 0 in all four; RSS growth equal (+4-6 MB after 5 min) |
+| RSX semaphore waits (whole runs) | street 1.6 a run (1.2 ms), plaza 2.8 (1.2 ms) | street 3.5 (2.8 ms), plaza 1.0 (0.4 ms) | the runner priority's (Phase A: with PRIO 2.2-4.8 a run, without 0.5-1.2); < 0.001 ms a frame; watch item |
+| Job replays (valP2 set + m13's 213 / 216 FULLPUT) | | | pass / fail table and native lines identical to hd4's; 218 timing replay (M9) best 103.3-103.9 vs 103.5-103.8 us: equal |
+| tests/jobrunner | | | 15 of 15 (upstream's 8 + 7 prio cases) |
+
+Every run of the round exited by itself (62 Phase A, 6 training, 40 gate), no `[jobs] WARN`. **Verdict: hd5c is the hd5
+candidate** (not slower anywhere, faster on the street and the plaza by 3.6 SE each, no new stutter); it needs tools/play.sh
+with the new defaults (without them it runs PRIO 0 / R8 0). Not installed: the player decides.
 
 **Order for roadmap steps 3-5 (sz1):** step 3 = S1 done properly (small: the ready ring gets a priority class for the
 main thread's managers; gate it) and put S2 to the player (free). Step 4 = the main-thread code generator (S3), sized
