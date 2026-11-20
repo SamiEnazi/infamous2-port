@@ -7,6 +7,9 @@ Since 2026-11-19 the work continues on the local branch `deck-v063` = deck-perf 
 what each upstream addition costs, the A/B against the installed hd3; build mg3r = the hd4 candidate).
 2026-11-20, roadmap step 6 (agent hd5): today's three pieces combined, defaults decided (play.sh PRIO 1 + R8 3, the store
 lift on Linux builds), PGO retrain mg5r; build work/port/hd5c = the hd5 candidate (section 6 "Step 6 result", section 4).
+2026-11-20, roadmap step 8 (agent sz2): the three big options sized with bench-only measurement modes (section 6 "Step 8
+result"): the existing Vulkan recording worker on CPU 7 is +2.1 % on the street today; Edge's math off the CPU is worth
+more than thought (contention with the main thread); ThinLTO and the other compiler-level call fixes give nothing.
 
 Hardware: Steam Deck OLED (Galileo, 90 Hz panel), Zen 2 4 cores / 8 threads, 15 W APU limit shared by CPU
 and GPU. The player's GPU clock is set manually (1400 MHz at the time of writing); benchmarks run at 1200 MHz
@@ -808,6 +811,17 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
   `PPU_ST_RUNS` lift's text. Note: PORT_LIFT_JOBS is in the lift fingerprint (cg1build.sh uses 4, ft1build.sh 2): changing
   it re-lifts once (byte-identical).
 
+* **Sizing modes** (2026-11-20, agent sz2; uncommitted, work/bench/sz2-hooks.patch; NOTES.md "sizing the big options (agent
+  sz2)"; all default off, flip live with PS3_LIVEAB, a WRONG or frozen picture in their on state): `PS3_DBG_EDGE_SKIP=1`
+  (natives/spu/edge223_native.c: Edge's skinning and vertex decompression copy each segment's outputs from a memo of the
+  first time it was met -- the same geometry, frozen poses; the `[edge] (sz2) ... memo` exit line counts hits),
+  `PS3_DBG_VK_SKIP=1` (rsx_vulkan_backend.c: the draw engine's four draw entries swapped for stubs once a frame: no Vulkan
+  draw recorded; only when the variable is named does the engine get the mutable table), `PS3_DBG_SMT_SPIN=<duty %>`
+  (ps3_liveab.c: a busy thread on CPU 7). Tools: work/bench/sz2-chain.sh / sz2-chain2.sh (the round's runs),
+  sz2-jobs223.py (job 223 from a PS3_NATIVE_JOBS_STATS=5 run), sz2-jrec223.py (Edge's segments / vertices / output from
+  job recordings). `PS3RECOMP_EDGE_TSC=1` (existing) = cycles per Edge kernel. ThinLTO for the module: `PORT_LIFT_LTO=thin`
+  (work/bench/sz2-thinlto.patch, tools/build_module.py; measured: nothing).
+
 * **Combination / gate tools** (2026-11-20, agent hd5; NOTES.md "combined check and hd5 (agent hd5)"):
   `work/bench/hd5rot.sh <rounds> "<label>=<exe dir>[|ENV=V ...]" ...` = mg3rot.sh's rotated rounds for any number of labels
   with abseq.sh's output line (`ZONE`, `G`, `COMMON`, `PREFIX`, `FIRST`; `REV=1`: even rounds backwards, so with 3+ labels
@@ -965,8 +979,15 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
 * Keeping v20-v31 in locals across calls (lifter, not built): on x86-64 SysV every xmm register is caller-saved, so a
   vector local live across a call is reloaded from the host stack instead of ctx: no saving.
 * `PS3RECOMP_EDGE_GPU=1/2` (GPU culls instead of Edge): SPU -1%, RSX +8 points. No.
-* `PS3RECOMP_RSX_SPLIT=1` (walker + exec threads, exec on the RSX core's SMT sibling): -19% fps.
-* Threaded Vulkan recording / VK_BT, `PS3_CPU_PLACE=rsxcpu`: slower on the Deck.
+* `PS3RECOMP_RSX_SPLIT=1` (walker + exec threads, exec on the RSX core's SMT sibling): -19% fps. Again on hd5c (sz2,
+  2026-11-20, quick street abseq): -2.53 % (SE 0.69, REJECT; walker 11.5 ms + exec ~17 ms = ~28 ms of work for the
+  single thread's 18).
+* Threaded Vulkan recording / VK_BT, `PS3_CPU_PLACE=rsxcpu`: slower on the Deck. **Re-measured on hd5c (sz2, 2026-11-20):
+  the plain recording worker (`PS3RECOMP_VK_THREADED=1 PS3_CPU_PLACE_VKW=1`) now WINS, +2.12 % (SE 0.69, ACCEPT) -- see
+  section 6 "Step 8 result"; `+ PS3RECOMP_VK_BT=1` still loses: -13.6 % (SE 0.69, REJECT).**
+* ThinLTO over the module's lifted PPU units (`PORT_LIFT_LTO=thin` (parked: work/bench/sz2-thinlto.patch, not in the tree), sz2, 2026-11-20; patch
+  work/bench/sz2-thinlto.patch): main cycles +0.3 %, quick street abseq +0.10 % (SE 0.60, 8 pairs): nothing. Not retried
+  without a new reason (e.g. a lifter that makes small lifted functions).
 * `J210_KZ_SCALE` / `J210_KX_SCALE` (camera-view detail knobs): no gain (K.z does not cut the camera view).
 * `PS3RECOMP_SSAO=1` vs 2: GPU -0.6 ms only; GPU is not the limit.
 * Packed key arrays for the index / vertex caches: RSX +1 ms (an unprefetched miss in front of the
@@ -1111,6 +1132,28 @@ the launcher's new defaults; hd4's engine has neither and predates the steering,
 Every run of the round exited by itself (62 Phase A, 6 training, 40 gate), no `[jobs] WARN`. **Verdict: hd5c is the hd5
 candidate** (not slower anywhere, faster on the street and the plaza by 3.6 SE each, no new stutter); it needs tools/play.sh
 with the new defaults (without them it runs PRIO 0 / R8 0). Not installed: the player decides.
+
+**Step 8 result: the three big options sized (sz2, 2026-11-20; NOTES.md "sizing the big options (agent sz2)").** Base hd5c
+with the launcher's defaults (PRIO 1, R8 3), the street, HUD on, EPP performance; bench-only modes, default off, uncommitted
+(work/bench/sz2-hooks.patch): `PS3_DBG_EDGE_SKIP` (Edge's skinning + decompression replaced by a memo of each segment's
+outputs: the same geometry, frozen poses), `PS3_DBG_VK_SKIP` (the RSX thread records no Vulkan draw), `PS3_DBG_SMT_SPIN`
+(a busy thread on CPU 7, the RSX core's sibling); all flip live with PS3_LIVEAB.
+
+| Option | Measured upper bound (frame ms / fps) | Realistic gain | Effort | Risk | Confidence |
+|---|---|---|---|---|---|
+| 2a. RSX: the EXISTING recording worker, `PS3RECOMP_VK_THREADED=1 PS3_CPU_PLACE_VKW=1` (vkCmd* calls replayed on CPU 7) | street abseq **ACCEPT +2.12 % (SE 0.69, 3 pairs)**, RSX 18.14 -> 16.32 ms, main equal, the worker ~4.2 ms on CPU 7; plaza abseq +3.41 % (SE 1.14, 8 pairs; +2.35 % without one light-content pair), RSX -1.63 ms, p99 -0.96 ms | **+2 %** street, +2..+3 % plaza (the RSX's -1.3 ms target met: -1.6..-1.8 ms) | **hours** (a launcher default + the full gate + a PGO retrain) | low: existing code, the same commands in the same order; watch the ring's sync points, stalls | high (3.1 SE; lost on 11-17 with the old RSX thread, wins now) |
+| 1. Edge (job 223, 13.8 ms of pool CPU a frame) off the CPU | measured for the skinning + decompression math (the memo removes ~2.1 ms of Edge's job time, ~4.1 ms of the pool group): **+3.43 % (SE 0.85, 24 pairs) still, +2.97 % (SE 1.28) walk; main -0.75 ms at the same clock** (contention on the shared cores, not power); all of Edge, extrapolated: main -1.5..-3 ms, frame **+5..+12 %** | GPU port **+4..+10 %** (its GPU cost ~0.2-0.4 ms of 13 + ~0.1 W, ~95 k vertices / 50 k triangles a frame); a CPU native for Edge's hottest lifted kernel 0x9C20 (~2.4 ms a frame) **+2..+4 %** | GPU: **weeks** (hand-over of the kernels, decompression / skinning / packing as compute, the RSX thread binding GPU-made buffers for the Edge ring, a check mode); CPU native: **days** | GPU: high (SPU float rules: truncation, FTZ, the estimate tables -- exactness needs float_controls RTZ or the user's OK); native: low (replay-exact, the known way) | sign high (4.1 SE + the slow-down mirror); size low (x6 extrapolation) |
+| 2b. RSX: a new two-thread design (walker / recorder) | the Vulkan side = **5.4 ms** of the RSX thread (VK skip, by cycles at the same clock); SMT: **0.22 ms of RSX per ms on CPU 7** (30 % / 100 % spinner); the old designs: `PS3_RSX_SPLIT=1` **-2.5 %** (REJECT), `+PS3RECOMP_VK_BT=1` **-13.6 %** (REJECT) | beyond 2a: RSX -1..-2 ms more, **~0 %** on the street until the main thread is faster (it is the wall at ~19 ms) | weeks | high (every backend call that returns something is a sync point; labels / 0x870 / write tracking) | medium |
+| 3. Cheaper calls (new calling convention) | ceiling 8.9 M instructions a frame (25 % of the lifted code); compiler-level: no PLT (hidden + -fno-plt, direct calls), no frame pointer, **ThinLTO built and measured: main cycles +0.3 %, abseq +0.10 % (SE 0.60, 8 pairs) = nothing** | a realistic convention: -3.3..-3.5 M instructions (6 % of main), main -0.45..-0.7 ms, **+1..+2.5 %** | weeks | high (every lifted function, the engine's entry points, PGO) | medium (cg1's cycles-per-instruction rate) |
+
+**Order for steps 9-11 (sz2, by measured gain per effort):** step 9 = 2a, the recording worker on CPU 7 -- a switch that
+exists, +2 % on the street and the RSX target met, needs only the gate (street, plaza, standing, replays) and a PGO retrain
+with it on. Step 10 = Edge off the CPU, in two stages: first a CPU native for its hottest lifted kernel (0x9C20, ~2.4 ms a
+frame) and a placement check (Edge's jobs kept off the main thread's SMT sibling) -- days, exact, they test the mechanism
+the memo found (the main thread runs 0.75 ms faster without Edge's math beside it); then Edge on the GPU if 60 fps still
+needs the main thread's -2.5 ms. Step 11 = the calling convention only after those (weeks for +1..+2.5 %); a new RSX split
+design is not worth building now (2a takes its cheap part; the rest pays only once the main thread is faster), and the
+compiler-level call fixes are done (nothing to gain).
 
 **Order for roadmap steps 3-5 (sz1):** step 3 = S1 done properly (small: the ready ring gets a priority class for the
 main thread's managers; gate it) and put S2 to the player (free). Step 4 = the main-thread code generator (S3), sized
