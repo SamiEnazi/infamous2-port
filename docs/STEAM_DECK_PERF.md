@@ -189,6 +189,30 @@ slow-downs (PS3_LIVEAB, 12-24 pairs each).
   it waits for; job CPU that nobody waits for (most of 218 / 216 / 204) does not count, which is why the 216 and 218 natives
   moved nothing; Edge counts through its hold of the pool at the frame start; power counts everywhere (1 W ~ 2 ms).
 
+**The main thread's code by instruction kind (2026-11-20, agent cg1; NOTES.md "main-thread code generator (agent
+cg1)").** perf record of the main thread alone (cycles:u + instructions:u, s1c = HEAD's engine + hd4's module, quick
+street, PRIO 1), the 1,050 hottest lifted functions disassembled and every sampled instruction classified
+(work/bench/cg1/cgclass.py, stseq.py, ctxpos.py; sequences, not single instructions, because of skid). Whole thread
+(instructions / cycles): lifted PPU code 61.5 / 67.5 %, jobs it runs 20.4 / 13.9, the out-of-line store path 7.4 / 5.1
+(ppu_lean_st32 3.7 / 2.8, the coherency notify 2.5 / 1.5), other runtime 5.9 / 5.6, waits 4.0 / 7.0. The lifted code's
+instructions:
+
+| Pattern (lifter / runtime overhead) | Share of the lifted code's instructions | Share of the thread's | Notes |
+|---|---|---|---|
+| Store page-map test + re-check (shr, 2 x load / cmp $1 / jne per store) | 11.0 % | ~6.8 % | 40.6 % of it on stores that follow another store off the same register in straight-line code (prologue saves, structure fills), 12.5 % the first of such a run, 46.9 % alone; the store itself 1.0-1.3 % |
+| Host stack spills / reloads | 10.0 % | ~6 % | 7.2 in the bodies (15 host registers for ~25 live guest ones), vector spills 2.6; statically 23 % of the code |
+| Register-file (ctx) traffic | 9.9 % | ~6 % | GPR loads 3.1 (2.1 at function entry), GPR stores 3.0 (0.6 before returns, 0.5 before calls), VR 2.3, FPR 0.5, CR / LR / CTR 1.0 |
+| Host frame of each lifted function (6 push / pop, rsp, call, ret) | 5.4 % | ~3.3 % | entry 2.8, returns 1.2, call sites 1.3 |
+| 32-bit address / clrldi zero-extensions (mov r32,r32) + lea | 6.6 + 7.2 % | ~8.5 % | a guest address is a 32-bit sum: 35 % of the loads take their index from a 32-bit lea, 26 % from an add |
+| rip-relative globals (vm_base, page map, TOC-ok bytes, icall table) | 3.0 % | ~1.8 % | |
+| CR / XER bookkeeping, byte swaps, indirect calls | 0.4 / 0.2 / rare | -- | compares are fused compare + branch; MOVBE does the swap in the access |
+| The guest's own work (alu, vector / fp, branches, compares, loads, copies) | ~45 % | | |
+
+The overhead is spread over five patterns of 5-11 % each; the store test is the only one a small, exactness-safe lifter
+change can take (section 4: `PPU_ST_CMPB` + `PPU_ST_RUNS`); spills, register-file traffic and the frames come from the
+calling convention (every guest register through ctx at each call, ~25 guest registers in 15 host ones) and need a
+different ABI between lifted functions.
+
 **Main thread on the street (2026-11-18, agent main1; NOTES.md "main thread on the street").** hd1, guest 10-85 s,
 21.6 ms frames, main 20.4 ms busy (94.5 %). From the main-thread profile (zb-pmain, 56,743 samples) and a timeline run
 with the job runner's new ftrace kinds (m1d-1: every job run, every wait of the main thread, 2,250 frames):
@@ -735,6 +759,18 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
   (same RADV .so since Oct 15). `PS3RECOMP_VK_MULTIDRAW=3` = the multi-draw replay check (section 4); `=9` = sizing of
   "constants by draw index" (wrong picture).
 
+* **Main-thread code tools** (2026-11-20, agent cg1; NOTES.md "main-thread code generator (agent cg1)"):
+  `EXE=<exe dir> ZONE=streetq PSTART=3 PSECS=12 work/bench/cg1-prof.sh <tag> [ENV=V ...]` = perf record of the main thread
+  with cycles:u AND instructions:u (one perf.data); `perf script -F period,event,ip,sym,symoff,dso` + work/bench/cg1/cat.py
+  (by kind of code), cgclass.py <objdump of the hot functions> <script> (the lifted code's machine instructions by kind,
+  weighted by samples; objfilter.py keeps the hot functions of one `objdump -d` pass, ~25 s), stseq.py (the store
+  page-map test sequences and their straight-line runs), ctxpos.py (register-file / spill / frame traffic by position:
+  entry, around calls, before returns). work/bench/cg1build.sh = ft1build.sh + `LIFTENV="PPU_...=1 ..."` (lift switches
+  into the build container); cg1-ctr.sh = rotated counter pairs; cg1/abpair.py = paired b - a with SEs of an abseq
+  output section (fps, main, RSX, GPU, p99, max, > 33 / > 50, draws); cg1/runcheck.py = the independent check of a
+  `PPU_ST_RUNS` lift's text. Note: PORT_LIFT_JOBS is in the lift fingerprint (cg1build.sh uses 4, ft1build.sh 2): changing
+  it re-lifts once (byte-identical).
+
 ### Acceptance rules (every change, agreed with the player 2026-11-18)
 
 1. Exact: SPU natives match the lifted job bit for bit (job replay exit 0, live checks 0 differences); graphics
@@ -752,6 +788,7 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
 
 | Commit | Change | Measured |
 |---|---|---|
+| (uncommitted in D; work/bench/cg1-store.patch, exe dirs work/port/cg1a = HEAD's lift / cg1b = both switches, no-PGO modules, s1c's engine (= HEAD's) in both; cg1, 2026-11-20) | the store page-map test in fewer instructions, two lift-time switches in engine/tools/ppu_fastpath.py (**default off**: HEAD's lift is unchanged; set them in the lift's environment): `PPU_ST_CMPB=1` the test and its re-check as one `cmpb $1, (map, page)` each (asm goto: the same byte read at the same point); `PPU_ST_RUNS=1` three or more stores off one guest register in straight-line code (prologue saves, structure fills) take one test of the run's two end pages, plain byte-swapped stores and one re-check (if a page went slow meanwhile, ppu_store_pm_recheck for every store of the run); the stretch is emitted twice, the careful copy (the original lines) for a run whose pages are not fast; `PPU_ST_RUN_MIN`, `PPU_ST_RUNS_VERIFY=1` = the check lift. 210,309 of 417,714 store sites grouped (35,039 runs), module .text +4.5 % (the cold copies) | counters (4 + 4 quick street, PRIO 1): **main instructions -6.2 % (SE 1.1), cycles -2.4 % (SE 0.85)**, CPU ms -1.4 %, IPC 0.99 -> 0.95, other groups and power equal; quick street abseq (PRIO 1, 8 pairs) INCONCLUSIVE **+0.96 %** (SE 0.42; pairs 0.28), **main -0.42 ms (SE 0.07)**, RSX +0.18 (0.06), p99 -0.25 (0.27), > 33 ms 6.1 / 6.0, > 50 ms 1.25 / 1.0 a run; plaza abseq (PRIO 1, 8 pairs) -0.22 % (SE 0.55), main -0.14 (0.14), RSX +0.29 (0.12), max 45 -> 37 ms, > 33 ms 1.6 -> 0.5; street PRIO 0 (8 pairs) -0.05 % (SE 0.42), main -0.14 (0.05), RSX +0.28 (0.07), p99 +1.1 (0.4); plaza counters (on-path runs, A 2 / B 4): main instructions -8.0 %, cycles -3.3 %; exact: an independent check of the lift text (all 35,039 run blocks: same statements, same stores, offsets = the original addresses) 0 differences, the verify lift (every grouped store checks its own address: 0 reports on the quick street and the plaza), the steered full street route on the path with the end shot at 6.3 % (A 7.2 %), 69 game runs without a crash, hang or error, draws equal; PGO: every lifted function with a store changes its CFG (a retrain with the lift; both sides here no PGO) |
 | (parked, not in the tree: work/bench/r2-multidraw.patch, exe work/port/r2 = hd4's module + this engine; r2, 2026-11-20) | Vulkan entry-point wrappers, `PS3RECOMP_VK_MULTIDRAW` (**default: unset** = HEAD's code path, nothing installed; flips live with PS3_LIVEAB): 1 = a vkCmdBindDescriptorSets equal to the bound one (set and dynamic offsets) with only draws / buffer binds / dynamic state since is left out; 2 = 1 + neighbouring indexed draws with nothing recorded between them recorded as one vkCmdDrawMultiIndexedEXT (VK_EXT_multi_draw, enabled at device creation only with the switch); 3 = 2 + a replay check (captured runs drawn both ways into scratch targets, read back, compared); 9 = sizing only (wrong picture: offsets ignored, the "+constants by draw index" tier); `PS3RECOMP_VK_MULTIDRAW_STATS=1` = [multidraw] lines. No recording function changes (PGO: only rsx_vulkan_backend_init loses its profile) | mode 2 joins 24-32 % of draws (street 2,000-2,650 a frame, plaza 2,300-2,500), leaves out as many binds; Vulkan-call time in the backend's draws -0.13..-0.17 ms a frame; in-run street-still PRIO 1 (2 runs) RSX -0.07 ms (SE 0.14), frame -0.02 (0.15), fps +0.18 % (0.74); PRIO 0 RSX -0.44 (0.19), fps +1.31 % (1.04); walking crossover (unsteered, off-route) RSX -0.78 (0.63); quick street abseq (PRIO 1 both, 8 pairs) INCONCLUSIVE +0.43 % (SE 0.47), RSX -0.03 ms (SE 0.10), main -0.06 (0.10), p99 -0.75 (0.64), > 33 ms 6.1 -> 4.6 a run (SE 0.95), > 50 ms 1.0 / 1.0; plaza abseq (PRIO 1 both) over the 6 on-route pairs of 8 -0.44 % (SE 0.60), RSX +0.03 ms (SE 0.11), main +0.14 (0.16), p99 -0.37 (0.25), > 33 ms 0.50 -> 0.33, > 50 ms 0 / 0; counters (4 + 4 quick street runs) RSX cycles a frame -0.32 % (SE 0.65), instructions -1.14 % (SE 0.58): no group moves; exact: 420 runs / 2,884 draws replayed both ways, 8.1 GB of colour / depth / stencil, 0 bytes differ; RSX semaphore waits: quick street equal (in the window 8 vs 9 in 8 runs each), plaza more with the switch (in the window 10 vs 26 over 6 on-route pairs, 4.0 vs 12.8 ms in total, < 0.001 ms a frame; labels 0x870 / 0x890 as without it: read as the RSX reaching the light jobs' acquire a little earlier, a watch item). Sizing mode 9: 76 % of draws join, RSX -0.69 ms (SE 0.15) = the most the shader-side form could save. By rule 2 not worth turning on alone |
 | (uncommitted in D; work/bench/s1-prio.patch, exe work/port/s1c = hd4's module + this engine; s1, 2026-11-20) | runner priority classes, `PS3_NATIVE_JOBS_PRIO` (**default 0** = upstream's single FIFO; flips live with PS3_LIVEAB): two ticket rings; with 1 a manager goes to the low class when its last flush came from a thread other than the main PPU thread (guest id 1) AND its jobs are long (mean of all its jobs >= `PS3_NATIVE_JOBS_PRIO_LONG_US`, 250 us) -- on the street and the plaza that is Edge (221, ~600 us a job) alone; FIFO inside a class, jobs never interrupted, the sticky pick yields to the high class, a low job older than `PS3_NATIVE_JOBS_PRIO_AGE_US` (8 ms) goes first anyway; bench modes 2 (static list `PS3_NATIVE_JOBS_PRIO_LOW`, default 221), 3 / 4 (awaited manager first), 5 (by kicker alone); stats in the `[jobs] prio` line; replaces sz1's PS3_JOBS_PRIO prototype; tests/jobrunner: + scenario `prio` (7 cases), 15 of 15 | mechanism (trace): first anim job 4.38 -> 1.52 ms after the flip, post-Edge anim waits 1.44 -> 0.59 ms a frame, main's runner waits -0.5..-1.0 ms but its time outside them +0.85..+0.97 ms (frame-end wait for the RSX +0.25); Edge end median 4.3 -> 9.1 ms (p99 15.4, none past the frame); RSX semaphore waits unchanged (1 a 479 frames). fps: in-run street-still (Edge low, 4 runs) +0.33 % (SE 0.62), main -0.07 ms (SE 0.12); plaza abseq (7 on-route pairs) **+2.06 % (SE 0.63)**, main -0.66 ms, RSX -0.23, p99 -0.5 ms; quick street abseq +1.25 % (SE 0.88, 8 pairs, main -0.40 ms; with s1b's flapping rule -0.32 %, SE 0.44); standing 10 min x 2 pairs (real clock, spot 2, 60 cap, real controller): on 59.68 / 59.65 fps, p99 18.0 / 17.9, > 33 ms 4 / 3, worst 41 / 44 ms vs off 59.72 / 59.59, p99 18.0 / 18.3, > 33 ms 0 / 3, worst 33 / 40, > 50 ms 0 in all four; full street route on / off 49.42 / 49.82 fps, both on route, one > 50 ms each (the world start); 39 runs exit 0; no `[jobs] WARN`, no new frames > 50 ms; no PGO retrain (pool_main, hook_token_test, ready_add_n lost their profile) |
 | (parked, not in the tree: work/bench/j218-natives.patch, exe work/port/j218c2 = hd4's engine + the new module) | job 218: blend zero-weight shortcut (`PS3_NATIVE_ANIM_ZSKIP`), FK 0x179C0 first pass raw (`J218_FKRAW`), native 0x17280 (`PS3_NATIVE_ANIM_OFF=17280`; model from the Switch fork, MIT); natives.txt +0x17280 (SPU_NATIVE_MAX now full, 32) | 218 per job live -8.6 % (269.9 -> 246.6 us, counters batch), replay -7.2 % / -8.4 % (street / plaza best); fps: quick street INCONCLUSIVE at 8 pairs, -0.01 % (SE 0.61); plaza +0.38 % (SE 0.53, 8 clean pairs); in-run main +0.06 ms (SE 0.22): neutral by rule 2; exact (FULLPUT 800/800, valP2 table identical, check modes 0 of 7.08 M + 1.3 M live calls differ); no PGO retrain (coordinator: one combined retrain later) |
@@ -776,6 +813,14 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
 | 4cabf54 and older | see git log (natives from the Switch fork, job 210/218/220/223 natives, draw offsets...) | |
 
 ## 5. Tried and rejected (do not retry without a new reason)
+
+* Variants of the store-test change (2026-11-20, cg1; NOTES.md "main-thread code generator (agent cg1)"): the page byte
+  read with a volatile load -- clang folds neither an atomic nor a volatile load into the compare (movzbl + cmp + jne
+  either way); a plain load folds but is a data race (the asm goto of `PPU_ST_CMPB` reads the same byte, same point).
+  Store runs across conditional exits (`if (c) goto` inside a run, re-check at the exit): +1.4 % more grouped stores
+  (static, 8 chunks): not built. Runs of two stores: the run test checks two pages, so no test is saved: not built.
+  Keeping the per-store test out of the careful copy's inlining (clang does not inline into the cold copy): &_mm then
+  lives in memory, four stores at every function entry -- the accessors are always_inline under `PPU_ST_RUNS`.
 
 * Fewer Vulkan draws without a shader change (2026-11-20, r2; NOTES.md "R2 graphics thread"; kept as the default-off
   tool `PS3RECOMP_VK_MULTIDRAW`, section 4): neighbouring draws with identical pipeline, set, constant windows, buffers and
@@ -912,7 +957,7 @@ below 16.7 ms; the GPU (13.2 ms at 1200 MHz, ~15 at 1000) fits.
 |---|---|---|---|---|---|---|
 | S1 | Runner priority -- **built (s1, 2026-11-20): `PS3_NATIVE_JOBS_PRIO=1`, default 0** (section 4; NOTES.md "job priority (agent s1)"): other threads' long-job managers (Edge) go behind the main thread's | Edge's ~15 jobs queued at 0.2 ms held all 4 pool threads to 4.3 ms; with the priority the first anim job starts at 1.5 ms instead of 4.4 and the post-Edge waits fall 1.44 -> 0.59 ms a frame, BUT the main thread's time outside its waits grows about as much (its frame-end wait for the RSX thread +0.25 ms; no extra cache misses, no run-queue delay) | measured: in-run street-still +0.33 % (SE 0.62, 4 runs); quick street abseq +1.25 % (SE 0.88, 8 pairs; main -0.40 ms, SE 0.20); plaza abseq +2.06 % (SE 0.63, 7 on-route pairs; main -0.66 ms, RSX -0.23, p99 -0.5); sz1's +2.4 % on the street not reproduced | the remaining frame gain is capped by the RSX thread finishing the frame last | **street ~+1 % (not proven), plaza +2 %** | medium: plaza 3.3 SE, street 1.4 SE; standing and full routes clean; pays more once R2 shortens the RSX thread; the default is step 6's decision |
 | S2 | GPU clock 1000 instead of 1100-1200 MHz (a setting: the player's) | the 15 W cap: GFX watts are taken from the CPU's clock | 1200 -> 1000: frame -0.65 ms (SE 0.22), GFX -0.35 W -> ~1.9 ms per W | GPU busy 13.2 -> 15 ms (still < 16.7) | **+3.2 %** (SE 1.1) vs 1200; ~+1.5 % vs 1100 (interpolated, not measured) | medium (one in-run test; check the plaza / GPU-heavy views before advising). Note (orchestrator): the 19 Nov clock sweep with light tiles (section 4, "GPU clock, light tiles") measured 1000 and 1100 MHz as equal on the street (50.39 / 50.51 on route, 46.71 / 47.16 guest 4-20 s, small n), so the player's 1100 already takes most of this; 1000 leaves less GPU headroom for busy views. No change advised without a 1000 vs 1100 A/B on street + plaza. |
-| S3 | Main-thread code generator (lifter: instruction count, ctx traffic, spills, hot code footprint) | own code 15.6 ms at IPC 1.10; frontend-starved 25 % of cycles, op cache 31 % of uops; memory <= ~25 % | slow-down 0 (first 1.2 ms after kicks) to 0.9 (at the flip); 0.27 (SE 0.08) for 2.1 ms after kicks; the speed-up direction is weaker (it then waits longer) | -10..-20 % of 15.6 ms = -1.6..-3.1 ms of main CPU | +2..+7 % alone; more combined with S1 / M8 (shorter job latency) | low (no codegen prototype measured; sensitivity position-dependent) |
+| S3 | Main-thread code generator -- **step 5 done (cg1, 2026-11-20)**: breakdown in section 2 ("The main thread's code by instruction kind"); built `PPU_ST_CMPB` + `PPU_ST_RUNS` (section 4, default off) | the lifter's overhead is spread: store tests 11 %, spills 10 %, register-file traffic 10 %, host frames 5 %, address arithmetic ~14 % of the lifted code; a removed instruction was worth ~0.4 cycles (they are the cheap ones) | measured: main -0.42 ms (SE 0.07) for -6.2 % instructions / -2.4 % cycles; the frame got ~half of it on the street (+0.96 %, SE 0.42), nothing on the plaza (RSX-bound) or with PRIO 0 (the saving becomes job waiting) | the rest of the store test (single stores): ~2.3 % of the thread's instructions, ~0.2 ms, only with a protocol change; the calling-convention items (spills + ctx + frames ~25 % of the lifted code) need a new ABI between lifted functions: ~0.5-1 ms at the measured exchange rate | street +1 % (measured, 2.3 SE), plaza 0 | measured; the next main-thread ms are in the ABI (large) -- and the RSX thread is now right behind (+0.2-0.3 ms) |
 | S4 | Edge (223) on the GPU | as S1, plus 16 ms of pool CPU a frame (power) | Edge slow-downs 0.23 (0.16) / 0.13 (0.045) per ms of Edge CPU (follows Edge's end; MWAITX hides the power part) | after S1: the remaining 0.38 ms of post-Edge wait + ~0.5-1 W of CPU (minus the GPU's new work) | +1..+4 % beyond S1 | low (GPU-side cost unknown; very large effort) |
 | M8 | SPU runtime per MFC command (55,000 a frame) | every job's DMA path, incl. the awaited 213s (85 DMAs a job) | 0.18 (SE 0.08) (spin delay 3.0 ms of CPU; large-signal 0.15) | -15..-30 ns a command = -0.8..-1.6 ms of CPU | +0.7..+1.4 % (speed-up likely weaker) | low-medium |
 | G2-G4 | GPU passes (shadow copies, box/tile, depth decodes: 0.7-1.2 ms of GPU) | not the limit: only through power at a fixed clock | ~1.9 ms of frame per W of GFX (S2) | ~0.07-0.1 W | +0.5..+1 %, or room for a lower clock | low |
@@ -931,6 +976,21 @@ work: +0.14 ms of frame, SE 0.30). The RSX-side lever with a size is R8 (the tex
 8.2 ms for a fifth of the draws), then R5 (~0.5 ms), R3 / R4 (~0.5 together) and the step-6 PGO retrain; all are
 engine-side (sink_end_body's profile), so they belong before step 6's retrain. Order unchanged: step 5 = the main-thread
 code generator (S3), which the frame waits on first.
+
+**Step 5 result (cg1, 2026-11-20):** the main thread's lifted code (61.5 % of its instructions) has no dominant
+lifter overhead: store page-map tests 11 %, host spills 10 %, register-file traffic 10 %, host frames 5 %, 32-bit address
+arithmetic ~14 % (section 2). The store test was the one cheap and exact target: `PPU_ST_CMPB` + `PPU_ST_RUNS` (section 4)
+remove 6.2 % of the main thread's instructions (SE 1.1) but only 2.4 % of its cycles (the removed instructions ran in
+parallel with the rest: ~0.4 cycles each), main -0.42 ms on the quick street with the priority on, and the frame gets
+about half (+0.96 %, 2.3 SE) because the RSX thread is right behind (+0.2-0.3 ms busier in every A/B, the same work in
+the counters: clock / pacing); plaza (RSX-bound) and PRIO 0 (the saving becomes job waiting) show nothing. What is left
+of this kind: the single stores' tests (~2.3 % of the thread's instructions, needs a protocol without the per-store
+re-check: ~0.2 ms), the load addresses (a lea / zero-extension per load: ~2 % of the lifted code, needs 64-bit addressing
+with guard pages for the wraps), and the calling convention (every guest register through ctx at each call, the six
+host pushes / pops, the spills of ~25 guest registers in 15 host ones: ~25 % of the lifted code, ~15 % of the thread's
+instructions; at the measured exchange rate ~0.5-1 ms, a new ABI between lifted functions = weeks). So S3's -1.6..-3.1 ms
+is out of reach with lifter patches; the S3 change is worth keeping for the PGO retrain of step 6 (with its lift), and
+the next frame milliseconds on the street are again on the RSX thread (R8) and in the job latency the main thread waits for.
 
 **Order for roadmap steps 3-5 (sz1):** step 3 = S1 done properly (small: the ready ring gets a priority class for the
 main thread's managers; gate it) and put S2 to the player (free). Step 4 = the main-thread code generator (S3), sized
