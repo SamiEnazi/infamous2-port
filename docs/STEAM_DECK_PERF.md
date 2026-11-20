@@ -67,6 +67,35 @@ Barriers: ~100 full + ~115 image barriers a frame; leaving the redundant image o
 time (section 5). The street's draws per frame (PS3RECOMP_ENG_PASSSTATS): ~7,800, of which ~4,700 depth-only into the sun
 shadow zeta 0x0F2F0000 (cascade runs ~4 / 195 / 950 / 3,510), G-buffer 1,340-1,550 + 200-270 (4 targets), forward ~1,050.
 
+### RSX thread on the street (2026-11-20, agent r2; NOTES.md "R2 graphics thread")
+
+hd4's module + HEAD's engine, `PS3_NATIVE_JOBS_PRIO=1`, quick street (steered), guest 4-20 s: ~7,100-8,150 draws a frame,
+the RSX thread 18.9-19.3 ms of CPU a frame (86-89 % busy). perf on `ps3-rsx` alone (17,627 samples, inlining resolved by
+llvm-symbolizer) and the engine's own counters (`PS3RECOMP_LIMITS=1`, `PS3RECOMP_ENG_DELTA_STATS=2`,
+`PS3RECOMP_VK_MERGE_STATS=1`, `PS3RECOMP_VK_CALLSTATS`):
+
+| Part | Share of the thread | ms a frame | Biggest items |
+|---|---|---|---|
+| Vertex / index work (pair memo, index / vertex caches, fetch) | 20.6 % | 3.9 | vertex fetch 5.7 % (~810 fetches a frame), index-cache probe 2.9 % (its key compare: the hottest line, 1.95 %), pair memo 2.2 %, vertex-cache probe 1.4 %, index decode 1.3 %, remap 1.1 % |
+| FIFO walk + method dispatch | 19.5 % | 3.7 | gcm_rsx_process_fifo 5.7 %, rsx_dispatch_burst 5.1 %, constant uploads 1.8 %, dirty bits 1.8 % |
+| RADV (the driver) | 17.9 % | 3.4 | vkUpdateDescriptorSets 1.75 % (~610 a frame), the draw-time flush 1.7 %, vkCmdDrawIndexed 1.6 %, vkCmdBindPipeline 1.2 % (~370 a frame) |
+| Our Vulkan backend | 9.2 % | 1.7 | descriptor sets 1.9 %, the body 1.65 %, constant windows 1.2 % |
+| libc (memcpy 5.7 %, memcmp 2.0 %) | 8.8 % | 1.7 | constant rows and staged vertices into the arenas |
+| Delta engine (dirty tracking, dl_scan) | 4.6 % | 0.9 | |
+| Textures / programs / pipeline lookup | 9.3 % | 1.8 | texture slots 1.7 %, FP hash / reads / analysis 2.5 %, pipeline 1.6 % |
+| Rest (sink_end_body itself, write tracking, short tail) | 5.4 % | 1.0 | |
+
+By draw path (stage marks, ms a frame at 8,088 draws): all state reused 57 % of draws x 1.26 us = 5.8 ms; textures
+changed 17 % x 3.88 us = 5.2 ms (a third of them make a new descriptor set); programs changed 2.7 % x 13.9 us = 3.0 ms
+(program lookup / layout 3.4 us, vertices 2.7, backend 4.4 of it); all state + vertices reused 22 % x 0.67 us = 1.2 ms;
+whole way 0.6 % x 28 us = 1.4 ms. The Vulkan calls inside the backend's draws: 2.3-2.5 ms a frame (one
+vkCmdBindDescriptorSets with two new dynamic offsets + one vkCmdDrawIndexed per draw). No item above ~6 %: the cost is
+the per-draw interpreter, spread. What fewer Vulkan draws can save, measured: neighbours with identical state and
+constants (26-32 % of draws) as one multi-draw saves ~0.15 ms; ALL neighbours with one pipeline and set (76 % of draws,
+the "+constants by draw index" form, which needs a shader change) at most ~0.7 ms (measured with a wrong-picture sizing
+mode, section 6). Slack: with the priority on, standing in the street, +1 ms of RSX work costs +0.14 ms of frame (SE
+0.30), +1.7 ms costs +0.86 ms (SE 0.24): ~1 ms of slack.
+
 ## 2. Results so far (det bench, player settings, plaza)
 
 | Build | fps | Graphics thread | SPU work |
@@ -697,6 +726,15 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
   engine identical); a fresh engine dir differs from an incremental one only in .debug_* (the build dir's path). No
   compiler cache in the build container (none installed; not added).
 
+* **RSX thread tools** (2026-11-20, agent r2; NOTES.md "R2 graphics thread"): `work/bench/r2-stats.sh <tag> <exe dir>
+  [ENV=V ...]` = one quick street run (steered, PRIO 1) with the RSX counters on ([delta] / [delta-cost] per draw path,
+  [merge], [vk calls], [track-c]; add `PS3RECOMP_ENG_DELTA_STATS=2` for the per-stage split, ~0.3 us a draw of its own);
+  `PTHREAD=rsx PSTART=3 PSECS=10 ZONE=streetq work/bench/zprof.sh` + `work/bench/r2-inl.py <perf.data> <exe> [n]` (samples
+  symbolised with their inline chains by E's llvm-symbolizer: by file, innermost function, outer -> first inlined, line)
+  + `work/bench/r2-cat.py` (categories); RADV / libc by FDE range: work/bench/r2-fde/fdegroup.py with rsx1's FDE maps (radv-fde.txt, libc-fde.txt, vkep.txt = entry points)
+  (same RADV .so since Oct 15). `PS3RECOMP_VK_MULTIDRAW=3` = the multi-draw replay check (section 4); `=9` = sizing of
+  "constants by draw index" (wrong picture).
+
 ### Acceptance rules (every change, agreed with the player 2026-11-18)
 
 1. Exact: SPU natives match the lifted job bit for bit (job replay exit 0, live checks 0 differences); graphics
@@ -714,6 +752,7 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
 
 | Commit | Change | Measured |
 |---|---|---|
+| (parked, not in the tree: work/bench/r2-multidraw.patch, exe work/port/r2 = hd4's module + this engine; r2, 2026-11-20) | Vulkan entry-point wrappers, `PS3RECOMP_VK_MULTIDRAW` (**default: unset** = HEAD's code path, nothing installed; flips live with PS3_LIVEAB): 1 = a vkCmdBindDescriptorSets equal to the bound one (set and dynamic offsets) with only draws / buffer binds / dynamic state since is left out; 2 = 1 + neighbouring indexed draws with nothing recorded between them recorded as one vkCmdDrawMultiIndexedEXT (VK_EXT_multi_draw, enabled at device creation only with the switch); 3 = 2 + a replay check (captured runs drawn both ways into scratch targets, read back, compared); 9 = sizing only (wrong picture: offsets ignored, the "+constants by draw index" tier); `PS3RECOMP_VK_MULTIDRAW_STATS=1` = [multidraw] lines. No recording function changes (PGO: only rsx_vulkan_backend_init loses its profile) | mode 2 joins 24-32 % of draws (street 2,000-2,650 a frame, plaza 2,300-2,500), leaves out as many binds; Vulkan-call time in the backend's draws -0.13..-0.17 ms a frame; in-run street-still PRIO 1 (2 runs) RSX -0.07 ms (SE 0.14), frame -0.02 (0.15), fps +0.18 % (0.74); PRIO 0 RSX -0.44 (0.19), fps +1.31 % (1.04); walking crossover (unsteered, off-route) RSX -0.78 (0.63); quick street abseq (PRIO 1 both, 8 pairs) INCONCLUSIVE +0.43 % (SE 0.47), RSX -0.03 ms (SE 0.10), main -0.06 (0.10), p99 -0.75 (0.64), > 33 ms 6.1 -> 4.6 a run (SE 0.95), > 50 ms 1.0 / 1.0; plaza abseq (PRIO 1 both) over the 6 on-route pairs of 8 -0.44 % (SE 0.60), RSX +0.03 ms (SE 0.11), main +0.14 (0.16), p99 -0.37 (0.25), > 33 ms 0.50 -> 0.33, > 50 ms 0 / 0; counters (4 + 4 quick street runs) RSX cycles a frame -0.32 % (SE 0.65), instructions -1.14 % (SE 0.58): no group moves; exact: 420 runs / 2,884 draws replayed both ways, 8.1 GB of colour / depth / stencil, 0 bytes differ; RSX semaphore waits: quick street equal (in the window 8 vs 9 in 8 runs each), plaza more with the switch (in the window 10 vs 26 over 6 on-route pairs, 4.0 vs 12.8 ms in total, < 0.001 ms a frame; labels 0x870 / 0x890 as without it: read as the RSX reaching the light jobs' acquire a little earlier, a watch item). Sizing mode 9: 76 % of draws join, RSX -0.69 ms (SE 0.15) = the most the shader-side form could save. By rule 2 not worth turning on alone |
 | (uncommitted in D; work/bench/s1-prio.patch, exe work/port/s1c = hd4's module + this engine; s1, 2026-11-20) | runner priority classes, `PS3_NATIVE_JOBS_PRIO` (**default 0** = upstream's single FIFO; flips live with PS3_LIVEAB): two ticket rings; with 1 a manager goes to the low class when its last flush came from a thread other than the main PPU thread (guest id 1) AND its jobs are long (mean of all its jobs >= `PS3_NATIVE_JOBS_PRIO_LONG_US`, 250 us) -- on the street and the plaza that is Edge (221, ~600 us a job) alone; FIFO inside a class, jobs never interrupted, the sticky pick yields to the high class, a low job older than `PS3_NATIVE_JOBS_PRIO_AGE_US` (8 ms) goes first anyway; bench modes 2 (static list `PS3_NATIVE_JOBS_PRIO_LOW`, default 221), 3 / 4 (awaited manager first), 5 (by kicker alone); stats in the `[jobs] prio` line; replaces sz1's PS3_JOBS_PRIO prototype; tests/jobrunner: + scenario `prio` (7 cases), 15 of 15 | mechanism (trace): first anim job 4.38 -> 1.52 ms after the flip, post-Edge anim waits 1.44 -> 0.59 ms a frame, main's runner waits -0.5..-1.0 ms but its time outside them +0.85..+0.97 ms (frame-end wait for the RSX +0.25); Edge end median 4.3 -> 9.1 ms (p99 15.4, none past the frame); RSX semaphore waits unchanged (1 a 479 frames). fps: in-run street-still (Edge low, 4 runs) +0.33 % (SE 0.62), main -0.07 ms (SE 0.12); plaza abseq (7 on-route pairs) **+2.06 % (SE 0.63)**, main -0.66 ms, RSX -0.23, p99 -0.5 ms; quick street abseq +1.25 % (SE 0.88, 8 pairs, main -0.40 ms; with s1b's flapping rule -0.32 %, SE 0.44); standing 10 min x 2 pairs (real clock, spot 2, 60 cap, real controller): on 59.68 / 59.65 fps, p99 18.0 / 17.9, > 33 ms 4 / 3, worst 41 / 44 ms vs off 59.72 / 59.59, p99 18.0 / 18.3, > 33 ms 0 / 3, worst 33 / 40, > 50 ms 0 in all four; full street route on / off 49.42 / 49.82 fps, both on route, one > 50 ms each (the world start); 39 runs exit 0; no `[jobs] WARN`, no new frames > 50 ms; no PGO retrain (pool_main, hook_token_test, ready_add_n lost their profile) |
 | (parked, not in the tree: work/bench/j218-natives.patch, exe work/port/j218c2 = hd4's engine + the new module) | job 218: blend zero-weight shortcut (`PS3_NATIVE_ANIM_ZSKIP`), FK 0x179C0 first pass raw (`J218_FKRAW`), native 0x17280 (`PS3_NATIVE_ANIM_OFF=17280`; model from the Switch fork, MIT); natives.txt +0x17280 (SPU_NATIVE_MAX now full, 32) | 218 per job live -8.6 % (269.9 -> 246.6 us, counters batch), replay -7.2 % / -8.4 % (street / plaza best); fps: quick street INCONCLUSIVE at 8 pairs, -0.01 % (SE 0.61); plaza +0.38 % (SE 0.53, 8 clean pairs); in-run main +0.06 ms (SE 0.22): neutral by rule 2; exact (FULLPUT 800/800, valP2 table identical, check modes 0 of 7.08 M + 1.3 M live calls differ); no PGO retrain (coordinator: one combined retrain later) |
 | (deck-v063, local) play.sh `PS3_PAD_THREAD_US=4000` | v0.6.3's controller thread every 4 ms instead of 1 ms on Linux (section 7) | ps3-pad 32 -> 13 ms of CPU a second; street guest 4-20 s 46.46 -> 47.12 fps (n = 4, 1.9 SE), SDL pads on |
@@ -737,6 +776,16 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
 | 4cabf54 and older | see git log (natives from the Switch fork, job 210/218/220/223 natives, draw offsets...) | |
 
 ## 5. Tried and rejected (do not retry without a new reason)
+
+* Fewer Vulkan draws without a shader change (2026-11-20, r2; NOTES.md "R2 graphics thread"; kept as the default-off
+  tool `PS3RECOMP_VK_MULTIDRAW`, section 4): neighbouring draws with identical pipeline, set, constant windows, buffers and
+  dynamic state (24-32 % of draws on the street and the plaza) recorded as one vkCmdDrawMultiIndexedEXT, their
+  repeated set binds left out. Exact (replay check: 8.1 GB compared, 0 bytes differ), but RADV charges only ~70 ns for
+  such a draw: the Vulkan-call time falls 0.13-0.17 ms a frame and no in-run or between-run A/B shows it (quick street abseq +0.43 %, SE 0.47, RSX -0.03 ms; plaza -0.44 %, SE 0.60, RSX +0.03 ms).
+  RADV's per-draw cost is the two NEW dynamic offsets of every other draw (descriptor / push-constant re-upload), which
+  only the shader-side "constants by draw index" form removes -- sized with a wrong-picture mode (9): 76 % of draws join,
+  RSX -0.69 ms (SE 0.15) at most, before the cost of its per-draw constant table. Not worth the shader-generator change
+  on its own (days of work for <= 0.7 of 19 ms); the RSX thread's time is the per-draw interpreter (section 1).
 
 * Runner priority variants (2026-11-20, s1; NOTES.md "job priority (agent s1)"; the kept form is section 4's
   `PS3_NATIVE_JOBS_PRIO`): **"by kicker" alone** (every manager another PPU thread flushes goes last: Edge 221 AND the SPU
@@ -867,10 +916,21 @@ below 16.7 ms; the GPU (13.2 ms at 1200 MHz, ~15 at 1000) fits.
 | S4 | Edge (223) on the GPU | as S1, plus 16 ms of pool CPU a frame (power) | Edge slow-downs 0.23 (0.16) / 0.13 (0.045) per ms of Edge CPU (follows Edge's end; MWAITX hides the power part) | after S1: the remaining 0.38 ms of post-Edge wait + ~0.5-1 W of CPU (minus the GPU's new work) | +1..+4 % beyond S1 | low (GPU-side cost unknown; very large effort) |
 | M8 | SPU runtime per MFC command (55,000 a frame) | every job's DMA path, incl. the awaited 213s (85 DMAs a job) | 0.18 (SE 0.08) (spin delay 3.0 ms of CPU; large-signal 0.15) | -15..-30 ns a command = -0.8..-1.6 ms of CPU | +0.7..+1.4 % (speed-up likely weaker) | low-medium |
 | G2-G4 | GPU passes (shadow copies, box/tile, depth decodes: 0.7-1.2 ms of GPU) | not the limit: only through power at a fixed clock | ~1.9 ms of frame per W of GFX (S2) | ~0.07-0.1 W | +0.5..+1 %, or room for a lower clock | low |
-| R2 | RSX per-draw cost (constants by draw index, multi-draw) | the RSX thread has ~1 ms of slack on the street | +1.05 ms of RSX: 0.04 (SE 0.40); +5.2 ms: 0.79 | -0.8..-2 ms of RSX | ~0 now; needed for 60 fps once S1 + S3 take ~1+ ms off the main thread | medium |
+| R2 | RSX per-draw cost -- **profiled and built (r2, 2026-11-20)**: breakdown in section 1 ("RSX thread on the street"); `PS3RECOMP_VK_MULTIDRAW` (default off; section 4): neighbouring draws with identical state and constants as one vkCmdDrawMultiIndexedEXT + repeated set binds left out | the per-draw interpreter, spread over vertex / index caches 3.9 ms, FIFO walk 3.7, RADV 3.4, backend 1.7, libc 1.7, state tracking ~2.6; the Vulkan calls themselves 2.3-2.5 ms | with PRIO 1, street-still: +1.0 ms of RSX -> frame +0.14 (SE 0.30); +1.7 ms -> +0.86 (SE 0.24): ~1 ms of slack | built form ~0.15 ms of RSX (Vulkan-call time; not measurable in-run); the full "constants by draw index" form at most ~0.7 ms (sizing mode 9: RSX -0.69, SE 0.15) | 0 measured (section 4) | high: the Vulkan side is not where the RSX thread's time is |
 | -- | More single-job natives (216 / 218 / 204 style) | the CPU of jobs nobody waits for | 216 -10 %, 218 -8 %: 0 measured | -- | 0 | high (measured twice) |
 
 **Step 3 result (s1, 2026-11-20):** S1 is built as a default-off switch (section 4). Its mechanism works (the post-Edge wait is gone), but on the street the main thread then waits for the RSX thread at the frame end, so the frame gains ~+1 % (not significant) on the street and +2 % on the plaza. That moves R2 up: after S1 the RSX thread (18.4 ms, drained last) is what ends the street frame.
+
+**Step 4 result (r2, 2026-11-20):** the RSX thread's ~19 ms on the street (with the priority on) is the per-draw
+interpreter, spread: vertex / index caches 3.9 ms, FIFO walk + dispatch 3.7, RADV 3.4, our backend 1.7, libc 1.7, state
+tracking / textures / programs ~2.6 (section 1). Fewer Vulkan draws is a small lever: the built form (identical
+neighbours as one multi-draw, `PS3RECOMP_VK_MULTIDRAW=2`, exact) saves ~0.15 ms and measures as nothing (quick street
+abseq +0.43 %, SE 0.47; RSX -0.03 ms, SE 0.10; plaza -0.44 %, SE 0.60, 6 on-route pairs); even the shader-side "constants by draw index" form is worth at
+most ~0.7 ms (sizing mode 9). With PRIO 1 the standing street still leaves the RSX thread ~1 ms of slack (+1 ms of RSX
+work: +0.14 ms of frame, SE 0.30). The RSX-side lever with a size is R8 (the texture-changed and program-changed draw paths:
+8.2 ms for a fifth of the draws), then R5 (~0.5 ms), R3 / R4 (~0.5 together) and the step-6 PGO retrain; all are
+engine-side (sink_end_body's profile), so they belong before step 6's retrain. Order unchanged: step 5 = the main-thread
+code generator (S3), which the frame waits on first.
 
 **Order for roadmap steps 3-5 (sz1):** step 3 = S1 done properly (small: the ready ring gets a priority class for the
 main thread's managers; gate it) and put S2 to the player (free). Step 4 = the main-thread code generator (S3), sized
@@ -936,12 +996,13 @@ its own breakdown. RSX candidates ranked by per-draw saving (plaza, ~7,600 draws
 | # | Candidate | Expected per draw | Effort | Notes |
 |---|---|---|---|---|
 | R1 | DONE 2026-11-19 (pgo2): mg2r profiles (mg1's 5 routes + the street, 16:10 snapshot), build hd2 | measured 0.04-0.07 us (street 2.14 -> 2.10, plaza 2.47 -> 2.40 us per draw vs hd1) | -- | fd_draw 1.0e8 / vk_fd_record 8.0e7 entries now (zero in mg1r); plaza **50.65 vs 49.73 fps (+1.8 %)**, street 46.08 vs 46.34 (= hd1, main-bound); R4 can now be built on mg2r |
-| R2 | Constants by draw index + multi-draw (no per-draw set bind; consecutive draws with one pipeline and set as one vkCmdDrawMultiIndexedEXT) | 0.1-0.25 us | large (VS / FS read constants at a draw-indexed base; Vulkan-only HLSL path; shader cache key) | RADV is 0.44 us per draw: draw-time flush 2.0% + DrawIndexed 1.5% + set bind; the NOBIND bound alone is ~0.09 us |
+| R2 | Constants by draw index + multi-draw (no per-draw set bind; consecutive draws with one pipeline and set as one vkCmdDrawMultiIndexedEXT) | **measured 2026-11-20 (r2)**: the plain tier (same constants too, 26-32 % of draws) ~0.02 us a draw (0.15 ms, built: `PS3RECOMP_VK_MULTIDRAW=2`, exact, not measurable); the full form (76 % of draws join) at most ~0.09 us a draw (RSX -0.69 ms, sizing mode 9, wrong picture) before the cost of its per-draw constant table | large (VS / FS read constants at a draw-indexed base; Vulkan-only HLSL path; shader cache key) | RADV's cost of a draw whose state did not change is ~70 ns; what it charges per draw is the two new dynamic offsets (descriptor / push-constant re-upload), which only the shader change removes -- and that is <= 0.7 ms of 19 |
 | R3 | Index-cache successor prediction with two successors per entry (or a per-frame sequence) | 0.02-0.04 us | small (noinline helper, PGO-safe; 56 B of padding free in eng_ic_entry) | probe misses 2.0% + 0.6%: only 57.5% of links are right |
 | R4 | dl_scan with AVX2 compares (work/bench/rsx1-dlscan-simd.patch, `PS3RECOMP_ENG_DELTA_SIMD`) | ~0.04 us | small, but changes sink_end_body's PGO hash: needs R1 | rsx_draw_delta.inc:293-298 ~2% of the thread |
-| R5 | Persistent descriptor sets across frames (or vkUpdateDescriptorSetWithTemplate) | 0.03-0.08 us | medium (lifetime of views / samplers / arena buffers) | ~770 sets made and written per frame: vkUpdateDescriptorSets 1.8% + alloc 0.2% + our set building ~1% |
+| R5 | Persistent descriptor sets across frames (or vkUpdateDescriptorSetWithTemplate) | 0.03-0.08 us; street 2026-11-20 (r2): ~610 new sets a frame at ~0.75-0.86 us each (alloc + write + RADV's vkUpdateDescriptorSets 1.75 %): <= ~0.5 ms | medium (lifetime of views / samplers / arena buffers: the table now empties with each pool reset, s_dset_gen) | ~770 sets made and written per frame (plaza): vkUpdateDescriptorSets 1.8% + alloc 0.2% + our set building ~1% |
 | R6 | Fetch vertices straight into the arena (no staging memcpy) | ~0.03 us | medium | memcpy of staged vertices / indices 1.4% |
 | R7 | Push constants for the per-draw offsets (item 4) | < 0.06 us | large | bounded by NOBIND (section 5) |
+| R8 | (r2, 2026-11-20) The part-reuse paths: draws whose textures changed (17 % of draws, 3.88 us each = 5.2 ms a frame on the street) and whose programs changed (2.7 %, 13.9 us = 3.0 ms) -- 8.2 of sink_end's ~16.6 ms for a fifth of the draws (all-state draws: 1.26 us) | textures: ~2.6 us over all-state per draw (vertex work 1.12 vs 0.50 us: pair memo hits 49 vs 78 %; texture units 0.56; new sets 0.24; pipeline lookup 0.25); programs: program lookup / layout 3.4 us, vertices 2.7, texture units 1.3, sets 1.7, pipeline / records 2.9 | medium-large (sink_end_body: PGO; before the step-6 retrain) | the biggest RSX-side lever by the 2026-11-20 profile (e.g. textures path 3.9 -> 2.5 us and programs 13.9 -> 7 us = ~3.4 ms a frame); NOTES.md "R2 graphics thread" has the stage split |
 
 Item 6 (graphics thread +1.4% with t13d / `J204_TYPES`): the rb0 A/B for it was cut short (mgPr install) and 5 of 8
 runs left the route; still open (cheap: mgPr vs mgPr `J204_TYPES=0x5`, >= 4 clean rounds). Then (c) SPU leftovers:
