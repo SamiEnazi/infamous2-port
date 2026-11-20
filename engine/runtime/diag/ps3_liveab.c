@@ -48,7 +48,7 @@ static const struct { const char* name; int id; } k_sw[] = {
     { "null", PS3_LAB_NULL },              { "PS3_OVERLAY_HUD", PS3_LAB_HUD },
     { "PS3_DBG_DRAW_DELAY_NS", PS3_LAB_DRAW_DELAY }, { "PS3_DBG_DMA_DELAY_NS", PS3_LAB_DMA_DELAY },
     { "PS3_KICKDELAY_US", PS3_LAB_KICKDELAY_US }, { "PS3_LAB_GPUCLK", PS3_LAB_GPUCLK },
-    { "PS3_NATIVE_JOBS_STICKY", PS3_LAB_STICKY }, { "PS3_JOBS_PRIO", PS3_LAB_JOBPRIO },
+    { "PS3_NATIVE_JOBS_STICKY", PS3_LAB_STICKY }, { "PS3_NATIVE_JOBS_PRIO", PS3_LAB_JOBPRIO },
 };
 /* (sz1) PS3_NATIVE_JOBS_STICKY: the runner's own static, through its exported pointer (absent: the switch does nothing) */
 extern int* const g_wws_sticky_ptr __attribute__((weak));

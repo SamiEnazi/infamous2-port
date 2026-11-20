@@ -26,7 +26,8 @@
  *                             outside the game (work/bench/sz1-gpuclk.sh) sets it with steamosctl
  *   PS3_NATIVE_JOBS_STICKY    the runner's sticky pick (wws_runner.c s_sticky, written through g_wws_sticky_ptr; 0 = a
  *                             pool thread always takes the ready ring's next ticket, 1 = its last manager's next job first)
- *   PS3_JOBS_PRIO             the manager module whose jobs yield to every other manager's (wws_runner.c prio_pick; 0 off)
+ *   PS3_NATIVE_JOBS_PRIO      (s1) the runner's priority classes (wws_runner.c, "priority classes"; 0 = one FIFO, 1 = other
+ *                             threads' long-job managers (Edge) last; 2-5 bench modes)
  */
 #ifndef PS3EMU_PS3_LIVEAB_H
 #define PS3EMU_PS3_LIVEAB_H
