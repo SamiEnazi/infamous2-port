@@ -387,3 +387,20 @@ Until now each install replaced only the two game files and patched your old lau
 - **Step 5:** R2 (graphics thread, the next limit) together with M8.
 - **Edge on the GPU** stays later; S1 takes most of its measurable effect for far less work.
 - **GPU clock:** 1000 vs 1200 MHz is +3 %, but the 19 Nov sweep found 1000 and 1100 equal, so your 1100 already gets most of it.
+
+### 20 Nov 06:10: step 3, job priority: built, safe, a modest gain; the graphics thread is next
+
+- **The design:** Edge's jobs now give way to the jobs the main thread waits for. A general rule, not a hard-coded job number: a long-job manager that the main thread didn't kick goes in a second, lower queue. A job that waits 8 ms goes first anyway, so nothing can starve. Switch `PS3_NATIVE_JOBS_PRIO`, off by default until the combined round.
+- **Results** (same build, switch on vs off):
+
+| Test | fps | main thread |
+|---|---|---|
+| plaza | **+2.06 %** (SE 0.63, clear) | −0.66 ms |
+| quick street | +1.25 % (SE 0.88, not clear) | −0.40 ms |
+| standing at spot 2 | equal | |
+
+- **Safety:** upstream's job-runner tests pass, plus 7 new cases for the priority. Edge's results are never late for the graphics thread. 39 runs, all clean.
+- **Why the street gains less than the prototype suggested:** the main thread's wait behind Edge dropped from 1.44 to 0.59 ms a frame, but it now waits for the **graphics thread** at the end of the frame instead. So the graphics thread (R2: the cost per draw) now caps the street.
+- **Watch item for the final check:** standing frames over 33 ms were 7 with the priority vs 3 without (20 min each), within the usual range.
+
+**Next (step 4): R2, the graphics thread's per-draw cost**, moved ahead of the main-thread code generator, because a faster main thread would now just wait longer for the graphics thread.
