@@ -119,6 +119,42 @@ waits ~14 % + the runner's wait spin 4 % (~3.6 ms/frame of job waiting), guest s
 (caller not yet found). The street bench has fixed clusters of ~120 ms frames while walking (an artifact of the
 frame-stepped clock, absent on the real clock): its p99 / > 50 ms counts are not real-play numbers.
 
+**The street frame, sized (2026-11-20, agent sz1; NOTES.md "sizing (agent sz1)"). This replaces the "capacity-bound
+bursts" model below.** hd4's module, guest 4-20 s of the steered quick street, 46.5 fps, 21.5 ms frames; a timeline of
+every job run, wait, kick (claim) and pool sleep (diag engine sz1d, `-DSZ1_DIAG`, 479 frames) and calibrated in-run
+slow-downs (PS3_LIVEAB, 12-24 pairs each).
+
+* **The main thread produces the jobs.** The anim manager (218 220 213 201 200 225: 34 ms of CPU a frame) gets ~325 jobs
+  a frame, one flush each, from the main thread's game code between 1.3 and 18.6 ms after the flip; the render manager
+  (204 216 210 212 208 209: 19 ms) 61 from the main thread at 11-21 ms plus 610 released by barrier cells; Edge (223: 16 ms)
+  25 from the Edge kicker thread at the frame start. Every manager's last job is a main-thread kick ~1 ms before it ends
+  (no long barrier chain). There are no bursts to make "capacity-bound": the pool is 76 % busy, ~1 of its 4 threads is
+  asleep on average all frame after 5 ms (19 % of thread time asleep, 4.5 % spinning).
+* **The main thread's 21.5 ms**: own guest code ~15.6 ms, jobs it runs in the world tick 1.7, runner waits 4.2 (1.4 of
+  them running the awaited jobs itself, 2.8 pure waiting). The waits: (a) 1.46 ms right after Edge -- Edge's ~15 jobs are
+  queued at 0.2 ms and hold all four pool threads to 4.3 ms; the ~60-80 anim jobs the main thread kicks at 1-4 ms queue
+  behind them (the ready ring is FIFO across managers; the sticky pick is not the cause) and it waits for them at 4-8 ms;
+  (b) ~1.0 ms for the tails of 213s it kicked ~0.3 ms before (36 waits a frame, 28 us each); (c) ~1.4 ms of frame-end render
+  drain. The pool is 89 % busy during the waits.
+* **Sensitivities** (ms of frame per ms inserted; SE): main thread at the flip 0.88 (0.35) for 1 ms, 0.45 (0.10) for 2 ms;
+  main thread after each of its anim kicks 0 for 1.2 ms (all absorbed by its waits), 0.27 (0.08) for 2.1 ms -- the main
+  thread has ~1.2-1.5 ms of slack a frame, and a FASTER main thread waits longer for the same jobs (the asymmetry: its code
+  savings pay only where no wait follows, or with shorter job latency); Edge +2.4 / +5.4 ms of pool time 0.23 (0.16) / 0.13
+  (0.045) (the frame follows Edge's end, CPU / 4, not its CPU); RSX thread +1.05 ms 0.04 (0.40) (~1 ms of slack), +5.2 ms
+  0.79; SPU runtime per MFC command (55,000 a frame) +3.0 ms of CPU 0.18 (0.08); GPU 1200 -> 1000 MHz: frame -0.65 ms
+  (0.22), fps +3.2 % (1.1) -- GFX -0.35 W, CPU +0.33 W, clock +43 MHz, main -0.59 ms: ~1.9 ms of frame per W moved from the
+  GPU. Speed-up check of the Edge mechanism: Edge yielding to the other managers (`PS3_JOBS_PRIO=221`, bench): frame
+  -0.49 ms (SE 0.15), fps +2.41 % (SE 0.73), 24 pairs; the post-Edge wait 1.46 -> 0.38 ms, about half of it comes back as
+  other waits.
+* **The main thread's code** (perf stat on the main thread, 26 Zen 2 counters): IPC 1.10, only 31 % of uops from the op
+  cache, uop queue empty 25 % of the cycles (frontend), ROB-full 5.2 % + store-queue-full 4.9 % + register file 2.7 %
+  (backend), L1D refills 7.9 / 1000 instructions of which L3 0.88 and DRAM 0.71 (memory <= ~25 % of the cycles even if
+  every one stalled fully), mispredicts 0.96 MPKI. Not mainly memory-bound: instruction count and code footprint are the
+  code generator's levers.
+* So the frame's critical path alternates the main thread's code and the latency (queue position + run time) of the jobs
+  it waits for; job CPU that nobody waits for (most of 218 / 216 / 204) does not count, which is why the 216 and 218 natives
+  moved nothing; Edge counts through its hold of the pool at the frame start; power counts everywhere (1 W ~ 2 ms).
+
 **Main thread on the street (2026-11-18, agent main1; NOTES.md "main thread on the street").** hd1, guest 10-85 s,
 21.6 ms frames, main 20.4 ms busy (94.5 %). From the main-thread profile (zb-pmain, 56,743 samples) and a timeline run
 with the job runner's new ftrace kinds (m1d-1: every job run, every wait of the main thread, 2,250 frames):
@@ -166,7 +202,7 @@ Result of the round: two exact 216 changes (section 4) make 216 10-16 % shorter 
 thread does NOT get faster beyond noise (street, 12 rotated rounds: full window 49.80 vs 50.19 fps (4 / 6 clean), guest 4-20 s
 46.80 vs 47.14 (n = 12, 1.5 SE), main 19.41 / 19.22 and 19.53 / 19.32 ms; plaza 51.53 vs 51.26, main 18.71 / 18.72 ms). Reason: both bursts are capacity-bound -- a shorter 216
 opens its barrier sooner, but the main thread then waits for the rest of the burst, whose end is set by its total CPU over
-~4.5 threads (-0.55 ms of pool CPU a frame = ~0.12 ms, below the 0.25-0.4 ms noise). **Rule of thumb: 1 ms of CPU removed
+~4.5 threads (-0.55 ms of pool CPU a frame = ~0.12 ms, below the 0.25-0.4 ms noise). **Rule of thumb (superseded 2026-11-20 by the sizing above: what counts is the latency of the jobs the main thread waits for, not burst CPU): 1 ms of CPU removed
 from a burst's jobs buys ~0.2 ms of main thread; work on the main thread itself (its own 218 runs, the store slow path,
 guest code) counts one to one.**
 
@@ -599,6 +635,16 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
   the rule of thumb's 0.2 (here without the power part). Main only, 200 us x 3.9 a frame (= 0.78 ms of the main thread's
   own 218 time, street-still): frame +0.12 ms (SE 0.18, mwait) / -0.08 ms (SE 0.27, spin): NOT one to one -- the main
   thread's 218 runs sit inside its waits for the anim burst (it helps while it waits), so they cost like burst work.
+* **More causal delays and the job timeline** (2026-11-20, agent sz1; uncommitted, patch work/bench/sz1-hooks.patch; NOTES.md
+  "sizing (agent sz1)"): `PS3_DBG_FLIP_DELAY_KIND=mwait` (the flip delay as MWAITX; it runs on the main thread),
+  `PS3_DBG_DRAW_DELAY_NS` (per guest draw, RSX thread), `PS3_DBG_DMA_DELAY_NS` (per SPU MFC command, every thread),
+  `PS3_KICKDELAY=<mgr>:<us>:after` (the main thread after each flush of one manager), `PS3_LAB_GPUCLK` (the GPU clock flipped
+  in-run through work/bench/sz1-gpuclk.sh), `PS3_NATIVE_JOBS_STICKY` / `PS3_JOBS_PRIO=221` live; work/bench/sz1-fms.py = the
+  paired frame-ms difference and the sensitivity. MWAITX wakes ~0.4 us late (a 25-100 ns request takes ~420 ns; use
+  `_KIND=spin` below ~1 us) and leaves the core to the SMT sibling without drawing power, so MWAITX slow-downs look cheaper
+  than real work. The diag engine (`CEXTRA=-DSZ1_DIAG work/bench/sz1build.sh`) adds ftrace kinds 21 (every job run with its
+  queue latency), 20 (waits), 24 (every claim: who kicked which jobs), 25 (pool sleeps); work/bench/sz1-tl.py / sz1-tl2.py /
+  sz1-chain.py read them (the typical frame in 1 ms bins, the waits by the job that ended them, chains).
 * **Quick street run** (`ZONE=streetq detstreet.sh`, bench-street-quick.steps): the street route only to real 30 s after
   the mark, measured over guest 4-20 s (the stretch every run walks: no run leaves the route): ~68 s a run instead of
   ~142 s. Per-run sd ~0.9 % fps.
@@ -789,6 +835,31 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
   shader-generator change on its own.
 
 ## 6. Next candidates (expected gain, effort)
+
+**Ranked by measured expected gain (2026-11-20, agent sz1; street, hd4's module, 46.7 fps = 21.4 ms; section 2 "The
+street frame, sized"; NOTES.md "sizing (agent sz1)").** 60 fps needs the frame -4.7 ms: the main thread's chain (own code
+15.6 ms + 2.8 ms of waits + 3.1 ms of jobs it runs) AND the RSX thread (18.3 ms, ~1 ms under the main thread now) both
+below 16.7 ms; the GPU (13.2 ms at 1200 MHz, ~15 at 1000) fits.
+
+| # | Candidate | What limits it | Measured sensitivity (ms of frame per ms) | Realistic speed-up | Expected fps on the street | Confidence |
+|---|---|---|---|---|---|---|
+| S1 | Runner priority: Edge's jobs yield to the main thread's managers (bench `PS3_JOBS_PRIO=221` + STICKY 0 now; a proper priority class in the ready ring) | Edge's ~15 jobs queued at 0.2 ms hold all 4 pool threads to 4.3 ms; the anim jobs main kicks at 1-4 ms wait behind them (1.46 ms of main waits a frame) | measured directly: frame -0.49 ms (SE 0.15), 24 pairs, 2 runs; post-Edge wait 1.46 -> 0.38 ms, half of it returns as other waits | the bench form = -0.5 ms; smarter forms (the job a waiter needs first) maybe -0.7 | **+2.4 %** (SE 0.7) -> ~47.8 | high for the sign, medium for the size (one scene; needs the street + plaza gate and a standing run; Edge-heavy scenes untested) |
+| S2 | GPU clock 1000 instead of 1100-1200 MHz (a setting: the player's) | the 15 W cap: GFX watts are taken from the CPU's clock | 1200 -> 1000: frame -0.65 ms (SE 0.22), GFX -0.35 W -> ~1.9 ms per W | GPU busy 13.2 -> 15 ms (still < 16.7) | **+3.2 %** (SE 1.1) vs 1200; ~+1.5 % vs 1100 (interpolated, not measured) | medium (one in-run test; check the plaza / GPU-heavy views before advising). Note (orchestrator): the 19 Nov clock sweep with light tiles (section 4, "GPU clock, light tiles") measured 1000 and 1100 MHz as equal on the street (50.39 / 50.51 on route, 46.71 / 47.16 guest 4-20 s, small n), so the player's 1100 already takes most of this; 1000 leaves less GPU headroom for busy views. No change advised without a 1000 vs 1100 A/B on street + plaza. |
+| S3 | Main-thread code generator (lifter: instruction count, ctx traffic, spills, hot code footprint) | own code 15.6 ms at IPC 1.10; frontend-starved 25 % of cycles, op cache 31 % of uops; memory <= ~25 % | slow-down 0 (first 1.2 ms after kicks) to 0.9 (at the flip); 0.27 (SE 0.08) for 2.1 ms after kicks; the speed-up direction is weaker (it then waits longer) | -10..-20 % of 15.6 ms = -1.6..-3.1 ms of main CPU | +2..+7 % alone; more combined with S1 / M8 (shorter job latency) | low (no codegen prototype measured; sensitivity position-dependent) |
+| S4 | Edge (223) on the GPU | as S1, plus 16 ms of pool CPU a frame (power) | Edge slow-downs 0.23 (0.16) / 0.13 (0.045) per ms of Edge CPU (follows Edge's end; MWAITX hides the power part) | after S1: the remaining 0.38 ms of post-Edge wait + ~0.5-1 W of CPU (minus the GPU's new work) | +1..+4 % beyond S1 | low (GPU-side cost unknown; very large effort) |
+| M8 | SPU runtime per MFC command (55,000 a frame) | every job's DMA path, incl. the awaited 213s (85 DMAs a job) | 0.18 (SE 0.08) (spin delay 3.0 ms of CPU; large-signal 0.15) | -15..-30 ns a command = -0.8..-1.6 ms of CPU | +0.7..+1.4 % (speed-up likely weaker) | low-medium |
+| G2-G4 | GPU passes (shadow copies, box/tile, depth decodes: 0.7-1.2 ms of GPU) | not the limit: only through power at a fixed clock | ~1.9 ms of frame per W of GFX (S2) | ~0.07-0.1 W | +0.5..+1 %, or room for a lower clock | low |
+| R2 | RSX per-draw cost (constants by draw index, multi-draw) | the RSX thread has ~1 ms of slack on the street | +1.05 ms of RSX: 0.04 (SE 0.40); +5.2 ms: 0.79 | -0.8..-2 ms of RSX | ~0 now; needed for 60 fps once S1 + S3 take ~1+ ms off the main thread | medium |
+| -- | More single-job natives (216 / 218 / 204 style) | the CPU of jobs nobody waits for | 216 -10 %, 218 -8 %: 0 measured | -- | 0 | high (measured twice) |
+
+**Order for roadmap steps 3-5 (sz1):** step 3 = S1 done properly (small: the ready ring gets a priority class for the
+main thread's managers; gate it) and put S2 to the player (free). Step 4 = the main-thread code generator (S3), sized
+first by a prototype (one lifter change, perf stat IPC / instructions on the main thread + an in-run A/B), because it is
+the biggest ceiling (15.6 of 21.4 ms) and Edge's measurable effect (the post-Edge wait) is mostly taken by S1 at a
+fraction of the cost. Step 5 = R2 (the RSX thread is the next wall: 18.3 ms) together with M8 (short job latency makes the
+main thread's code savings count). Edge on the GPU (S4) moves behind S3: after S1 its remaining value is power, which
+S2 shows can be bought more cheaply. The earlier plan's job-side track (M1 / M3: shorter 213 / 216 / 218 jobs for burst
+capacity) is wrong: CPU removed from jobs nobody waits for buys nothing.
 
 **GPU candidates (2026-11-19, gpu2; street, 1200 MHz, after the light tiles: ~13 ms of GPU per frame on the shared
 stretch, ~12.2 on the route).** Ranked by the GPU time at stake; "exact" = the same picture by construction / by a check.
