@@ -530,3 +530,7 @@ The recording worker lost in the 17 Nov test with the old graphics thread; with 
 - **Tag `hd6`** = deck-perf 9abaf38, pushed. Your folder is on branch `installed` = hd6, launcher included (recording worker on).
 - **Backups:** work/port/installed-hd5-20261120/ (the two hd5 files), input.toml / settings.ini `.installed-hd5-20261120`. Rollback: `git switch -C installed hd5` in the folder, then copy the two files back.
 - **Start test with the real launcher:** the PGO module loaded, threaded recording was on with the worker on the graphics core's other CPU, all settings active, no errors.
+
+### 20 Nov 21:48: CPU energy preference restored
+
+You ran the sudo command; all 8 CPUs are back on `balance_performance` (governor `powersave`, no reboot). Every benchmark from 19 Nov 14:04 until now ran with `performance`. From now on they run with `balance_performance` again. As always, both sides of each comparison are measured fresh in the same batch, so nothing is mixed.
