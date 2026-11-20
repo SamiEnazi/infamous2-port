@@ -492,3 +492,21 @@ Launcher defaults (tools/play.sh): the job priority and R8 on. Linux builds use 
 - **Tag `hd5`** = deck-perf e9e05ea, pushed to the fork. Your folder is on branch `installed` = hd5, so everything is one version, launcher included. The launcher now switches on the job priority and R8. The game files are hd5c's (PGO mg5r).
 - **Backups:** work/port/installed-hd4-20261120/ (the two hd4 files), input.toml.installed-hd4-20261120, settings.ini.installed-hd4-20261120. Rollback: `git switch -C installed hd4` in the folder, then copy the two files back.
 - **Start test with the real launcher:** the PGO module loaded, the window came up, the controller thread, placement, and the settings (job priority 1, R8 3, controller every 4 ms, 4 job threads) were active, with no errors. Saves backed up by the launcher as usual.
+
+### 20 Nov 18:45: step 8, sizing the big options
+
+| Option | Measured | Realistic gain | Effort |
+|---|---|---|---|
+| **The Vulkan recording worker** (already in the engine: `PS3RECOMP_VK_THREADED=1 PS3_CPU_PLACE_VKW=1`, records the Vulkan calls on the graphics core's idle twin) | street **+2.12 %** (SE 0.69, decided after 3 pairs), graphics thread 18.1 → 16.3 ms; plaza +2.4 to +3.4 % | +2 to +3 % | hours (full check + PGO) |
+| **Edge on the GPU** | Edge's math part removed (measurement mode): **+3.4 %** (SE 0.85), main thread −0.75 ms at the same clock (less fighting over the shared cores, not power); all of Edge extrapolated +5 to +12 % | +4 to +10 % | weeks |
+| **A native for Edge's biggest lifted function (0x9C20, ~2.4 ms a frame)** | same lever | +2 to +4 % | days |
+| A new graphics-thread split design | ~0 beyond the worker until the main thread is faster | ~0 now | weeks |
+| New calling convention | 3.3–3.5 M instructions a frame | +1 to +2.5 % | weeks |
+| ThinLTO / call / frame flags | nothing to gain (no PLT, no frame pointer; ThinLTO +0.10 %) | 0 | — |
+
+The recording worker lost in the 17 Nov test with the old graphics thread; with today's it wins, and it alone meets the graphics thread's −1.3 ms target.
+
+**Recommended order:**
+1. the recording worker on by default (full check + PGO);
+2. Edge: first the 0x9C20 native plus a placement check, then Edge on the GPU if 60 fps still needs it;
+3. the calling convention last.
