@@ -1223,6 +1223,14 @@ def step_ppu():
     # PS3_TOC_FOLD=0 turn the page map / the folding off in the same exe.
     if fast:
         fast.update({"PPU_ST_PMAP": "1", "PPU_MOVBE": "1", "PPU_TOC_FOLD": "1"})
+    # cg1 / hd5 (2026-11-20; toolkit tools/ppu_fastpath.py): the store page-map test in fewer instructions -- the test and
+    # its re-check as one `cmpb` each (PPU_ST_CMPB), and one test of the two end pages for a straight-line run of three or
+    # more stores off one guest register, plain stores, one re-check after the run (PPU_ST_RUNS; a run whose pages are not
+    # fast takes its careful copy with the per-store tests). LINUX BUILDS ONLY (measured on the Steam Deck, branch
+    # deck-perf, docs/STEAM_DECK_PERF.md step 6: main thread -6 % instructions, -0.4..-0.6 ms a frame on the street);
+    # Windows builds keep the old lift. Each =0 in the environment = the old form (a different lift fingerprint: a re-lift).
+    if fast and sys.platform.startswith("linux"):
+        fast.update({"PPU_ST_CMPB": "1", "PPU_ST_RUNS": "1"})
     # Track A, lean guest memory (2026-11-16; toolkit tools/ppu_fastpath.py + runtime/memory/vm_guard.c,
     # work/native/TRACK_A.md): a guest load is one host load (no range test, no gcm poll compare: guard
     # pages and the live gcm ref word instead), no trampoline drain after calls (the runtime drains on

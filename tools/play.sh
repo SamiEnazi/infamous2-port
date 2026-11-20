@@ -207,6 +207,17 @@ export PS3RECOMP_GCM_SPIN_US PS3RECOMP_VK_TQ_SPIN_US PS3RECOMP_VK_PIPE_THREADS P
 # 47.12 fps (main 19.41 vs 19.14 ms). A pad call then copies a snapshot at most ~4 ms old (1 ms with upstream's default;
 # v0.6.2 read the pads inside the call, at most every 1 ms), against a 17-20 ms frame. Windows keeps upstream's 1 ms.
 : "${PS3_PAD_THREAD_US:=4000}"; export PS3_PAD_THREAD_US
+# (deck-perf, step 6 / hd5, 2026-11-20) Two engine switches on by default here (both default off in the engine; each can
+# still be set from outside, =0 = the old path). Measured in the combination (no-PGO modules, the store lift on, 6 rotated
+# rounds of 5 configurations; docs/STEAM_DECK_PERF.md step 6): taking either one out of it was slower, never faster.
+#   PS3_NATIVE_JOBS_PRIO=1: the job runner puts a manager whose last flush came from another PPU thread and whose jobs are
+#   long (mean >= 250 us: here Edge alone) behind the main thread's jobs, with an 8 ms age limit. Without it, quick street
+#   -0.76 % (SE 0.48), plaza -0.56 % (SE 1.01); alone it was street +1.25 % (SE 0.88), plaza +2.06 % (SE 0.63).
+#   PS3RECOMP_ENG_R8=3: descriptor sets kept across frames + the fragment program structural memo (the same picture,
+#   checked byte for byte). Without it, quick street -1.69 % (SE 0.45, RSX thread +0.60 ms), plaza -1.42 % (SE 0.92).
+# With both and the store lift (Linux builds: tools/rebuild_win.py) + the mg5r profiles = build hd5c, against hd4: street
+# +1.65 % (SE 0.46, guest 4-20 s) / +2.63 % (SE 1.11, full route), plaza +1.70 % (SE 0.47), standing 60 fps equal.
+: "${PS3_NATIVE_JOBS_PRIO:=1}" "${PS3RECOMP_ENG_R8:=3}"; export PS3_NATIVE_JOBS_PRIO PS3RECOMP_ENG_R8
 # The RSX (draw) thread alone on a core, every other thread on the rest (engine host_place.c, Linux):
 # 30.5 -> 33.0 fps on the Deck, 34.7 with the job 210 native. PS3_CPU_PLACE=0 = the OS decides.
 : "${PS3_CPU_PLACE:=rsxcore}"; export PS3_CPU_PLACE
