@@ -1558,9 +1558,51 @@ static inline int spu_cmd_plain_xfer(uint32_t cmd)
     const uint32_t hi = cmd & ~3u;
     return (hi == 0x20u || hi == 0x40u) && cmd <= 0x43u;
 }
+/* (sz1, bench only) PS3_DBG_DMA_DELAY_NS=<ns>: a delay per SPU MFC command (every PUT/GET/list/atomic command that
+ * reaches spu_mfc_cmd_fast: the lifted jobs' and the runner's staging DMAs, on every thread that runs SPU code), a
+ * causal test of the runtime's per-command cost (M8's size). PS3_DBG_DMA_DELAY_KIND=spin (default mwait: MONITORX/
+ * MWAITX, no power); PS3_DBG_DMA_DELAY_WHERE=pool|main|all (default all). PS3_LIVEAB's PS3_DBG_DMA_DELAY_NS overrides;
+ * each thread adds its delays to g_ps3_liveab_ev in batches of 64. Off: this call, a load, a compare. */
+#include "../../include/ps3emu/ps3_dbgdelay.h"
+#if defined(__GNUC__) && defined(__linux__)
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <pthread.h>
+extern volatile int g_ps3_lab[] __attribute__((weak));                    /* ps3_liveab.c (absent from test builds) */
+extern volatile unsigned long long g_ps3_liveab_ev __attribute__((weak));
+#endif
+static __attribute__((noinline)) void spu_dbg_dma_delay(void)
+{
+#if defined(__GNUC__) && defined(__linux__)
+    static int ns = -1, spin, where;
+    static SPU_THREAD_LOCAL int t_kind = -1;   /* 0 main thread, 1 pool (ps3-spuj*), 2 other */
+    static SPU_THREAD_LOCAL unsigned t_n;
+    int v = ns;
+    if (__builtin_expect(v < 0, 0)) {
+        const char* e = getenv("PS3_DBG_DMA_DELAY_NS"); v = e ? atoi(e) : 0;
+        const char* k = getenv("PS3_DBG_DMA_DELAY_KIND"); spin = k && !strcmp(k, "spin");
+        const char* w = getenv("PS3_DBG_DMA_DELAY_WHERE"); where = !w ? 0 : !strcmp(w, "pool") ? 2 : !strcmp(w, "main") ? 1 : 0;
+        if (v > 0) fprintf(stderr, "[dbg] PS3_DBG_DMA_DELAY_NS=%d (%s, where %d) per MFC command\n", v, spin ? "spin" : "mwait", where);
+        ns = v;
+    }
+    if (&g_ps3_lab) { const int lab = g_ps3_lab[9 /* PS3_LAB_DMA_DELAY */]; if (lab >= 0) v = lab; }
+    if (__builtin_expect(v <= 0, 1)) return;
+    if (where) {
+        if (t_kind < 0) {
+            char nm[16] = "";
+            pthread_getname_np(pthread_self(), nm, sizeof nm);
+            t_kind = syscall(SYS_gettid) == getpid() ? 0 : !strncmp(nm, "ps3-spuj", 8) ? 1 : 2;
+        }
+        if ((where == 1 && t_kind != 0) || (where == 2 && t_kind != 1)) return;
+    }
+    if (&g_ps3_liveab_ev && (++t_n & 63u) == 0) __atomic_add_fetch(&g_ps3_liveab_ev, 64, __ATOMIC_RELAXED);
+    ps3_dbg_wait_ns((uint64_t)v, spin);
+#endif
+}
 /* Returns 1 when handled. The caller has already run the job-recorder wrch hook. */
 static inline int spu_mfc_cmd_fast(spu_context* ctx, uint32_t cmd)
 {
+    spu_dbg_dma_delay();   /* (sz1) bench only, default off: a call, no branch in the callers (their PGO profiles stay) */
     if (!spu_cmd_plain_xfer(cmd) || ctx->policy_mode || ctx->image_id == 2) return 0;
     if (__builtin_expect(__atomic_load_n(&g_spu_fastch, __ATOMIC_ACQUIRE) <= 0, 0)) {
         if (g_spu_fastch < 0 && spu_fastch_init() > 0) {} else return 0;

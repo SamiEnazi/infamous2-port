@@ -3478,10 +3478,39 @@ void gcm_dbg_spin(const char* name, int* us)
     while ((t.tv_sec - t0.tv_sec) * 1000000ll + (t.tv_nsec - t0.tv_nsec) / 1000 < *us);
 }
 /* PS3_DBG_FLIP_DELAY_US; (ft1) PS3_LIVEAB's value when it sets one. Its own function: gcm_flip_request keeps its PGO profile. */
+/* (sz1) PS3_DBG_FLIP_DELAY_KIND=mwait: the same delay as MONITORX/MWAITX (ps3_dbgdelay.h: waits in C0 without issuing
+ * work, so it draws next to no power), and a first-delay line that names the thread (the main thread = the process
+ * thread, tid == pid?). PS3_LIVEAB counts each delay in g_ps3_liveab_ev. */
+#include "../../include/ps3emu/ps3_dbgdelay.h"
+#if defined(__linux__)
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+static __attribute__((noinline)) void gcm_dbg_flip_delay_mw(int us)
+{
+    static int said;
+    if (!said) {
+        said = 1;
+#if defined(__linux__)
+        const long tid = syscall(SYS_gettid);
+        fprintf(stderr, "[dbg] flip delay %d us (MWAITX) on tid %ld (%s)\n", us, tid, tid == getpid() ? "the main thread" : "NOT the main thread");
+#endif
+    }
+    extern volatile unsigned long long g_ps3_liveab_ev;
+    __atomic_add_fetch(&g_ps3_liveab_ev, 1, __ATOMIC_RELAXED);
+    ps3_dbg_wait_ns((uint64_t)us * 1000ull, 0);
+}
 static __attribute__((noinline)) void gcm_dbg_flip_delay(void)
 {
-    static int us = -1;
+    static int us = -1, mw = -1;
     int lab = g_ps3_lab[PS3_LAB_FLIP_DELAY];
+    if (__builtin_expect(mw < 0, 0)) { const char* k = getenv("PS3_DBG_FLIP_DELAY_KIND"); mw = k && !strcmp(k, "mwait"); }
+    if (mw) {
+        if (us < 0) { const char* e = getenv("PS3_DBG_FLIP_DELAY_US"); us = e ? atoi(e) : 0; }
+        const int v = lab >= 0 ? lab : us;
+        if (v > 0) gcm_dbg_flip_delay_mw(v);
+        return;
+    }
     gcm_dbg_spin("PS3_DBG_FLIP_DELAY_US", lab >= 0 ? &lab : &us);
 }
 static s32 gcm_flip_request(u32 bufferId, int in_fifo)

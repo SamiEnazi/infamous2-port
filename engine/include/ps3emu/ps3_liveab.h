@@ -18,6 +18,15 @@
  *   PS3_JOBDELAY_US           the delay of PS3_JOBDELAY's job (wws_runner.c), us
  *   PS3_OVERLAY_HUD           the performance HUD (F1) off / on (vk_overlay.cpp)
  *   null                      nothing (an A/A run: the method's own noise)
+ * (sz1, 2026-11-20; bench only, each in its own noinline function, default off):
+ *   PS3_DBG_DRAW_DELAY_NS     a delay per guest draw on the RSX thread (rsx_draw_engine.c sink_end), ns
+ *   PS3_DBG_DMA_DELAY_NS      a delay per SPU MFC command (spu_channels.c spu_mfc_cmd_fast's callers), ns
+ *   PS3_KICKDELAY_US          the delay of PS3_KICKDELAY's manager flush (wws_runner.c), us
+ *   PS3_LAB_GPUCLK            the GPU clock in MHz: written to the file PS3_LAB_GPUCLK_FILE at each flip; a watcher
+ *                             outside the game (work/bench/sz1-gpuclk.sh) sets it with steamosctl
+ *   PS3_NATIVE_JOBS_STICKY    the runner's sticky pick (wws_runner.c s_sticky, written through g_wws_sticky_ptr; 0 = a
+ *                             pool thread always takes the ready ring's next ticket, 1 = its last manager's next job first)
+ *   PS3_JOBS_PRIO             the manager module whose jobs yield to every other manager's (wws_runner.c prio_pick; 0 off)
  */
 #ifndef PS3EMU_PS3_LIVEAB_H
 #define PS3EMU_PS3_LIVEAB_H
@@ -35,6 +44,12 @@ enum {
     PS3_LAB_JOBDELAY_US,
     PS3_LAB_NULL,
     PS3_LAB_HUD,
+    PS3_LAB_DRAW_DELAY,
+    PS3_LAB_DMA_DELAY,
+    PS3_LAB_KICKDELAY_US,
+    PS3_LAB_GPUCLK,
+    PS3_LAB_STICKY,
+    PS3_LAB_JOBPRIO,
     PS3_LAB_N
 };
 /* The in-run A/B's value of each switch; -1 = not overridden (the site uses its own setting). */

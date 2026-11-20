@@ -8331,9 +8331,30 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
     if (dl) dl_end();   /* (rnd1) completed: its parts are the next draw's to take */
 }
 
+/* (sz1, bench only) PS3_DBG_DRAW_DELAY_NS=<ns>: a delay per guest draw on the RSX thread (a causal test of the graphics
+ * thread's per-draw cost, R2's size); PS3_DBG_DRAW_DELAY_KIND=spin (default mwait: MONITORX/MWAITX, no power).
+ * PS3_LIVEAB's PS3_DBG_DRAW_DELAY_NS overrides; every delay counts in g_ps3_liveab_ev. Off: this call, a load, a compare. */
+#include "../../include/ps3emu/ps3_dbgdelay.h"
+#include "../../include/ps3emu/ps3_liveab.h"
+static __attribute__((noinline)) void eng_dbg_draw_delay(void)
+{
+    static int ns = -1, spin;
+    int v = ns;
+    if (__builtin_expect(v < 0, 0)) {
+        const char* e = getenv("PS3_DBG_DRAW_DELAY_NS"); ns = v = e ? atoi(e) : 0;
+        const char* k = getenv("PS3_DBG_DRAW_DELAY_KIND"); spin = k && !strcmp(k, "spin");
+        if (v > 0) fprintf(stderr, "[dbg] PS3_DBG_DRAW_DELAY_NS=%d (%s) per draw\n", v, spin ? "spin" : "mwait");
+    }
+    const int lab = g_ps3_lab[PS3_LAB_DRAW_DELAY];
+    if (lab >= 0) v = lab;
+    if (__builtin_expect(v <= 0, 1)) return;
+    __atomic_add_fetch(&g_ps3_liveab_ev, 1, __ATOMIC_RELAXED);
+    ps3_dbg_wait_ns((uint64_t)v, spin);
+}
 /* (rnd1) PS3RECOMP_ENG_DELTA's counters: the time a draw takes on this thread. */
 static void sink_end(void* user, const rsx_dispatch* r)
 {
+    eng_dbg_draw_delay();   /* (sz1) bench only, default off (a call, no branch here: sink_end keeps its PGO profile) */
     /* (track C) PS3_RSX_DIGEST: the draw's state + packets as the engine starts it;
      * =check: against the split walker's hash of the same draw (g_rsx_tc_ref) */
     if (__builtin_expect(s_tc_dg != 0, 0) && g.ready) {

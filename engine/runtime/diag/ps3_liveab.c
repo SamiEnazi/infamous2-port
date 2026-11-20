@@ -15,7 +15,7 @@
  * the `other` group: ~0.1 % of one CPU. */
 #include "ps3emu/ps3_liveab.h"
 
-volatile int g_ps3_lab[PS3_LAB_N] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+volatile int g_ps3_lab[PS3_LAB_N] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 volatile int g_ps3_liveab_on = 1;
 volatile unsigned long long g_ps3_liveab_gpu_ns;
 volatile unsigned long long g_ps3_liveab_ev;
@@ -46,7 +46,30 @@ static const struct { const char* name; int id; } k_sw[] = {
     { "PS3_CPU_PLACE_MAIN", PS3_LAB_PLACE_MAIN },      { "PS3_DBG_FLIP_DELAY_US", PS3_LAB_FLIP_DELAY },
     { "PS3_DBG_PRESENT_DELAY_US", PS3_LAB_PRESENT_DELAY }, { "PS3_JOBDELAY_US", PS3_LAB_JOBDELAY_US },
     { "null", PS3_LAB_NULL },              { "PS3_OVERLAY_HUD", PS3_LAB_HUD },
+    { "PS3_DBG_DRAW_DELAY_NS", PS3_LAB_DRAW_DELAY }, { "PS3_DBG_DMA_DELAY_NS", PS3_LAB_DMA_DELAY },
+    { "PS3_KICKDELAY_US", PS3_LAB_KICKDELAY_US }, { "PS3_LAB_GPUCLK", PS3_LAB_GPUCLK },
+    { "PS3_NATIVE_JOBS_STICKY", PS3_LAB_STICKY }, { "PS3_JOBS_PRIO", PS3_LAB_JOBPRIO },
 };
+/* (sz1) PS3_NATIVE_JOBS_STICKY: the runner's own static, through its exported pointer (absent: the switch does nothing) */
+extern int* const g_wws_sticky_ptr __attribute__((weak));
+static int s_sticky0 = -1;
+static void lab_sticky(int v)
+{
+    if (!&g_wws_sticky_ptr || !g_wws_sticky_ptr) return;
+    if (s_sticky0 < 0) s_sticky0 = *g_wws_sticky_ptr;
+    __atomic_store_n(g_wws_sticky_ptr, v < 0 ? s_sticky0 : v, __ATOMIC_RELEASE);
+}
+/* (sz1) PS3_LAB_GPUCLK: the wanted GPU clock goes to a file a watcher outside the game applies (steamosctl) */
+static void lab_gpuclk(int mhz)
+{
+    const char* p = getenv("PS3_LAB_GPUCLK_FILE");
+    if (!p || !*p || mhz <= 0) return;
+    char tmp[1100]; snprintf(tmp, sizeof tmp, "%s.tmp", p);
+    FILE* f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", mhz); fclose(f);
+    rename(tmp, p);
+}
 static struct { int id; int v[2]; const char* name; char txt[2][24]; } s_sw[LAB_MAXSW];
 static int s_nsw;
 /* a count: seconds, or frames with an f suffix */
@@ -134,6 +157,8 @@ static void lab_set(int label)
     for (int i = 0; i < s_nsw; i++) {
         const int v = s_sw[i].v[label];
         if (s_sw[i].id == PS3_LAB_PLACE_MAIN) ps3_host_place_main_live(v);
+        if (s_sw[i].id == PS3_LAB_GPUCLK) lab_gpuclk(v);
+        if (s_sw[i].id == PS3_LAB_STICKY) lab_sticky(v);
         __atomic_store_n(&g_ps3_lab[s_sw[i].id], v, __ATOMIC_RELEASE);
     }
 }
@@ -141,6 +166,7 @@ static void lab_restore(void)
 {
     for (int i = 0; i < s_nsw; i++) {
         if (s_sw[i].id == PS3_LAB_PLACE_MAIN) ps3_host_place_main_live(s_place0);
+        if (s_sw[i].id == PS3_LAB_STICKY) lab_sticky(-1);
         __atomic_store_n(&g_ps3_lab[s_sw[i].id], -1, __ATOMIC_RELEASE);
     }
 }
