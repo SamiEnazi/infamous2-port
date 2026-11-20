@@ -464,3 +464,25 @@ Until now each install replaced only the two game files and patched your old lau
 - **Where things stand now:** on the walking street the graphics thread is ~17.9 ms and the main thread ~19.2 ms, so the main thread is the first wall again, ~1.3 ms ahead. For 60 fps: the main thread needs ~−2.5 ms, the graphics thread ~−1.3 ms.
 
 **Next: step 6, the combined final check**, with everything kept on: the job priority, the cheaper store checks and R8. Each one is measured alone and all together, PGO is retrained, and the full check runs against hd4. If it qualifies, it becomes **hd5**, installed only with your OK.
+
+### 20 Nov 16:20: step 6 finished, hd5 candidate ready (not installed)
+
+**All three improvements together** (no PGO, same conditions; removing any one is slower on both scenes, so all three stay on):
+
+| | street | plaza |
+|---|---|---|
+| all three vs none | **+2.6 %** (SE 0.51) | **+2.1 %** (SE 1.07) |
+
+**hd5c** (all three + PGO retrained, mg5r) **vs your hd4**, same batch:
+
+| Test | Result |
+|---|---|
+| Street, full walk | **+2.63 %** (50.44 vs 49.12 fps) |
+| Street, busiest part | **+1.65 %** (SE 0.46); main −0.40 ms, graphics thread −0.43 ms; slowest 1 % of frames −1.4 ms |
+| Plaza | **+1.70 %** (SE 0.47) |
+| Standing at spot 2, real controller, 2 × 10 min each | 59.77 / 59.82 vs 59.73 / 59.77 fps; no frame over 50 ms |
+| Job replays, upstream's job-runner tests | identical / 15 of 15 |
+
+All 40 runs were clean. Watch item: slightly more short graphics-thread waits on the street (< 0.001 ms a frame).
+
+Launcher defaults (tools/play.sh): the job priority and R8 on. Linux builds use the cheaper store checks.
