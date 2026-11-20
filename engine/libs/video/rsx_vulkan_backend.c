@@ -8081,6 +8081,8 @@ static void vk_r5c_compare(void)
             s_r5c.njob, bytes, diff, cov, s_r5c.runs, s_r5c.bytes, s_r5c.diff, s_r5c.cov, s_r5c.skipped, s_r5c.failed);
     s_r5c.recorded = 0; s_r5c.njob = 0;
 }
+static struct rsx_draw_backend_sz2* s_sz2_be;   /* (sz2) non-NULL only when PS3_DBG_VK_SKIP is named (vk_sz2_install) */
+static void vk_sz2_frame(void);
 static int vk_r5_switch(void)
 {
     const int lab = g_ps3_lab[PS3_LAB_R8];
@@ -9967,6 +9969,7 @@ static void vk_pass_record(VkRenderPass rp, VkFramebuffer fb, VkPipeline pipe, V
 static void vk_fif_advance(void)
 {
     vk_r5_frame();                             /* (r8) R5: the next frame's mode (before the slot's completion) */
+    if (__builtin_expect(s_sz2_be != NULL, 0)) vk_sz2_frame();   /* (sz2) PS3_DBG_VK_SKIP: sizing only */
     const u32 out = s_fif_cur, in = out ^ 1u;
 #define FIF_SW(f) s_fif_bs[out].f = s_batch.f; s_batch.f = s_fif_bs[in].f;
     FIF_SW(varena) FIF_SW(iarena) FIF_SW(uarena) FIF_SW(sarena) FIF_SW(garena)
@@ -10957,6 +10960,51 @@ static rsx_backend s_vulkan_backend = {
     .present            = vk_cb_present,
 };
 
+/* (sz2, 2026-11-20; SIZING ONLY, default off, a WRONG picture in its on state) PS3_DBG_VK_SKIP=1, or PS3_LIVEAB's
+ * switch of that name: the draw engine's four draw entries (draw, draw_vbuf, draw_vbuf_ib, draw_vbuf_ib_again) are
+ * swapped for stubs that return at once -- no descriptor set, constant window, bind or vkCmdDraw is recorded for a guest
+ * draw; render passes, clears, copies, barriers, the backend's own passes and the present as always: the RSX thread's
+ * Vulkan-side cost per draw, measured by its absence. Only when the variable is named (env or PS3_LIVEAB) does the
+ * engine get a mutable copy of the table (else nothing changes); the swap happens once a frame on the RSX thread
+ * (the slot's turn, vk_sz2_frame), so no draw sees half of it. No recording function is changed (PGO-neutral). */
+struct rsx_draw_backend_sz2 { rsx_draw_backend t; };
+static struct rsx_draw_backend_sz2 s_sz2_copy;
+static void vk_sz2_draw(void* u, rsx_topology t, const void* v, u32 vc, u32 st, const u32* i, u32 ic)
+{ (void)u; (void)t; (void)v; (void)vc; (void)st; (void)i; (void)ic; }
+static void vk_sz2_draw_vbuf(void* u, rsx_topology t, u32 vb, u32 vc, u32 st, const u32* i, u32 ic)
+{ (void)u; (void)t; (void)vb; (void)vc; (void)st; (void)i; (void)ic; }
+static void vk_sz2_draw_vbuf_ib(void* u, rsx_topology t, u32 vb, u32 vc, u32 st, u32 ib, u32 ic)
+{ (void)u; (void)t; (void)vb; (void)vc; (void)st; (void)ib; (void)ic; }
+static const rsx_draw_backend* vk_sz2_install(const rsx_draw_backend* base)
+{
+    const char* e = getenv("PS3_DBG_VK_SKIP");
+    const char* l = getenv("PS3_LIVEAB");
+    if (!(e && *e) && !(l && strstr(l, "PS3_DBG_VK_SKIP"))) return base;
+    s_sz2_copy.t = *base;
+    s_sz2_be = &s_sz2_copy;
+    VK_LOG("(sz2) PS3_DBG_VK_SKIP named: the draw entries can be swapped for stubs (sizing only)\n");
+    return &s_sz2_copy.t;
+}
+static __attribute__((noinline)) void vk_sz2_frame(void)
+{
+    static int env = -1, was = -1;
+    if (env < 0) { const char* e = getenv("PS3_DBG_VK_SKIP"); env = e ? atoi(e) : 0; }
+    const int lab = g_ps3_lab[PS3_LAB_VKSKIP];
+    const int now = lab >= 0 ? lab : env;
+    if (now == was) return;
+    rsx_draw_backend* t = &s_sz2_be->t;
+    if (now) {
+        t->draw = vk_sz2_draw; t->draw_vbuf = vk_sz2_draw_vbuf; t->draw_vbuf_ib = vk_sz2_draw_vbuf_ib;
+        if (s_vk_engine_backend.draw_vbuf_ib_again) t->draw_vbuf_ib_again = vk_sz2_draw_vbuf_ib;
+    } else {
+        t->draw = s_vk_engine_backend.draw; t->draw_vbuf = s_vk_engine_backend.draw_vbuf;
+        t->draw_vbuf_ib = s_vk_engine_backend.draw_vbuf_ib; t->draw_vbuf_ib_again = s_vk_engine_backend.draw_vbuf_ib_again;
+    }
+    if (was >= 0 || now)
+        fprintf(stderr, "[RSX vulkan] (sz2) PS3_DBG_VK_SKIP=%d: guest draws %s\n", now, now ? "NOT recorded (sizing, wrong picture)" : "recorded");
+    was = now;
+}
+
 /* [wide] at init, before the window: wide only when the setting asks for it
  * AND the title widened its cameras to match (else the game's 16:9 picture
  * would be stretched across wide targets) AND the engine draws (guest
@@ -11352,6 +11400,7 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
       /* [wide] the HUD flags only while the picture is wide: at 16:9 the
        * engine skips its PS3_ASPECT_HUD_AFTER work entirely (no set_hud) */
       if (s_wide.on) { wide = *base; wide.set_hud = vk_eng_set_hud; base = &wide; }
+      base = vk_sz2_install(base);   /* (sz2) PS3_DBG_VK_SKIP named: a mutable copy of what the engine gets (else base) */
       const rsx_draw_backend* bt = vk_bt_install(base);   /* (rsx-par) PS3RECOMP_VK_BT */
       rsx_draw_engine_set_backend(bt ? bt : base); }
     rsx_draw_engine_set_default(s_g.on ? 1 : 0);

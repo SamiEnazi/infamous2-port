@@ -278,6 +278,79 @@ typedef simde__m512i Z;
 #define B_IN 0x48800000                        /* 2^18 */
 #define B_RSQ 0x71800000                       /* 2^100: a factor from fi */
 #define NOINL __attribute__((noinline))
+/* (sz2, 2026-11-20; SIZING ONLY, default off) PS3_DBG_EDGE_SKIP=1, or PS3_LIVEAB's switch of that name (the engine's
+ * g_ps3_lab[], read at every call): the skinning (0xD0A8) and vertex decompression (0x4448) kernels do their bookkeeping
+ * as always -- prologue / epilogue, the job context's pointers (S+0x50 / +0x60 / +0x170), the stack table -- and replace
+ * their per-vertex work (the palette into host order, the blend, the renormalisation, the position and unit-vector
+ * decoding) by a copy of the outputs the same segment gave the first time it was met in this mode: a memo keyed by the
+ * segment's static input (decompression: its compressed stream, count, offset and scale; skinning: the decompressed
+ * positions, the blend indices / weights, count and kind). The job runs its own code on with the same counts, slots and
+ * command words; the vertices are a segment's real ones from an earlier frame (an animated mesh keeps its first pose),
+ * so the GPU draws about the same geometry. What Edge's math costs the CPU, by its absence: the picture is NOT the
+ * game's (frozen poses), measurement only. (A first form without the memo left the vertex values stale: garbage
+ * triangles over the screen, GPU 13 -> 40-46 ms a frame; useless for the frame rate.) */
+#ifndef EDGE_HARNESS
+#include "ps3emu/ps3_liveab.h"
+extern volatile int g_ps3_lab[] __attribute__((weak, visibility("default")));
+static NOINL int edge_dbg_skip(void)
+{
+    static int env = -1;
+    if (&g_ps3_lab[0]) { const int lab = g_ps3_lab[PS3_LAB_EDGE_SKIP]; if (lab >= 0) return lab; }
+    if (env < 0) { const char* e = getenv("PS3_DBG_EDGE_SKIP"); env = e ? atoi(e) : 0; }
+    return env;
+}
+#else
+static int edge_dbg_skip(void) { return 0; }
+#endif
+typedef struct { uint64_t key; uint32_t n, len[5]; uint8_t data[]; } EdgeMemo;
+#define EMEMO_N (1u << 17)
+static EdgeMemo* g_ememo[EMEMO_N];
+static unsigned long long g_ememo_hit, g_ememo_miss, g_ememo_full, g_ememo_bytes;
+static uint64_t ememo_hash(uint64_t h, const uint8_t* ls, uint32_t lo, uint32_t n)
+{
+    lo &= LSQ;
+    if (lo + n > SPU_LS_SIZE) n = SPU_LS_SIZE - lo;
+    for (uint32_t i = 0; i + 8 <= n; i += 8) { uint64_t w; memcpy(&w, ls + lo + i, 8); h = (h ^ w) * 0x100000001B3ull; h ^= h >> 29; }
+    return (h ^ n) * 0xFF51AFD7ED558CCDull;
+}
+/* a hit whose ranges have this call's lengths: copied into this call's output addresses; 1 = done */
+static NOINL int ememo_try(uint64_t key, uint8_t* ls, int n, const uint32_t* lo, const uint32_t* len)
+{
+    for (uint32_t i = 0; i < 32; i++) {
+        const EdgeMemo* e = __atomic_load_n(&g_ememo[(key + i) & (EMEMO_N - 1)], __ATOMIC_ACQUIRE);
+        if (!e) break;
+        if (e->key != key) continue;
+        if ((int)e->n != n) break;
+        for (int r = 0; r < n; r++) if (e->len[r] != len[r] || (lo[r] & LSQ) + len[r] > SPU_LS_SIZE) goto miss;
+        size_t o = 0;
+        for (int r = 0; r < n; r++) { memcpy(ls + (lo[r] & LSQ), e->data + o, len[r]); o += len[r]; }
+        __atomic_fetch_add(&g_ememo_hit, 1, __ATOMIC_RELAXED);
+        return 1;
+    }
+miss:
+    __atomic_fetch_add(&g_ememo_miss, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+static NOINL void ememo_put(uint64_t key, const uint8_t* ls, int n, const uint32_t* lo, const uint32_t* len)
+{
+    size_t tot = 0;
+    for (int r = 0; r < n; r++) { if ((lo[r] & LSQ) + len[r] > SPU_LS_SIZE) return; tot += len[r]; }
+    if (__atomic_load_n(&g_ememo_bytes, __ATOMIC_RELAXED) + tot > (512ull << 20)) { __atomic_fetch_add(&g_ememo_full, 1, __ATOMIC_RELAXED); return; }
+    EdgeMemo* e = (EdgeMemo*)malloc(sizeof *e + tot);
+    if (!e) return;
+    e->key = key; e->n = (uint32_t)n;
+    size_t o = 0;
+    for (int r = 0; r < n; r++) { e->len[r] = len[r]; memcpy(e->data + o, ls + (lo[r] & LSQ), len[r]); o += len[r]; }
+    for (uint32_t i = 0; i < 32; i++) {
+        EdgeMemo* none = NULL;
+        if (__atomic_compare_exchange_n(&g_ememo[(key + i) & (EMEMO_N - 1)], &none, e, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            __atomic_fetch_add(&g_ememo_bytes, tot, __ATOMIC_RELAXED);
+            return;
+        }
+        if (none->key == key) break;                 /* another thread put it first */
+    }
+    free(e);
+}
 static inline simde__m512 zf(Z x) { return simde_mm512_castsi512_ps(x); }
 static inline Z zi(simde__m512 x) { return simde_mm512_castps_si512(x); }
 static inline Z FM(Z a, Z b) { return zi(simde_mm512_mul_ps(zf(a), zf(b))); }
@@ -955,6 +1028,22 @@ static int edge_skin_core(u128* gpr, uint8_t* ls)
                 const Q qb = quad_at(ls, b); sq(ls, sp2 + 32 + 16 * n, qb); n += qb._u32[0] != 0;
             }
         }
+        /* (sz2) sizing only: PS3_DBG_EDGE_SKIP's memo of the per-vertex outputs (see edge_dbg_skip) */
+        const int sz2skip = edge_dbg_skip();
+        uint64_t sz2key = 0; uint32_t sz2lo[5], sz2len[5]; int sz2n = 0, sz2hit = 0;
+        if (sz2skip) {
+            const uint32_t sv = (s0._u32[2] >> 16) & 0xFFFF, sn8 = (sv + 7) & ~7u, snn = k.renorm ? sn8 : n4;
+            sz2lo[sz2n] = k.pos; sz2len[sz2n++] = 16 * n4;
+            if (k.r105) { sz2lo[sz2n] = k.s60; sz2len[sz2n++] = 16 * snn; }
+            for (int i = 0; i < k.nst && sz2n < 5; i++) { sz2lo[sz2n] = k.st[i]; sz2len[sz2n++] = 16 * snn; }
+            uint64_t h = 0x5A21u ^ ((uint64_t)type << 8) ^ ((uint64_t)fmt << 16) ^ ((uint64_t)sv << 24) ^ ((uint64_t)k.nst << 40) ^
+                         ((uint64_t)k.multi << 44) ^ ((uint64_t)k.renorm << 45) ^ ((uint64_t)k.r105 << 46);
+            h = ememo_hash(h, ls, k.pos, 16 * n4 < 512 ? 16 * n4 : 512);
+            h = ememo_hash(h, ls, IW & LSQ, k.multi ? (8 * n4 < 256 ? 8 * n4 : 256) : (n4 < 256 ? n4 : 256));
+            sz2key = h;
+            sz2hit = ememo_try(sz2key, ls, sz2n, sz2lo, sz2len);
+        }
+        if (!sz2hit) {   /* (sz2) */
         /* the palette in host order for the fast path, and which matrices it may take */
         /* 256..511 stay zero. On the heap, 64-byte aligned: Windows does not promise a
          * thread-local block more than 16 (cpu agent) */
@@ -994,6 +1083,8 @@ static int edge_skin_core(u128* gpr, uint8_t* ls)
             if (k.r105) norm(ls, k.s60, 0, n8, csr);
         }
         _mm_setcsr(csr);
+        if (sz2skip) ememo_put(sz2key, ls, sz2n, sz2lo, sz2len);
+        }   /* (sz2) */
         {
             Q q = lq(ls, S + 0x50);
             q._u32[((sp2 + 8) >> 2) & 3] = M > IW ? IW : M;
@@ -2134,6 +2225,22 @@ static int edge_dec_core(u128* gpr, uint8_t* ls)
     /* Everything of the first loop before anything of the second (see the
      * guard above); within a loop the spans are disjoint, so any order. */
     sq(ls, k.U2 + 16 * k.n2, splat4(0)); sq(ls, k.U2 + 16 * k.n2 + 16, splat4(0));
+    /* (sz2) sizing only: PS3_DBG_EDGE_SKIP's memo of the per-vertex outputs (see edge_dbg_skip) */
+    const int sz2skip = edge_dbg_skip();
+    uint64_t sz2key = 0; uint32_t sz2lo[3], sz2len[3]; int sz2n = 0, sz2hit = 0;
+    if (sz2skip) {
+        sz2lo[sz2n] = k.U1; sz2len[sz2n++] = 16 * k.n2;
+        sz2lo[sz2n] = k.U2; sz2len[sz2n++] = 16 * (k.n2 + 2);
+        if (k.tan) { sz2lo[sz2n] = k.U3; sz2len[sz2n++] = 16 * (k.n2 + 2); }
+        uint64_t h = 0xDEC0u ^ ((uint64_t)k.n2 << 16) ^ ((uint64_t)k.tan << 40) ^ ((uint64_t)b << 48);
+        h = (h ^ k.X._u32[0] ^ ((uint64_t)k.X._u32[1] << 32)) * 0x100000001B3ull;
+        h = (h ^ k.X._u32[2] ^ ((uint64_t)k.X._u32[3] << 32)) * 0x100000001B3ull;
+        h = ememo_hash(h, ls, k.P, 9 * k.n2 < 1024 ? 9 * k.n2 : 1024);
+        if (k.tan) h = ememo_hash(h, ls, k.P2, 3 * k.n2 < 256 ? 3 * k.n2 : 256);
+        sz2key = h;
+        sz2hit = ememo_try(sz2key, ls, sz2n, sz2lo, sz2len);
+    }
+    if (!sz2hit) {   /* (sz2) */
     if (!fast || b > 16) dec_exact_pos(ls, &k);
     if (!fast) {
         dec_exact_uv(ls, k.P + 6, 9, k.U2, k.n2);
@@ -2153,6 +2260,8 @@ static int edge_dec_core(u128* gpr, uint8_t* ls)
         }
         _mm_setcsr(csr);
     }
+    if (sz2skip) ememo_put(sz2key, ls, sz2n, sz2lo, sz2len);
+    }   /* (sz2) */
     gpr[80] = lq(ls, sp - 0x10); gpr[81] = lq(ls, sp - 0x20); gpr[82] = lq(ls, sp - 0x30);
     gpr[0] = lq(ls, sp + 0x10);
     return 1;
@@ -2713,6 +2822,9 @@ static void edge_report_now(void)
         if (g_kern[i].native || g_kern[i].fallback)
             fprintf(stderr, " %s %llu native / %llu lifted;", g_kern[i].name, g_kern[i].native, g_kern[i].fallback);
     fprintf(stderr, " exact groups dec %llu enc %llu\n", g_dec_exact, g_enc_exact);
+    if (g_ememo_hit || g_ememo_miss)   /* (sz2) */
+        fprintf(stderr, "[edge] (sz2) PS3_DBG_EDGE_SKIP memo: %llu hits, %llu misses, %llu MB kept, %llu not kept (full)\n",
+                g_ememo_hit, g_ememo_miss, g_ememo_bytes >> 20, g_ememo_full);
     fprintf(stderr, "[edge] cull stage: %llu calls, %llu triangles in, %llu kept (%.1f%%), %llu segments dropped whole, %llu by the GPU switch\n",
             g_cs_calls, g_cs_nt, g_cs_kept, g_cs_nt ? 100.0 * g_cs_kept / g_cs_nt : 0.0, g_cs_zero, g_cs_gpu_cull);
     if (g_tsc) {

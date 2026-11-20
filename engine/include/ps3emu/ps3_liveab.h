@@ -31,6 +31,16 @@
  *   PS3RECOMP_ENG_R8          (r8, 2026-11-20) the RSX thread's texture / program draw cuts, a bit mask (rsx_draw_engine.c
  *                             "R8"; rsx_vulkan_backend.c "R5": 1 = descriptor sets kept across frames, 2 = the fragment
  *                             program's structural memo); the backend takes its bit at the next frame
+ * (sz2, 2026-11-20; sizing only, default off, a WRONG picture in its B state -- never for play):
+ *   PS3_DBG_EDGE_SKIP         1 = Edge's (job 223) skinning and vertex decompression kernels leave out their per-vertex
+ *                             work (natives/spu/edge223_native.c: the job's pointers, counts and command words as
+ *                             always, the vertex values stale): what Edge's math costs the CPU side
+ *   PS3_DBG_VK_SKIP           1 = the Vulkan backend's draw entries return at once (rsx_vulkan_backend.c: no descriptor
+ *                             set, constant window, bind or vkCmdDraw for a guest draw; passes, clears, copies and the
+ *                             backend's own passes as always): what the RSX thread's Vulkan recording costs
+ *   PS3_DBG_SMT_SPIN          <0..100> = a bench thread on the RSX core's other CPU (CPU 7 under rsxcore) busy that many
+ *                             percent of each 1 ms (an integer hash / store loop over 64 KB): what a second busy thread
+ *                             there costs the RSX thread
  */
 #ifndef PS3EMU_PS3_LIVEAB_H
 #define PS3EMU_PS3_LIVEAB_H
@@ -55,6 +65,9 @@ enum {
     PS3_LAB_STICKY,
     PS3_LAB_JOBPRIO,
     PS3_LAB_R8,
+    PS3_LAB_EDGE_SKIP,      /* (sz2) */
+    PS3_LAB_VKSKIP,         /* (sz2) */
+    PS3_LAB_SMTSPIN,        /* (sz2) */
     PS3_LAB_N
 };
 /* The in-run A/B's value of each switch; -1 = not overridden (the site uses its own setting). */

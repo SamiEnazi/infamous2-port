@@ -15,7 +15,7 @@
  * the `other` group: ~0.1 % of one CPU. */
 #include "ps3emu/ps3_liveab.h"
 
-volatile int g_ps3_lab[PS3_LAB_N] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+volatile int g_ps3_lab[PS3_LAB_N] = { [0 ... PS3_LAB_N - 1] = -1 };   /* (sz2) every switch, however many there are */
 volatile int g_ps3_liveab_on = 1;
 volatile unsigned long long g_ps3_liveab_gpu_ns;
 volatile unsigned long long g_ps3_liveab_ev;
@@ -50,6 +50,8 @@ static const struct { const char* name; int id; } k_sw[] = {
     { "PS3_KICKDELAY_US", PS3_LAB_KICKDELAY_US }, { "PS3_LAB_GPUCLK", PS3_LAB_GPUCLK },
     { "PS3_NATIVE_JOBS_STICKY", PS3_LAB_STICKY }, { "PS3_NATIVE_JOBS_PRIO", PS3_LAB_JOBPRIO },
     { "PS3RECOMP_ENG_R8", PS3_LAB_R8 },
+    { "PS3_DBG_EDGE_SKIP", PS3_LAB_EDGE_SKIP }, { "PS3_DBG_VK_SKIP", PS3_LAB_VKSKIP },   /* (sz2) sizing only */
+    { "PS3_DBG_SMT_SPIN", PS3_LAB_SMTSPIN },
 };
 /* (sz1) PS3_NATIVE_JOBS_STICKY: the runner's own static, through its exported pointer (absent: the switch does nothing) */
 extern int* const g_wws_sticky_ptr __attribute__((weak));
@@ -153,10 +155,53 @@ static int lab_parse(const char* spec)
 /* the label of block k: abba = a b b a a b b a ... (pairs (0,1), (2,3), ... alternate their order), ab = a b a b */
 static int lab_label(int k) { return ((s_abba ? (k + 1) / 2 : k) + s_first) & 1; }
 
+/* (sz2, 2026-11-20; sizing only) PS3_DBG_SMT_SPIN=<duty %>: a thread on the RSX core's other CPU (rsxcore's CPU 7), busy
+ * that share of every 1 ms with an integer hash / store loop over 64 KB (L1 / L2 traffic, multiplies, no PAUSE), asleep
+ * the rest; 0 = asleep. Started at the first block that names the switch; its CPU time is in the `other` group. */
+static __attribute__((noinline)) void* lab_spin_main(void* arg)
+{
+    (void)arg;
+    prctl(PR_SET_NAME, "sz2-spin", 0, 0, 0);
+    const int placed = ps3_host_place_rsx_sibling();
+    fprintf(stderr, "[liveab] (sz2) SMT spinner %s\n", placed ? "on the RSX core's other CPU" : "NOT placed (no rsxcore or the slot is taken)");
+    static uint64_t buf[8192];
+    uint64_t h = 1; unsigned i = 0;
+    for (;;) {
+        int d = __atomic_load_n(&g_ps3_lab[PS3_LAB_SMTSPIN], __ATOMIC_ACQUIRE);
+        if (d <= 0) { usleep(2000); continue; }
+        if (d > 100) d = 100;
+        const uint64_t t0 = lab_now(), busy = (uint64_t)d * 10000u;   /* ns of each 1 ms */
+        while (lab_now() - t0 < busy)
+            for (int k = 0; k < 256; k++) {
+                const uint64_t x = buf[i & 8191u];
+                h = (h ^ x) * 0x9E3779B97F4A7C15ull + (h >> 29);
+                buf[(i * 7u + (unsigned)(h >> 61)) & 8191u] = h;
+                i++;
+            }
+        if (d < 100) {
+            const uint64_t rest = 1000000u - busy;
+            struct timespec ts = { 0, (long)rest };
+            nanosleep(&ts, NULL);
+        }
+        __asm__ volatile("" :: "r"(h));
+    }
+    return NULL;
+}
+static void lab_spin_start(void)
+{
+    static int started;
+    if (started) return;
+    started = 1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, lab_spin_main, NULL) != 0) fprintf(stderr, "[liveab] (sz2) no SMT spinner thread\n");
+    else pthread_detach(th);
+}
+
 static void lab_set(int label)
 {
     for (int i = 0; i < s_nsw; i++) {
         const int v = s_sw[i].v[label];
+        if (s_sw[i].id == PS3_LAB_SMTSPIN) lab_spin_start();   /* (sz2) */
         if (s_sw[i].id == PS3_LAB_PLACE_MAIN) ps3_host_place_main_live(v);
         if (s_sw[i].id == PS3_LAB_GPUCLK) lab_gpuclk(v);
         if (s_sw[i].id == PS3_LAB_STICKY) lab_sticky(v);
