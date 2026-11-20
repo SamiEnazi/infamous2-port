@@ -359,3 +359,31 @@ Until now each install replaced only the two game files and patched your old lau
 - **What it shows:** the freed job-thread time just turns into idle spin. This is the second job speed-up after 216 that doesn't reach the main thread. Making jobs faster is not the lever by itself. What the main thread actually waits for is the open question, and that's what step 2, the sizing, now has to answer before anything else gets built.
 - **Parked** as work/bench/j218-natives.patch, so it can still be a candidate in the combined round (step 6).
 - **Side note:** in replays, HEAD's engine runs 218 about 3 % slower than hd4's. To check before the next engine install.
+
+### 20 Nov 02:40: step 2, sizing: what really limits the frame
+
+**The old model was wrong.** The job threads aren't overloaded: over a frame they are busy 76 %, spinning 4.5 % and asleep 19 %. The main thread itself produces the jobs as its game code runs. What costs it time is **waiting for specific jobs it kicked**, and the biggest single cause is Edge (job 223):
+- at the start of each frame, Edge's ~15 jobs fill all 4 job threads for ~4 ms;
+- the main thread's animation jobs, kicked 1–4 ms into the frame, queue behind them (2.2 ms on average, in 346 of 479 frames). Then the main thread waits for them, ~1.5 ms a frame;
+- that's why the faster 216/218 natives did nothing: they removed CPU from jobs nobody was waiting for.
+
+**Frame sensitivities** (slow-it-down tests, ms of frame per ms inserted):
+
+| Part | Sensitivity |
+|---|---|
+| main thread's own code | 0.3–0.9, depending on where |
+| Edge on the job threads | 0.13–0.23 |
+| SPU memory transfers | 0.18 |
+| graphics thread, small delays | ~0 (it has ~1 ms of slack), large delays 0.8 |
+| GPU watts | ~1.9 ms of frame per W |
+
+**Tried in the speed-up direction:** letting Edge's jobs yield to the main thread's in the job queue (prototype): **frame −0.49 ms (SE 0.15), fps +2.4 % (SE 0.7)**. The wait after Edge falls from 1.46 to 0.38 ms.
+
+**The main thread's own code** (15.6 of 21.4 ms) is limited more by instruction count and code size (the CPU front end) than by memory. That's the code generator's lever.
+
+**New order:**
+- **Step 3:** the job priority (Edge yields), built properly.
+- **Step 4:** the main-thread code generator, sized first with one change.
+- **Step 5:** R2 (graphics thread, the next limit) together with M8.
+- **Edge on the GPU** stays later; S1 takes most of its measurable effect for far less work.
+- **GPU clock:** 1000 vs 1200 MHz is +3 %, but the 19 Nov sweep found 1000 and 1100 equal, so your 1100 already gets most of it.
