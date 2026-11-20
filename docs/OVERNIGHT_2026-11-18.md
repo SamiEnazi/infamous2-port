@@ -486,3 +486,9 @@ Until now each install replaced only the two game files and patched your old lau
 All 40 runs were clean. Watch item: slightly more short graphics-thread waits on the street (< 0.001 ms a frame).
 
 Launcher defaults (tools/play.sh): the job priority and R8 on. Linux builds use the cheaper store checks.
+
+### 20 Nov 16:45: hd5 installed (your OK), full install
+
+- **Tag `hd5`** = deck-perf e9e05ea, pushed to the fork. Your folder is on branch `installed` = hd5, so everything is one version, launcher included. The launcher now switches on the job priority and R8. The game files are hd5c's (PGO mg5r).
+- **Backups:** work/port/installed-hd4-20261120/ (the two hd4 files), input.toml.installed-hd4-20261120, settings.ini.installed-hd4-20261120. Rollback: `git switch -C installed hd4` in the folder, then copy the two files back.
+- **Start test with the real launcher:** the PGO module loaded, the window came up, the controller thread, placement, and the settings (job priority 1, R8 3, controller every 4 ms, 4 job threads) were active, with no errors. Saves backed up by the launcher as usual.
