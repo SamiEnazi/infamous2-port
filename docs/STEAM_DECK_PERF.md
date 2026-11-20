@@ -145,7 +145,12 @@ slow-downs (PS3_LIVEAB, 12-24 pairs each).
   (0.22), fps +3.2 % (1.1) -- GFX -0.35 W, CPU +0.33 W, clock +43 MHz, main -0.59 ms: ~1.9 ms of frame per W moved from the
   GPU. Speed-up check of the Edge mechanism: Edge yielding to the other managers (`PS3_JOBS_PRIO=221`, bench): frame
   -0.49 ms (SE 0.15), fps +2.41 % (SE 0.73), 24 pairs; the post-Edge wait 1.46 -> 0.38 ms, about half of it comes back as
-  other waits.
+  other waits. **Not confirmed by the s1 round (2026-11-20, section 4 / 6 S1):** the proper priority and the prototype's
+  own switches re-run on the s1 binaries give +0.3 % (SE 0.6) in-run (main -0.07 ms, SE 0.12), +1.25 % (SE 0.88) on the
+  quick street and +2.06 % (SE 0.63) on the plaza; the traces show why the street gains little: the main thread's waits
+  fall 0.5-1.0 ms a frame but its time outside them grows about as much -- it then waits for the RSX thread at the frame
+  end (+0.25 ms of usleep polls) and polls more; its own code does not miss more (counters) and it is not kept off the
+  CPU (run-queue delay equal).
 * **The main thread's code** (perf stat on the main thread, 26 Zen 2 counters): IPC 1.10, only 31 % of uops from the op
   cache, uop queue empty 25 % of the cycles (frontend), ROB-full 5.2 % + store-queue-full 4.9 % + register file 2.7 %
   (backend), L1D refills 7.9 / 1000 instructions of which L3 0.88 and DRAM 0.71 (memory <= ~25 % of the cycles even if
@@ -639,7 +644,7 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
   "sizing (agent sz1)"): `PS3_DBG_FLIP_DELAY_KIND=mwait` (the flip delay as MWAITX; it runs on the main thread),
   `PS3_DBG_DRAW_DELAY_NS` (per guest draw, RSX thread), `PS3_DBG_DMA_DELAY_NS` (per SPU MFC command, every thread),
   `PS3_KICKDELAY=<mgr>:<us>:after` (the main thread after each flush of one manager), `PS3_LAB_GPUCLK` (the GPU clock flipped
-  in-run through work/bench/sz1-gpuclk.sh), `PS3_NATIVE_JOBS_STICKY` / `PS3_JOBS_PRIO=221` live; work/bench/sz1-fms.py = the
+  in-run through work/bench/sz1-gpuclk.sh), `PS3_NATIVE_JOBS_STICKY` / `PS3_JOBS_PRIO=221` live (since s1: `PS3_NATIVE_JOBS_PRIO=0|1|2`, the runner's priority classes; the prototype is gone); work/bench/sz1-fms.py = the
   paired frame-ms difference and the sensitivity. MWAITX wakes ~0.4 us late (a 25-100 ns request takes ~420 ns; use
   `_KIND=spin` below ~1 us) and leaves the core to the SMT sibling without drawing power, so MWAITX slow-downs look cheaper
   than real work. The diag engine (`CEXTRA=-DSZ1_DIAG work/bench/sz1build.sh`) adds ftrace kinds 21 (every job run with its
@@ -709,6 +714,7 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
 
 | Commit | Change | Measured |
 |---|---|---|
+| (uncommitted in D; work/bench/s1-prio.patch, exe work/port/s1c = hd4's module + this engine; s1, 2026-11-20) | runner priority classes, `PS3_NATIVE_JOBS_PRIO` (**default 0** = upstream's single FIFO; flips live with PS3_LIVEAB): two ticket rings; with 1 a manager goes to the low class when its last flush came from a thread other than the main PPU thread (guest id 1) AND its jobs are long (mean of all its jobs >= `PS3_NATIVE_JOBS_PRIO_LONG_US`, 250 us) -- on the street and the plaza that is Edge (221, ~600 us a job) alone; FIFO inside a class, jobs never interrupted, the sticky pick yields to the high class, a low job older than `PS3_NATIVE_JOBS_PRIO_AGE_US` (8 ms) goes first anyway; bench modes 2 (static list `PS3_NATIVE_JOBS_PRIO_LOW`, default 221), 3 / 4 (awaited manager first), 5 (by kicker alone); stats in the `[jobs] prio` line; replaces sz1's PS3_JOBS_PRIO prototype; tests/jobrunner: + scenario `prio` (7 cases), 15 of 15 | mechanism (trace): first anim job 4.38 -> 1.52 ms after the flip, post-Edge anim waits 1.44 -> 0.59 ms a frame, main's runner waits -0.5..-1.0 ms but its time outside them +0.85..+0.97 ms (frame-end wait for the RSX +0.25); Edge end median 4.3 -> 9.1 ms (p99 15.4, none past the frame); RSX semaphore waits unchanged (1 a 479 frames). fps: in-run street-still (Edge low, 4 runs) +0.33 % (SE 0.62), main -0.07 ms (SE 0.12); plaza abseq (7 on-route pairs) **+2.06 % (SE 0.63)**, main -0.66 ms, RSX -0.23, p99 -0.5 ms; quick street abseq +1.25 % (SE 0.88, 8 pairs, main -0.40 ms; with s1b's flapping rule -0.32 %, SE 0.44); standing 10 min x 2 pairs (real clock, spot 2, 60 cap, real controller): on 59.68 / 59.65 fps, p99 18.0 / 17.9, > 33 ms 4 / 3, worst 41 / 44 ms vs off 59.72 / 59.59, p99 18.0 / 18.3, > 33 ms 0 / 3, worst 33 / 40, > 50 ms 0 in all four; full street route on / off 49.42 / 49.82 fps, both on route, one > 50 ms each (the world start); 39 runs exit 0; no `[jobs] WARN`, no new frames > 50 ms; no PGO retrain (pool_main, hook_token_test, ready_add_n lost their profile) |
 | (parked, not in the tree: work/bench/j218-natives.patch, exe work/port/j218c2 = hd4's engine + the new module) | job 218: blend zero-weight shortcut (`PS3_NATIVE_ANIM_ZSKIP`), FK 0x179C0 first pass raw (`J218_FKRAW`), native 0x17280 (`PS3_NATIVE_ANIM_OFF=17280`; model from the Switch fork, MIT); natives.txt +0x17280 (SPU_NATIVE_MAX now full, 32) | 218 per job live -8.6 % (269.9 -> 246.6 us, counters batch), replay -7.2 % / -8.4 % (street / plaza best); fps: quick street INCONCLUSIVE at 8 pairs, -0.01 % (SE 0.61); plaza +0.38 % (SE 0.53, 8 clean pairs); in-run main +0.06 ms (SE 0.22): neutral by rule 2; exact (FULLPUT 800/800, valP2 table identical, check modes 0 of 7.08 M + 1.3 M live calls differ); no PGO retrain (coordinator: one combined retrain later) |
 | (deck-v063, local) play.sh `PS3_PAD_THREAD_US=4000` | v0.6.3's controller thread every 4 ms instead of 1 ms on Linux (section 7) | ps3-pad 32 -> 13 ms of CPU a second; street guest 4-20 s 46.46 -> 47.12 fps (n = 4, 1.9 SE), SDL pads on |
 | 2335d44 (deck-v063, local) | merge of upstream v0.6.3: Flood Town runner fix + stall repair, controller thread, Esc = START, tests; our SDL lock reworked into a lock of its own for sdl2-compat's joystick list, taken by the controller thread too (section 7) | replica 0 / 20 aborts (v0.6.3 as released 10 / 10, the old lock merged as is 4 / 20); A/B vs hd3: section 7 |
@@ -731,6 +737,18 @@ GPU 0.0 ms, power equal: below the noise. Its CPU line has no sampler on Linux (
 | 4cabf54 and older | see git log (natives from the Switch fork, job 210/218/220/223 natives, draw offsets...) | |
 
 ## 5. Tried and rejected (do not retry without a new reason)
+
+* Runner priority variants (2026-11-20, s1; NOTES.md "job priority (agent s1)"; the kept form is section 4's
+  `PS3_NATIVE_JOBS_PRIO`): **"by kicker" alone** (every manager another PPU thread flushes goes last: Edge 221 AND the SPU
+  light jobs 219) -- the RSX thread waits for the light jobs' label (0x870): in-run vs Edge-only-low RSX +0.53 ms (SE
+  0.14), fps -1.9 % (SE 0.68); the trace shows 4 RSX semaphore waits (4.8 ms) vs 1 (0.4-0.7 ms). **The manager the main
+  thread is waiting on goes first** (sizing option b, dynamic): +0.04 % (SE 0.74) alone, -0.59 % (SE 1.39) on top of the
+  classes -- the main thread starts waiting on anim at ~4 ms, when Edge's first wave ends anyway, and runs the awaited
+  jobs itself (help). The "any PPU waiter" form cannot separate Edge from anim at all (the Edge kicker polls Edge's token
+  test from its kick to its end). **Turning the sticky pick off** with the priority: 0.0 % (SE 1.06), main +0.06 ms -- the
+  prototype needed STICKY=0 only because its check sat behind the sticky pick. **A running mean (1/8 per job) for "long
+  jobs"**: Edge's mean hovered around the 250 us limit and its class flapped (use the mean over the manager's life).
+  Not tried: reserving one pool thread for the high class (Edge would end later still: p90 13.9 ms of a 21 ms frame).
 
 * Job 218 (2026-11-19, j218; NOTES.md "job 218 round"): **FK (0x179C0) two groups per pass on AVX2** -- only 1.5 % (street)
   / 1.7 % (plaza) of group pairs are independent (a parent of group g+1 is a child of group g in all the others: the bone
@@ -843,7 +861,7 @@ below 16.7 ms; the GPU (13.2 ms at 1200 MHz, ~15 at 1000) fits.
 
 | # | Candidate | What limits it | Measured sensitivity (ms of frame per ms) | Realistic speed-up | Expected fps on the street | Confidence |
 |---|---|---|---|---|---|---|
-| S1 | Runner priority: Edge's jobs yield to the main thread's managers (bench `PS3_JOBS_PRIO=221` + STICKY 0 now; a proper priority class in the ready ring) | Edge's ~15 jobs queued at 0.2 ms hold all 4 pool threads to 4.3 ms; the anim jobs main kicks at 1-4 ms wait behind them (1.46 ms of main waits a frame) | measured directly: frame -0.49 ms (SE 0.15), 24 pairs, 2 runs; post-Edge wait 1.46 -> 0.38 ms, half of it returns as other waits | the bench form = -0.5 ms; smarter forms (the job a waiter needs first) maybe -0.7 | **+2.4 %** (SE 0.7) -> ~47.8 | high for the sign, medium for the size (one scene; needs the street + plaza gate and a standing run; Edge-heavy scenes untested) |
+| S1 | Runner priority -- **built (s1, 2026-11-20): `PS3_NATIVE_JOBS_PRIO=1`, default 0** (section 4; NOTES.md "job priority (agent s1)"): other threads' long-job managers (Edge) go behind the main thread's | Edge's ~15 jobs queued at 0.2 ms held all 4 pool threads to 4.3 ms; with the priority the first anim job starts at 1.5 ms instead of 4.4 and the post-Edge waits fall 1.44 -> 0.59 ms a frame, BUT the main thread's time outside its waits grows about as much (its frame-end wait for the RSX thread +0.25 ms; no extra cache misses, no run-queue delay) | measured: in-run street-still +0.33 % (SE 0.62, 4 runs); quick street abseq +1.25 % (SE 0.88, 8 pairs; main -0.40 ms, SE 0.20); plaza abseq +2.06 % (SE 0.63, 7 on-route pairs; main -0.66 ms, RSX -0.23, p99 -0.5); sz1's +2.4 % on the street not reproduced | the remaining frame gain is capped by the RSX thread finishing the frame last | **street ~+1 % (not proven), plaza +2 %** | medium: plaza 3.3 SE, street 1.4 SE; standing and full routes clean; pays more once R2 shortens the RSX thread; the default is step 6's decision |
 | S2 | GPU clock 1000 instead of 1100-1200 MHz (a setting: the player's) | the 15 W cap: GFX watts are taken from the CPU's clock | 1200 -> 1000: frame -0.65 ms (SE 0.22), GFX -0.35 W -> ~1.9 ms per W | GPU busy 13.2 -> 15 ms (still < 16.7) | **+3.2 %** (SE 1.1) vs 1200; ~+1.5 % vs 1100 (interpolated, not measured) | medium (one in-run test; check the plaza / GPU-heavy views before advising). Note (orchestrator): the 19 Nov clock sweep with light tiles (section 4, "GPU clock, light tiles") measured 1000 and 1100 MHz as equal on the street (50.39 / 50.51 on route, 46.71 / 47.16 guest 4-20 s, small n), so the player's 1100 already takes most of this; 1000 leaves less GPU headroom for busy views. No change advised without a 1000 vs 1100 A/B on street + plaza. |
 | S3 | Main-thread code generator (lifter: instruction count, ctx traffic, spills, hot code footprint) | own code 15.6 ms at IPC 1.10; frontend-starved 25 % of cycles, op cache 31 % of uops; memory <= ~25 % | slow-down 0 (first 1.2 ms after kicks) to 0.9 (at the flip); 0.27 (SE 0.08) for 2.1 ms after kicks; the speed-up direction is weaker (it then waits longer) | -10..-20 % of 15.6 ms = -1.6..-3.1 ms of main CPU | +2..+7 % alone; more combined with S1 / M8 (shorter job latency) | low (no codegen prototype measured; sensitivity position-dependent) |
 | S4 | Edge (223) on the GPU | as S1, plus 16 ms of pool CPU a frame (power) | Edge slow-downs 0.23 (0.16) / 0.13 (0.045) per ms of Edge CPU (follows Edge's end; MWAITX hides the power part) | after S1: the remaining 0.38 ms of post-Edge wait + ~0.5-1 W of CPU (minus the GPU's new work) | +1..+4 % beyond S1 | low (GPU-side cost unknown; very large effort) |
@@ -851,6 +869,8 @@ below 16.7 ms; the GPU (13.2 ms at 1200 MHz, ~15 at 1000) fits.
 | G2-G4 | GPU passes (shadow copies, box/tile, depth decodes: 0.7-1.2 ms of GPU) | not the limit: only through power at a fixed clock | ~1.9 ms of frame per W of GFX (S2) | ~0.07-0.1 W | +0.5..+1 %, or room for a lower clock | low |
 | R2 | RSX per-draw cost (constants by draw index, multi-draw) | the RSX thread has ~1 ms of slack on the street | +1.05 ms of RSX: 0.04 (SE 0.40); +5.2 ms: 0.79 | -0.8..-2 ms of RSX | ~0 now; needed for 60 fps once S1 + S3 take ~1+ ms off the main thread | medium |
 | -- | More single-job natives (216 / 218 / 204 style) | the CPU of jobs nobody waits for | 216 -10 %, 218 -8 %: 0 measured | -- | 0 | high (measured twice) |
+
+**Step 3 result (s1, 2026-11-20):** S1 is built as a default-off switch (section 4). Its mechanism works (the post-Edge wait is gone), but on the street the main thread then waits for the RSX thread at the frame end, so the frame gains ~+1 % (not significant) on the street and +2 % on the plaza. That moves R2 up: after S1 the RSX thread (18.4 ms, drained last) is what ends the street frame.
 
 **Order for roadmap steps 3-5 (sz1):** step 3 = S1 done properly (small: the ready ring gets a priority class for the
 main thread's managers; gate it) and put S2 to the player (free). Step 4 = the main-thread code generator (S3), sized
