@@ -169,6 +169,26 @@ applied), and the new one waits for the old one to end.
 The game's file names are flat (`cole_default.xpps`, `zeke.xpps`), so a file is
 matched by its name.
 
+## Live mods (port only)
+
+A mod whose `mod.json` has `"live": true` is switched on and off at once, with
+no restart (the Mods page marks it **Instant**). Such a mod may only patch
+bytes in place: texture patches and `xpps_patches` with `_offset_` (no whole
+files, no whole packed files, nothing that changes a file's size). The
+Manager and older ports ignore the key and apply the patches at load as usual.
+
+The game loads its own files; a worker thread
+(`runtime/ppu/ppu_fs_mods.h`, `live_*`) diffs each patch against the game's
+original file (out of the archives) into windows of at least 32 bytes, finds
+them in guest main memory (`0x30000000`-`0x50000000`) and RSX local memory
+(`0xC0000000`-`0xD0000000`, where the textures are), and writes the mod's bytes
+over them; turned off, it writes the originals back. Writes are bracketed by
+`g_vm_host_io_hook`, so the draw engine's write tracking sees the new texture
+bytes. Every live mod's windows are made at start (a few seconds, on or off),
+then a pass every 4 s (`PS3_GAME_MODS_LIVE_SECS`; ~0.4 s over ~380 MB) also
+patches what the game loads later. The status line counts the places changed.
+Log lines start `[mods] live:`.
+
 ## How it works
 
 The game reads a file from its PSARC archives when one of them has it, and
