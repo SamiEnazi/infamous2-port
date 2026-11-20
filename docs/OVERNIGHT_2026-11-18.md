@@ -449,3 +449,18 @@ Until now each install replaced only the two game files and patched your old lau
 - **The code generator's ceiling:** bigger gains need a new calling convention between generated functions. That would be worth ~0.5–1 ms but take weeks, so it's out of reach for now. Committed with the switches off; step 6 decides.
 
 **Next: R8**, cheaper texture-changed and program-changed draws on the graphics thread (~3.4 ms of possible cuts). That is now what holds both the job priority's and this change's gains back.
+
+### 20 Nov 11:25: step 5b, R8 (graphics thread): −0.4 to −0.5 ms, byte-identical
+
+- **What was built:**
+  - descriptor sets kept across frames: 520–600 new sets a frame → 40–69;
+  - a memo for the shader program analysis: 95 % of those analyses skipped.
+  Switch `PS3RECOMP_ENG_R8`, off until step 6.
+- **Exactness:** 23.7 GB of replayed draws compared, 0 bytes differ; 865,841 memo hits re-checked, 0 differ.
+- **Results** (job priority on, both sides):
+  - graphics thread **−0.41 ms** on the quick street (SE 0.05) and **−0.46 ms** standing at the plaza;
+  - fps: **+1.96 %** standing at the plaza (SE 0.62), +0.89 % on the quick street (not clear).
+- **Why only ~0.5 of the ~3.4 ms r2 hoped for:** most of the cost of a texture- or program-changed draw is real new work (a new mesh, a first bind), which nothing exact can skip.
+- **Where things stand now:** on the walking street the graphics thread is ~17.9 ms and the main thread ~19.2 ms, so the main thread is the first wall again, ~1.3 ms ahead. For 60 fps: the main thread needs ~−2.5 ms, the graphics thread ~−1.3 ms.
+
+**Next: step 6, the combined final check**, with everything kept on: the job priority, the cheaper store checks and R8. Each one is measured alone and all together, PGO is retrained, and the full check runs against hd4. If it qualifies, it becomes **hd5**, installed only with your OK.
