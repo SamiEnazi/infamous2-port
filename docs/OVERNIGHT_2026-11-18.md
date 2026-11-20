@@ -404,3 +404,24 @@ Until now each install replaced only the two game files and patched your old lau
 - **Watch item for the final check:** standing frames over 33 ms were 7 with the priority vs 3 without (20 min each), within the usual range.
 
 **Next (step 4): R2, the graphics thread's per-draw cost**, moved ahead of the main-thread code generator, because a faster main thread would now just wait longer for the graphics thread.
+
+### 20 Nov 08:20: step 4, R2 (graphics thread): profiled; multi-draw exact but no gain, parked
+
+- **Where the graphics thread's ~19 ms a frame go:**
+
+  | Part | ms a frame |
+  |---|---|
+  | vertex and index work | 3.9 |
+  | walking the PS3 command list | 3.7 |
+  | the Vulkan driver | 3.4 |
+  | our Vulkan code | 1.7 |
+  | memory copies and compares | 1.7 |
+  | texture / program / pipeline lookups | 1.8 |
+  | dirty tracking | 0.9 |
+
+  The Vulkan draw calls themselves are only ~2.4 ms. The expensive draws are the ones where the **textures changed** (17 % of draws, 5.2 ms) or the **shader program changed** (2.7 %, 3.0 ms).
+- **What was built:** joining neighbouring draws into one Vulkan call (multi-draw) and skipping repeated binds. The picture was byte-identical over 8.1 GB of checked images, but there's no measurable gain (street +0.43 %, SE 0.47; plaza −0.44 %, SE 0.60). It saves only ~0.15 ms. Parked as a patch.
+- **Where the graphics thread's real savings are:**
+  - **R8:** the texture-changed and program-changed draws, ~3.4 ms of possible cuts;
+  - **R5:** persistent descriptor sets, ~0.5 ms.
+- **The order stays:** with the job priority on, the main thread is the first wall and the graphics thread is ~1 ms behind it. **Next, step 5: the main thread's code generator**, then R8 for the graphics thread. For 60 fps the graphics thread needs about −2.5 ms in the end.
