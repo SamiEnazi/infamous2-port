@@ -425,3 +425,27 @@ Until now each install replaced only the two game files and patched your old lau
   - **R8:** the texture-changed and program-changed draws, ~3.4 ms of possible cuts;
   - **R5:** persistent descriptor sets, ~0.5 ms.
 - **The order stays:** with the job priority on, the main thread is the first wall and the graphics thread is ~1 ms behind it. **Next, step 5: the main thread's code generator**, then R8 for the graphics thread. For 60 fps the graphics thread needs about −2.5 ms in the end.
+
+### 20 Nov 09:30: step 5, the main thread's code generator: a real saving, capped by the graphics thread
+
+- **Where the main thread's instructions go:**
+  - the game's own work: ~45 % of the generated code;
+  - checking each memory store for SPU coherency: 11 %;
+  - saving and restoring registers: ~10 % (host stack) + ~10 % (the PS3 register file);
+  - per-function call frames: 5 %;
+  - address computation: ~14 %.
+  There's no hotspot.
+- **What was built:** cheaper store checks. One check per run of 3 or more stores instead of one per store, and a shorter check instruction. Two switches set when the code is generated, off by default. Verified exact: 35,039 store runs checked by an independent checker with 0 differences, and a self-checking build with 0 reports.
+- **Results** (PRIO on, both sides without PGO):
+
+  | | change |
+  |---|---|
+  | main thread instructions | **−6.2 %** (SE 1.1) |
+  | main thread's own time | **−0.42 ms** (SE 0.07) |
+  | street fps | +0.96 % (not clear) |
+  | plaza fps | −0.22 % (no change) |
+
+  The saving is real, but the **graphics thread is right behind the main thread** and caps the frame.
+- **The code generator's ceiling:** bigger gains need a new calling convention between generated functions. That would be worth ~0.5–1 ms but take weeks, so it's out of reach for now. Committed with the switches off; step 6 decides.
+
+**Next: R8**, cheaper texture-changed and program-changed draws on the graphics thread (~3.4 ms of possible cuts). That is now what holds both the job priority's and this change's gains back.
