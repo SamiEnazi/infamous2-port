@@ -510,3 +510,17 @@ The recording worker lost in the 17 Nov test with the old graphics thread; with 
 1. the recording worker on by default (full check + PGO);
 2. Edge: first the 0x9C20 native plus a placement check, then Edge on the GPU if 60 fps still needs it;
 3. the calling convention last.
+
+### 20 Nov 20:30: hd6 built and checked in about 1.5 hours (your request)
+
+- **What hd6 is:** hd5 + the Vulkan recording worker on by default (launcher) + an engine PGO retrained with it on (mg6r). The game module is hd5's.
+- **Build time:** training 11 min, merge 1 min, build 38 s, thanks to the faster builds.
+- **Quick check against hd5,** same batch, alternating:
+
+| Test | hd6 vs hd5 | Graphics thread |
+|---|---|---|
+| Street, busiest part, 8 pairs | **+0.65 %** (SE 0.42, not clear) | **16.7 → 14.3 ms** |
+| Plaza, 8 pairs | **+0.44 %** (SE 0.67, not clear) | **18.0 → 16.2 ms** |
+| Standing at spot 2, real controller, 5 min each | 59.87 vs 59.81 fps; 1 frame > 33 ms each; none > 50 ms | |
+
+- **Reading:** the worker does its job, taking 1.8–2.4 ms off the graphics thread, but the main thread (~18.5–19 ms) is now the only limit on both scenes, so fps barely moves. The sizing round's +2.1 % came from a test that stopped after 3 pairs, which tends to overestimate. hd6 isn't slower anywhere and gives the graphics thread the headroom it needs once the main thread gets faster (Edge, next).
