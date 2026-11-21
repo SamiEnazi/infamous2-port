@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Install inFAMOUS 2
+Comment=Builds inFAMOUS 2 from your own copy of the game, in this folder (Linux, Steam Deck Desktop Mode)
+Exec=sh -c 'exec bash "$(dirname "$1")/tools/install_gui.sh"' sh %k
+Icon=system-software-install
+Terminal=false
+Categories=Game;

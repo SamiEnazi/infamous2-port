@@ -12,6 +12,7 @@
 # runs with the system's own C library: the headers are the ones of that same glibc release.
 #
 # Test switches: LH_INC (the system's include folder, default /usr/include), LH_GLIBC (its glibc version).
+# (SteamOS 3.9: the C++ headers and GCC's start files the same way, lh_gcc_* below.)
 
 LH_MIRROR="https://steamdeck-packages.steamos.cloud/archlinux-mirror"
 LH_ARCHIVE="https://archive.archlinux.org/packages"
@@ -122,6 +123,56 @@ EOF
     fi
     rm -rf "$fix"; mv "$tmp" "$fix"; echo "$gp $kp" > "$fix/.ready"
     echo "  C library headers: tools-cache/sysroot-fix (glibc $gv and Linux headers, as SteamOS $rel's packages)"
+    return 0
+}
+
+# SteamOS 3.9 leaves out the C++ side too: its image keeps the gcc-libs package (libstdc++.so.6, libgcc_s.so.1) but not
+# gcc's (the C++ headers, GCC's start files crtbeginS.o / crtendS.o, libgcc.a), so step 1 found no "C++ headers and
+# libraries". Setup then gets the gcc package of that same SteamOS release (the same version as its gcc-libs, so the
+# headers fit the system's libstdc++) and unpacks only the C++ headers and GCC's start files and helpers into
+# tools-cache/sysroot-gcc (include/c++/<v>, lib/gcc/x86_64-pc-linux-gnu/<v>); clang takes that folder as its GCC
+# installation (--gcc-install-dir in tools-cache/llvm/bin/clang*.cfg). The game links against and runs with the
+# system's own libstdc++.so.6 and libgcc_s.so.1, as before.
+#   glibc release | SteamOS | gcc package | its SHA-256 | GCC's folder version
+lh_gcc_table() {
+    cat <<'EOF'
+2.43 3.9 gcc-16.1.1+r346+g4e03491b401d-4-x86_64 346a52cc965b67f362d5b6701ec339eb43df8e68f8167a491a30847d15545a48 16
+EOF
+}
+
+# lh_gcc_pick <glibc release>: the row for exactly that release (the C++ headers must not be newer than the system's
+# libstdc++); nothing on a system that has its own C++ headers' libraries missing too (no libstdc++.so.6)
+lh_gcc_pick() {
+    [ -f /usr/lib/libstdc++.so.6 ] || [ -f /usr/lib64/libstdc++.so.6 ] || return 0
+    lh_gcc_table | awk -v v="$1" '$1 == v { print }'
+}
+
+# lh_gcc_install <tools-cache> <download folder> <a row of lh_gcc_table>: <tools-cache>/sysroot-gcc; prints nothing
+# but its progress; 0 = ready
+lh_gcc_install() {
+    local cache="$1" dl="$2" gv rel gp gs ver fix tmp enc
+    read -r gv rel gp gs ver <<< "$3"
+    fix="$cache/sysroot-gcc"; tmp="$cache/sysroot-gcc.tmp"
+    if [ "$(cat "$fix/.ready" 2>/dev/null)" = "$gp" ] && [ -f "$fix/include/c++/$ver/vector" ]; then
+        echo "  C++ headers: tools-cache/sysroot-gcc (GCC $ver, already there)"; return 0
+    fi
+    rm -rf "$tmp"; mkdir -p "$tmp" "$dl"
+    enc="${gp//+/%2B}.pkg.tar.zst"
+    lh_get "$gp" "$gs" "$dl/$gp.pkg.tar.zst" "$LH_MIRROR/core-$rel/os/x86_64/$enc" "$LH_ARCHIVE/g/gcc/$enc" \
+        || { echo "  downloading $gp failed (Valve's package mirror and Arch Linux's archive)"; rm -rf "$tmp"; return 1; }
+    local lib="usr/lib/gcc/x86_64-pc-linux-gnu/$ver"
+    if command -v bsdtar >/dev/null 2>&1; then
+        bsdtar -xf "$dl/$gp.pkg.tar.zst" -C "$tmp" --strip-components 1 "usr/include/c++/$ver" "$lib/crt*.o" "$lib/libgcc.a" \
+            "$lib/libgcc_eh.a" "$lib/libgcc_s.so" 2>/dev/null
+    else
+        tar --force-local --zstd --wildcards -xf "$dl/$gp.pkg.tar.zst" -C "$tmp" --strip-components=1 "usr/include/c++/$ver" \
+            "$lib/crt*.o" "$lib/libgcc.a" "$lib/libgcc_eh.a" "$lib/libgcc_s.so" 2>/dev/null
+    fi
+    if [ ! -f "$tmp/include/c++/$ver/vector" ] || [ ! -f "$tmp/lib/gcc/x86_64-pc-linux-gnu/$ver/crtbeginS.o" ]; then
+        echo "  unpacking $gp failed (it needs bsdtar, or tar with zstd)"; rm -rf "$tmp"; return 1
+    fi
+    rm -rf "$fix"; mv "$tmp" "$fix"; echo "$gp" > "$fix/.ready"
+    echo "  C++ headers: tools-cache/sysroot-gcc (GCC $ver's headers and start files, as SteamOS $rel's gcc package)"
     return 0
 }
 

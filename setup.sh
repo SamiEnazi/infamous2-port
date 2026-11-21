@@ -5,9 +5,14 @@
 #   ./setup.sh --setup            build (or rebuild after an update) without playing
 #   ./setup.sh --play [...]       play only (tools/play.sh and its options)
 #   ./setup.sh --disc <folder> [tools/setup.sh options]   say where your game folder is (the one holding PS3_GAME)
+#   ./setup.sh --pgo              build "optimised for this PC": the game trains itself in a window for about 9 minutes
+#                                 (about 25 minutes more in all; tools/setup.sh --pgo). Remembered for later builds
+#                                 (updates); --no-pgo builds the normal way again
+#   ./setup.sh --find-disc        print the game folder setup would use (an earlier setup's, or RPCS3's game list)
 #   ./setup.sh --prepare --disc <folder> [--dry-run]   for launchers (recomplauncher.json, as Setup.exe --prepare):
 #                                 build only, no message boxes, no desktop entry, Setup.exe's exit codes
-#                                 (71 no PS3_GAME, 79 the build failed: play/setup.log); --game = --disc
+#                                 (71 no PS3_GAME, 79 the build failed: play/setup.log); --game = --disc; --pgo trains
+# PORT_SETUP_NO_BOX=1: no message boxes (the caller shows its own: tools/install_gui.sh, the double-click installer).
 # The game is built from YOUR copy, here, once: nothing of the game is in this download. RPCS3 is not needed: the
 # game's update and the PS3 firmware files come from Sony's own servers (or from RPCS3, when it has them).
 # Your game folder is found in RPCS3's game list (games.yml) when you added it there; otherwise you are asked.
@@ -22,7 +27,7 @@ prepare=0; dry=0   # --prepare: a launcher's setup step (see the top)
 
 say() { printf '%s\n' "$*"; }
 gui_msg() {   # a message box when there is no terminal (a launcher started us), else the terminal
-    if [ -t 1 ] || [ $prepare = 1 ]; then say "$1"; return; fi   # --prepare: the launcher shows the exit code's message
+    if [ -t 1 ] || [ $prepare = 1 ] || [ -n "${PORT_SETUP_NO_BOX:-}" ]; then say "$1"; return; fi   # --prepare: the launcher shows the exit code's message
     # (zenity's text is Pango markup: a "&" or "<" in a folder name would hide the whole message)
     local m; m="$(printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
     if command -v zenity >/dev/null 2>&1; then zenity --info --title="inFAMOUS 2" --width=520 --text="$m" 2>/dev/null
@@ -71,8 +76,13 @@ ask_disc() {
 }
 
 build() {
-    local args=("$@") have_disc=0 a
-    for a in "${args[@]}"; do [ "$a" = "--disc" ] && have_disc=1; done
+    local args=("$@") have_disc=0 have_pgo=0 a
+    for a in "${args[@]}"; do
+        [ "$a" = "--disc" ] && have_disc=1
+        case "$a" in --pgo|--no-pgo) have_pgo=1 ;; esac
+    done
+    # "optimised for this PC" chosen before (work/setup-pgo): an update is built that way again
+    [ $have_pgo = 0 ] && [ $prepare = 0 ] && [ -f "$here/work/setup-pgo" ] && args+=(--pgo)
     if [ $have_disc = 0 ]; then
         local disc=""
         # the folder an earlier setup linked (game/disc) is used again
@@ -100,13 +110,14 @@ build() {
 }
 
 # Launchers start us the way they start Setup.exe on Windows (GitHub #44: "unknown option --prepare"):
-# --prepare anywhere on the line, --game for --disc, --dry-run; --pgo is Windows-only and ignored.
+# --prepare anywhere on the line, --game for --disc, --dry-run, --pgo (as Setup.exe --prepare --pgo: the training opens
+# the game's window, so only when asked).
 for a in "$@"; do [ "$a" = "--prepare" ] && prepare=1; done
 if [ $prepare = 1 ]; then
     rest=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            --prepare|--pgo) ;;
+            --prepare) ;;
             --dry-run) dry=1 ;;
             --game) rest+=(--disc) ;;
             *) rest+=("$1") ;;
@@ -131,7 +142,10 @@ mode="auto"
 case "${1:-}" in
     --setup) mode="setup"; shift ;;
     --play) mode="play"; shift ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    --find-disc)
+        if [ -f "$here/game/disc/PS3_GAME/PARAM.SFO" ]; then readlink -f "$here/game/disc"; exit 0; fi
+        find_disc; exit ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     "") ;;
     *) mode="setup-then-play" ;;   # tools/setup.sh options, e.g. --disc <folder>
 esac

@@ -277,9 +277,19 @@ Ubuntu 22.04 with a Radeon RX 550 (RADV), and a player's Steam Deck ([#24](../..
 The port builds and runs natively on Linux, with no Wine or Proton. There is no Setup.exe on Linux: `./setup.sh`
 does the same job, and needs no RPCS3 either.
 
-Download `inFAMOUS2-port-v…-Linux-x64.zip` from the [latest release](../../releases/latest), unpack it and run
-`./setup.sh`. The first time it asks for your game folder, gets the update and firmware from Sony's servers,
-copies the game into the port's folder, builds it, then starts it. After that, `./setup.sh` just plays. Or from git:
+**The easy way (Steam Deck Desktop Mode, or any Linux desktop):** download `inFAMOUS2-port-v…-Linux-x64.zip` from the
+[latest release](../../releases/latest), unpack it where the game should live, and double-click **Install inFAMOUS 2**
+in that folder. It asks for your game folder (or offers the one RPCS3 knows), shows the build's progress, and leaves
+**Play inFAMOUS 2** in the same folder. **Optimise for this PC** (ticked) works like Setup.exe's: the game is compiled
+once with counters, plays by itself in a window for about 9 minutes (sound off, please don't touch it), and is compiled
+again with what it learned (PGO, trained on your PC; the profile never leaves it). On a Steam Deck that added 22 minutes
+(50 instead of 28) and made a busy street 3 % faster; where the graphics thread sets the pace (a plaza) it changed
+nothing. If any part of it fails you get the normal build. Double-click **Install inFAMOUS 2** again later to play,
+rebuild, or optimise.
+
+**In a terminal:** unpack the zip and run `./setup.sh` (`./setup.sh --pgo` = Optimise for this PC). The first time it
+asks for your game folder, gets the update and firmware from Sony's servers, copies the game into the port's folder,
+builds it, then starts it. After that, `./setup.sh` just plays. Or from git:
 
 ```
 git clone https://github.com/SamiEnazi/infamous2-port
@@ -296,7 +306,9 @@ cd infamous2-port
 - **Steam Deck (SteamOS 3.5 and later):** `./setup.sh` in Desktop Mode, nothing to install first (new on 18 Nov,
   not confirmed on a Deck yet: please report how it goes in [#81](../../issues/81)). SteamOS comes
   without the C library's headers and its system folders are read-only, so setup downloads them (12 MB, from Valve's
-  package mirror, SHA-256 checked) into the port's own `tools-cache/` ([#81](../../issues/81)). The other way still
+  package mirror, SHA-256 checked) into the port's own `tools-cache/` ([#81](../../issues/81)); SteamOS 3.9 also lacks
+  the C++ headers and GCC's start files, so setup takes those from SteamOS's own gcc package too (61 MB; built and
+  played that way on a Deck with SteamOS 3.9.5). The other way still
   works: a player built it inside an Ubuntu Distrobox container and plays it in Game Mode
   ([#24](../../issues/24)); a game built in a container is started from that container too
   (`distrobox enter <name> -- <port folder>/setup.sh`).

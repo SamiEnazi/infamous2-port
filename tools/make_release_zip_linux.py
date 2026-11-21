@@ -1,7 +1,7 @@
 """The Linux zip of a release, inFAMOUS2-port-v<version>-Linux-x64.zip, for launchers such as Quiver that pick a
 release's file by "linux" in its name: the port at one commit (git archive: committed files only, LF line ends),
 setup.sh at the top (it does everything: finds the game, builds it once, plays), and port-version.txt. Scripts keep
-their executable bit (Unix modes in the zip). It never holds a game file or firmware (refused if one is found).
+their executable bit (Unix modes in the zip). It never holds a game file, firmware or a PGO profile (refused if one is found).
     python -I tools/make_release_zip_linux.py --version 0.5.4 --repo <clone of SamiEnazi/infamous2-port>
                                               [--commit HEAD] [--out <folder>]
 """
@@ -30,6 +30,8 @@ out = os.path.join(a.out, name + ".zip")
 
 GAME = re.compile(r"\.(elf|self|sprx|prx|pkg|rap|edat|sdat|pup|iso)$|\.psarc|(^|/)(EBOOT\.BIN|PARAM\.SFO|TROPHY\.TRP|TROPUSR\.DAT"
                   r"|TROPCONF\.SFM)$|(^|/)TROP_?\d*\.SFM$|(^|/)recomp_achievements[^/]*\.json$|(^|/)keys/|disc_?keys|\.keys$", re.I)
+# A PGO profile ("Optimise for this PC", tools/pgo_train.py) comes from running the game: it never leaves the player's PC
+PROFILE = re.compile(r"\.(profdata|profraw)$|^work/", re.I)
 # The decryptor (committed to the public repository on its own): left out of the zip; setup fetches it
 OWN = re.compile(r"^tools/(ps3tool[^/]*|keys/disc_keys\.example\.json)$", re.I)
 # every entry dated 26 hours ago (GitHub #21/#22: a ZIP's times have no time zone; a future time stalls the build)
@@ -46,7 +48,7 @@ with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as t, zipfile.ZipFile(tmp, "w",
         if OWN.search(m.name):
             print("  left out (setup fetches it):", m.name)
             continue
-        if GAME.search(m.name):
+        if GAME.search(m.name) or PROFILE.search(m.name):
             bad.append(m.name)
             continue
         zi = zipfile.ZipInfo(m.name, date_time=stamp)
@@ -64,8 +66,8 @@ with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as t, zipfile.ZipFile(tmp, "w",
 if bad:
     os.remove(tmp)
     for b in bad:
-        print("  GAME FILE:", b)
-    sys.exit("game files in the commit: nothing made")
+        print("  GAME FILE OR PROFILE:", b)
+    sys.exit("game files or PGO profiles in the commit: nothing made")
 with zipfile.ZipFile(tmp) as z:
     top = {n.split("/")[0] for n in z.namelist()}
     for need in ("setup.sh", "port-version.txt", "tools/setup.sh", "tools/play.sh"):

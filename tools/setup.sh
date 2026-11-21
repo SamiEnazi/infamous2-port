@@ -2,7 +2,7 @@
 # Linux Setup (tools/setup_build.ps1's counterpart): from your own copy of inFAMOUS 2 to a native
 # Linux build, in this folder only (nothing is installed system-wide, no root needed).
 #   tools/setup.sh --disc <folder holding PS3_GAME> [--rpcs3 <RPCS3's folder>] [--rpcs3-bin <rpcs3 AppImage>]
-#                  [--no-rpcs3] [--eboot <decrypted EBOOT.elf>] [--jobs N] [--no-desktop]
+#                  [--no-rpcs3] [--eboot <decrypted EBOOT.elf>] [--jobs N] [--no-desktop] [--pgo | --no-pgo]
 # RPCS3 is not needed: the game's update (1.01 + 1.03 + 1.04, 236 MB) and the PS3 system software (197 MB, of
 # which three firmware modules are kept) come from Sony's own servers (tools/sony_files.py), unpacked and
 # decrypted with tools/ps3tool.py (downloaded from the port's GitHub when a zip came without it).
@@ -15,6 +15,17 @@
 #   --no-rpcs3   do not look for RPCS3 at all
 #   --eboot      an already decrypted 1.04 EBOOT.elf instead
 #   --jobs       compile jobs (default: half the CPU threads, at most 8: each lifted file is large)
+#   --pgo        "Optimise for this PC" (Setup.exe's checkbox; tools/setup_build.ps1 -Pgo): profile-guided
+#                optimisation trained on this PC, 10 steps instead of 8 (steps 1-6 as below):
+#                 7. translate the game, then compile a training build (instrumented: PORT_PGO=gen) -> work/port/build-train
+#                 8. train it: the game plays by itself in a window for about 9 minutes, sound off (tools/pgo_train.py)
+#                 9. compile the game with what it learned (PORT_PGO=use:<profile>)   10. the desktop launcher
+#                PGO never makes setup fail: when the training build, the training or the optimised compile fails, the
+#                game is compiled the normal way and the line "  pgo: not used: <why>" says why. The profile stays in
+#                work/pgo-setup (never published); an update compiles with it and trains again only when hot code
+#                changed. The choice is remembered (work/setup-pgo: ./setup.sh passes --pgo again); --no-pgo forgets it.
+#                Tests: PORT_PGO_TEST=fail:llvm|fail:trainbuild|fail:compile|stale|stopafter:<s>,
+#                PORT_PGO_KEEP_TRAIN=1 keeps the training build, PORT_PGO_TRAIN=opening|save|opening,save picks the runs.
 # Steps:
 #   1. check this PC and the game                 6. Vulkan headers, SDL2 headers, glslang -> deps/
 #   2. the build tools -> tools-cache/            7. translate and compile the game (15-60 min)
@@ -29,10 +40,11 @@
 # Vulkan loader (libvulkan1 / vulkan-loader) with your GPU's driver, and SDL2 (libsdl2-2.0-0 / SDL2).
 # SteamOS (Steam Deck) has no C library headers and nothing can be installed there: step 2 downloads them into
 # tools-cache/sysroot-fix (tools/libc_headers.sh; GitHub #81), so stock SteamOS 3.5 and later needs nothing extra.
+# SteamOS 3.9 has no C++ headers and no GCC start files either: step 2 gets them from its own gcc package (61 MB).
 # Play with tools/play.sh (or the desktop launcher).
 set -eu   # (no pipefail: 'ldconfig -p | grep -q' would fail on grep's early exit)
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-disc=""; rpcs3=""; rpcs3bin=""; eboot=""; desktop=1; norpcs3=0
+disc=""; rpcs3=""; rpcs3bin=""; eboot=""; desktop=1; norpcs3=0; pgo=0
 jobs=$(( $(nproc) / 2 )); [ $jobs -gt 8 ] && jobs=8; [ $jobs -lt 1 ] && jobs=1
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -43,7 +55,9 @@ while [ $# -gt 0 ]; do
         --jobs) jobs="$2"; shift ;;
         --no-desktop) desktop=0 ;;
         --no-rpcs3) norpcs3=1 ;;
-        -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+        --pgo) pgo=1 ;;
+        --no-pgo) pgo=0; rm -f "$root/work/setup-pgo" ;;
+        -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
         *) echo "unknown option $1 (--help)"; exit 2 ;;
     esac
     shift
@@ -87,7 +101,8 @@ vfs_dir() {
     printf '%s' "${first%/}"
 }
 t0=$(date +%s)
-step() { echo "== [$1/8] $2   ($(( ($(date +%s) - t0) / 60 )) min so far)"; }
+nsteps=8; [ $pgo = 1 ] && nsteps=10
+step() { echo "== [$1/$nsteps] $2   ($(( ($(date +%s) - t0) / 60 )) min so far)"; }
 # Something that moves while a long, silent command runs: a line every 5 seconds until tick_stop
 tick_pid=""
 tick_start() { ( s=0; while sleep 5; do s=$((s+5)); echo "  progress: $1, $((s/60)):$(printf '%02d' $((s%60))) so far"; done ) & tick_pid=$!; }
@@ -164,12 +179,18 @@ for d in $(ls -d /usr/lib/gcc/x86_64-*linux-gnu/* /usr/lib/gcc/x86_64-*linux/* 2
             [ -f "$lib/libstdc++.so" -o -f "$lib/libstdc++.a" ] && { gccdir="$d"; break 3; }
         done; done
 done
-[ -n "$gccdir" ] && ok ok "C++ headers and libraries" "$gccdir (tried for real with the compiler in step 2)" || ok MISS "C++ headers and libraries" "install them (Debian/Ubuntu: build-essential; Fedora: gcc-c++; Arch: base-devel)"
+# SteamOS 3.9 has no C++ headers and none of GCC's start files either (only libstdc++.so.6): step 2 gets them from
+# SteamOS's own gcc package into tools-cache/sysroot-gcc (tools/libc_headers.sh lh_gcc_*)
+grow=""; gfix=0
+if [ -z "$gccdir" ]; then grow=$(lh_gcc_pick "$(lh_glibc)"); [ -n "$grow" ] && gfix=1; fi
+if [ -n "$gccdir" ]; then ok ok "C++ headers and libraries" "$gccdir (tried for real with the compiler in step 2)"
+elif [ $gfix = 1 ]; then ok note "C++ headers and libraries" "not on this system (SteamOS $(echo "$grow" | awk '{print $2}') comes without them): downloaded into tools-cache/sysroot-gcc in step 2 (61 MB; nothing is installed on the system)"
+else ok MISS "C++ headers and libraries" "install them (Debian/Ubuntu: build-essential; Fedora: gcc-c++; Arch: base-devel)"; fi
 # The C library's own headers (GitHub #81): SteamOS has the C++ ones above but no <features.h>, <stdio.h>,
 # <pthread.h>, <linux/...>, and nothing can be installed there. For the glibc releases SteamOS uses, step 2 gets
 # them into tools-cache/sysroot-fix (tools/libc_headers.sh); any other system is told here, not at step 6.
 hmiss=$(lh_missing); hrow=""; hfix=0; hadvice=0
-if [ -n "$hmiss" ] && [ -n "$gccdir" ]; then
+if [ -n "$hmiss" ] && { [ -n "$gccdir" ] || [ $gfix = 1 ]; }; then
     hlist="<${hmiss// />, <}>"; hrow=$(lh_pick "$(lh_glibc)")
     if [ -n "$hrow" ]; then
         hfix=1; ok note "C library headers" "not on this system ($hlist; SteamOS comes without them): downloaded into tools-cache/sysroot-fix in step 2 (12 MB; nothing is installed on the system)"
@@ -286,6 +307,11 @@ fi
 # <CFGDIR> is the .cfg file's folder: the port's folder can be moved, and its name may hold spaces.
 if [ $hfix = 1 ]; then
     lh_install "$cache" "$dl" "$hrow" || { lh_advice "$root"; fail "the C library headers this system lacks could not be downloaded (above). Check your internet connection and run setup again, or use the Distrobox way above"; }
+fi
+# SteamOS 3.9 (step 1): its own gcc package's C++ headers and start files, as clang's GCC installation
+if [ $gfix = 1 ]; then
+    lh_gcc_install "$cache" "$dl" "$grow" || { lh_advice "$root"; fail "the C++ headers this system lacks could not be downloaded (above). Check your internet connection and run setup again, or use the Distrobox way above"; }
+    gccdir="<CFGDIR>/../../sysroot-gcc/lib/gcc/x86_64-pc-linux-gnu/$(echo "$grow" | awk '{print $5}')"
 fi
 for d in clang clang++; do
     { echo "--gcc-install-dir=$gccdir"; if [ $hfix = 1 ]; then echo '-idirafter <CFGDIR>/../../sysroot-fix/include'; fi; } > "$cache/llvm/bin/$d.cfg"
@@ -590,18 +616,112 @@ fi
 echo "  deps ready"
 
 # ------------------------------------------------------------------------------------------------
-step 7 "translating and compiling the game (the long part: 15-60 minutes; each part says what it is and how far it is)"
 export PORT_JOBS="$jobs" PORT_LIFT_JOBS="$jobs"
-"$venv/bin/python" -I "$root/tools/rebuild.py" || fail "the build failed: see work/logs/ (python3 -I tools/build_errors.py work/logs/compile.log)"
 exe="$root/work/port/build/Infamous2Recomp"
+buildfailed="the build failed: see work/logs/ (python3 -I tools/build_errors.py work/logs/compile.log)"
+if [ $pgo = 0 ]; then
+    step 7 "translating and compiling the game (the long part: 15-60 minutes; each part says what it is and how far it is)"
+    "$venv/bin/python" -I "$root/tools/rebuild.py" || fail "$buildfailed"
+else
+    # --pgo: tools/setup_build.ps1 -Pgo's steps 8-10, the same rules. rb <PORT_PGO or ""> <PORT_BUILD or ""> <rebuild.py
+    # arguments>: tools/rebuild.py with these two set for this one call; its lines go on and into $rbout
+    rbout="$root/work/logs/setup-rebuild.out"
+    rb() {
+        local mode="$1" dir="$2"; shift 2
+        ( if [ -n "$mode" ]; then export PORT_PGO="$mode"; else unset PORT_PGO; fi
+          if [ -n "$dir" ]; then export PORT_BUILD="$dir"; else unset PORT_BUILD; fi
+          exec "$venv/bin/python" -I "$root/tools/rebuild.py" "$@" ) 2>&1 | tee "$rbout"
+        return "${PIPESTATUS[0]}"
+    }
+    unset PORT_PGO PORT_BUILD PORT_ENGINE_PGO PORT_ENGINE_BUILD
+    llvmprof="$cache/llvm/bin/llvm-profdata"
+    profile_ok() { "$llvmprof" show "$1" >/dev/null 2>&1; }   # this LLVM reads it
+    train="$root/work/port/build-train"
+    pgodir="$root/work/pgo-setup"
+    test="${PORT_PGO_TEST:-}"
+    why=""; used=""; pd=""; fallback=0
+    [ "$test" = fail:llvm ] && llvmprof=""
+    [ -n "$llvmprof" ] && [ -x "$llvmprof" ] || { llvmprof=""; why="the port's LLVM has no llvm-profdata"; }
+    kept=""
+    if [ -n "$llvmprof" ]; then
+        kept="$(ls -1 "$pgodir"/setup-*.profdata 2>/dev/null | sort | tail -n 1)"
+        if [ -n "$kept" ] && ! profile_ok "$kept"; then
+            echo "  the last training's profile ($(basename "$kept")) cannot be read by this LLVM: training again"
+            rm -f "$kept"; kept=""
+        fi
+    fi
+    if [ -n "$kept" ]; then step 7 "translating the game, then compiling it with what the last training on this PC learned (15-60 minutes)"
+    elif [ -n "$why" ]; then step 7 "translating and compiling the game (the long part: 15-60 minutes)"
+    else step 7 "translating the game, then compiling a training build (the long part: 15-60 minutes)"; fi
+    "$venv/bin/python" -I "$root/tools/rebuild.py" --only inputs,port,firmware,ppu,spu,jobs || fail "$buildfailed"
+    if [ -n "$kept" ]; then
+        if rb "use:$kept" "" --only compile && [ -f "$root/work/port/build/libInfamous2Game.so" ]; then
+            fallback=1
+            if ! grep -qE 'PGO WARNING|-- retrain when these are hot' "$rbout" && [ "$test" != stale ]; then
+                used="the training of $(date -r "$kept" +%F) still fits this version"
+            else echo "  hot code changed since the last training: training again (the game just built stays if that does not work)"; fi
+        else echo "  compiling with the last training failed: training again"; fi
+    fi
+    if [ -z "$used" ] && [ -z "$why" ]; then
+        rm -f "$train/libInfamous2Game.so"   # never train an older one
+        echo "  compile log: work/logs/module-build-train.log"
+        if ! rb gen "$train" --only compile || [ ! -f "$train/libInfamous2Game.so" ] || [ ! -x "$train/Infamous2Recomp" ] || [ "$test" = fail:trainbuild ]; then
+            why="the training build did not compile (work/logs/module-build-train.log)"
+        fi
+    fi
+    if [ -n "$used" ]; then step 8 "training: not needed ($used)"
+    elif [ -n "$why" ]; then step 8 "training: skipped"
+    else step 8 "training the build on your PC (the game plays by itself in a window: please don't touch it)"; fi
+    if [ -z "$used" ] && [ -z "$why" ]; then
+        mkdir -p "$pgodir"
+        # a new name every time: a profile at the same path whose content changed would not rebuild anything
+        pd="$pgodir/setup-$(date +%Y%m%d-%H%M%S).profdata"
+        stopafter=0; case "$test" in stopafter:*) stopafter="${test#stopafter:}" ;; esac
+        "$venv/bin/python" -I "$root/tools/pgo_train.py" --exe "$train/Infamous2Recomp" --profdata "$pd" --llvm-profdata "$llvmprof" \
+            --runs "${PORT_PGO_TRAIN:-opening,save}" --stop-after "$stopafter" 2>&1 | tee "$root/work/logs/pgo-train.log"
+        if [ "${PIPESTATUS[0]}" != 0 ] || [ ! -f "$pd" ]; then
+            w="$(sed -n 's/^ *why: *//p' "$root/work/logs/pgo-train.log" | tail -n 1)"
+            why="the training run gave nothing usable: ${w:-see the lines above}"
+            rm -f "$pd"; pd=""
+        fi
+    elif [ -z "$used" ]; then echo "  skipped: $why"; fi
+    [ "${PORT_PGO_KEEP_TRAIN:-}" = 1 ] || rm -rf "$train"   # the training build is never the game
+    if [ -n "$used" ]; then step 9 "compiling the game, optimised for this PC: done in step 7"
+    else
+        if [ -n "$pd" ]; then step 9 "compiling the game, optimised for this PC"; else step 9 "compiling the game"; fi
+        built=0
+        if [ -n "$pd" ]; then
+            echo "  compile log: work/logs/module.log"
+            if rb "use:$pd" "" --only compile && [ "$test" != fail:compile ]; then built=1; used="trained on this PC now"
+            else why="the optimised compile failed (work/logs/module.log)"; fi
+        fi
+        if [ $built = 0 ]; then
+            if [ $fallback = 1 ] && [ -z "$pd" ]; then used="the last training, partly out of date: $why"
+            else
+                echo "  note: Optimise for this PC did not work this time ($why): compiling the game the normal way"
+                echo "  compile log: work/logs/module.log"
+                rb "" "" --only compile || fail "$buildfailed"
+            fi
+        fi
+    fi
+    if [ -n "$used" ]; then
+        echo "  pgo: used ($used)"
+        if [ -n "$pd" ]; then for f in "$pgodir"/setup-*.profdata; do [ "$f" = "$pd" ] || rm -f "$f"; done; fi
+        if [ "$used" = "trained on this PC now" ]; then echo "used (trained on this PC on $(date +%F))"; else echo "used ($used)"; fi > "$root/work/setup-pgo"
+    else
+        echo "  pgo: not used: $why"
+        echo "not used: $why" > "$root/work/setup-pgo"
+    fi
+fi
 [ -x "$exe" ] || fail "no $exe after the build"
+[ -f "$root/work/port/build/libInfamous2Game.so" ] || fail "no work/port/build/libInfamous2Game.so after the build"
 # Built inside a container (Distrobox: the way for systems without build tools): the program uses the
 # container's libraries, so tools/play.sh says where to start it when it is started outside
 if [ -f /run/.containerenv ] || [ -f /.dockerenv ] || [ -n "${CONTAINER_ID:-}" ]; then echo "${CONTAINER_ID:-}" > "$root/work/built-in-container"
 else rm -f "$root/work/built-in-container"; fi
 
 # ------------------------------------------------------------------------------------------------
-step 8 "desktop launcher"
+step $nsteps "desktop launcher"
 if [ $desktop = 1 ]; then
     apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"; mkdir -p "$apps"
     icon="$root/work/icon/icon0.png"; mkdir -p "$root/work/icon"; cp -f "$disc/PS3_GAME/ICON0.PNG" "$icon" 2>/dev/null || icon=""
