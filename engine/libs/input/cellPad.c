@@ -1606,6 +1606,20 @@ volatile uint32_t g_pad_host_keys[4];
  * up = D-pad up (Precision Mode); [mouse_buttons] rebinds them. */
 volatile int32_t  g_pad_mouse_dx, g_pad_mouse_dy, g_pad_mouse_wheel;
 volatile uint32_t g_pad_mouse_buttons;
+/* [map] the title's World Map ("Alternate Mouse & Keyboard Map Panning", the menu's Controls page): while the
+ * title holds the claim (cellPad_host_map_claim, renewed at least every 0.5 s) the mouse's motion and wheel are
+ * the map's (cellPad_host_map_take) instead of the right stick and the wheel's buttons; the mouse buttons stay.
+ * s_left_keys: the keys (WASD) moved the left stick in the latest keyboard poll (cellPad_host_left_keys). */
+static volatile unsigned long long s_map_claim_until_us;
+static int32_t s_map_dx, s_map_dy, s_map_wheel;   /* 1/16 px, 1/16 notch (+ = up, away); under s_map_lock */
+static volatile int s_map_lock;
+static volatile int s_left_keys, s_left_lx = 128, s_left_ly = 128;
+/* [map] while the title says its World Map is up (cellPad_host_map_up, renewed at least every 0.5 s), Shift
+ * is the map's "double speed" (cellPad_host_map_shift) and presses nothing in the game (by default it is Circle) */
+static volatile unsigned long long s_map_up_until_us;
+static volatile int s_map_shift;
+static void map_lock(void)   { while (__atomic_exchange_n(&s_map_lock, 1, __ATOMIC_ACQUIRE)) { } }
+static void map_unlock(void) { __atomic_store_n(&s_map_lock, 0, __ATOMIC_RELEASE); }
 static int pad_mouse_axis(float v, int dz)
 {
     if (v > -0.5f && v < 0.5f) return 128;
@@ -1838,6 +1852,35 @@ static void pad_mouse_script_feed(void)
         fflush(stdout);
     }
 }
+/* [map] the title's World Map (above s_map_claim_until_us) */
+void cellPad_host_map_claim(int on)
+{
+    s_map_claim_until_us = on ? pad_now_us() + 500000ull : 0ull;
+    if (!on) { map_lock(); s_map_dx = s_map_dy = s_map_wheel = 0; map_unlock(); }
+}
+/* the motion (px) and wheel (notches, + = up) since the last take; 0 when the map does not hold the mouse */
+int cellPad_host_map_take(float* dx, float* dy, float* wheel)
+{
+    map_lock();
+    const int32_t x = s_map_dx, y = s_map_dy, w = s_map_wheel;
+    s_map_dx = s_map_dy = s_map_wheel = 0;
+    map_unlock();
+    if (dx) *dx = (float)x / 16.0f;
+    if (dy) *dy = (float)y / 16.0f;
+    if (wheel) *wheel = (float)w / 16.0f;
+    return pad_now_us() < s_map_claim_until_us;
+}
+int cellPad_host_left_keys(void) { return s_left_keys; }
+/* the keys' left stick as -1..1 (y + = down); 0 when they do not move it */
+int cellPad_host_left_keys_dir(float* x, float* y)
+{
+    const int lx = s_left_lx, ly = s_left_ly;
+    if (x) *x = lx == 128 ? 0.0f : (float)(lx - 128) / (lx > 128 ? 127.0f : 128.0f);
+    if (y) *y = ly == 128 ? 0.0f : (float)(ly - 128) / (ly > 128 ? 127.0f : 128.0f);
+    return s_left_keys;
+}
+void cellPad_host_map_up(int on) { s_map_up_until_us = on ? pad_now_us() + 500000ull : 0ull; }
+int cellPad_host_map_shift(void) { return s_map_shift; }
 static void pad_poll_mouse(uint32_t* ctl, int* mrx, int* mry)
 {
     static float sx, sy; static unsigned long long last;
@@ -1850,6 +1893,18 @@ static void pad_poll_mouse(uint32_t* ctl, int* mrx, int* mry)
     if (!on) return;
     pad_mouse_script_feed();
     const unsigned long long now_us = pad_now_us(), now = now_us / 1000ull;
+    if (now_us < s_map_claim_until_us) {   /* [map] the World Map's: no stick, no wheel buttons */
+        const int32_t w = __atomic_exchange_n(&g_pad_mouse_wheel, 0, __ATOMIC_RELAXED);
+        const int32_t mx = __atomic_exchange_n(&g_pad_mouse_dx, 0, __ATOMIC_RELAXED);
+        const int32_t my = __atomic_exchange_n(&g_pad_mouse_dy, 0, __ATOMIC_RELAXED);
+        map_lock(); s_map_dx += mx; s_map_dy += my; s_map_wheel += w; map_unlock();
+        wheel_acc = 0; sx = sy = 0.0f; last = now_us;
+        const uint32_t mb = g_pad_mouse_buttons;
+        if (mb)
+            for (int c = 0; c < PIM_N_CONTROLS; c++)
+                if (map->mouse[c] & mb) *ctl |= 1u << c;
+        return;
+    }
     uint32_t b = g_pad_mouse_buttons;
     { const int32_t w = __atomic_exchange_n(&g_pad_mouse_wheel, 0, __ATOMIC_RELAXED);
       if ((w > 0 && wheel_acc < 0) || (w < 0 && wheel_acc > 0)) wheel_acc = 0;   /* turned back */
@@ -2200,6 +2255,12 @@ static void pad_poll_keys(int merge)
           s_menu_keys[i] = menu ? 0xFFFFFFFFu : s_menu_keys[i] & keys[i];
           keys[i] &= ~s_menu_keys[i];
       } }
+    { const int sh = (int)((keys[0x38 >> 5] >> (0x38 & 31)) & 1u) | (int)((keys[0x3C >> 5] >> (0x3C & 31)) & 1u);
+      s_map_shift = sh;   /* [map] */
+      if (sh && pad_now_us() < s_map_up_until_us) {
+          keys[0x38 >> 5] &= ~(1u << (0x38 & 31));
+          keys[0x3C >> 5] &= ~(1u << (0x3C & 31));
+      } }
     uint32_t ctl = 0;
     if (keys[0] | keys[1] | keys[2] | keys[3])
         for (int c = 0; c < PIM_N_CONTROLS; c++)
@@ -2213,6 +2274,8 @@ static void pad_poll_keys(int merge)
     /* Stick axes: 0 = left/up, 255 = right/down. */
     int lx = pad_dir_axis(ctl, PIM_LS_LEFT, PIM_LS_RIGHT, 128);
     int ly = pad_dir_axis(ctl, PIM_LS_UP, PIM_LS_DOWN, 128);
+    s_left_keys = lx != 128 || ly != 128;   /* [map] */
+    s_left_lx = lx; s_left_ly = ly;
     int rx = pad_dir_axis(ctl, PIM_RS_LEFT, PIM_RS_RIGHT, 128);
     int ry = pad_dir_axis(ctl, PIM_RS_UP, PIM_RS_DOWN, 128);
     if (mrx >= 0) rx = mrx;   /* mouse motion wins over I/J/K/L while it moves */

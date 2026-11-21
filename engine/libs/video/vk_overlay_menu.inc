@@ -568,6 +568,25 @@ static void page_controls(Rows& R)
       mrow_slider(R, "aim", "Aiming sensitivity", aim * 100.0f, 10.0f, 500.0f, 10.0f, sfmt("%.0f%%", aim * 100.0f), [](float v) {
           cellPad_host_set_mouse_aim_sens(v / 100.0f); char b[16]; snprintf(b, sizeof b, "%.2f", v / 100.0f); extra_set("PS3_MOUSE_AIM_SENS", b); })
           .d("Camera speed while aiming (Direct).").c(0).ex("PS3_MOUSE_AIM_SENS").off(!pick); }
+    /* [map] the World Map's panning (cheats.cpp: the title scales the stick its map script reads; the alternate
+     * mode gives the map the mouse and wheel, cellPad_host_map_claim) */
+    { auto pct = [](const char* var) { const char* e = getenv(var); float v = e && e[0] ? (float)atof(e) * 100.0f : 100.0f;
+                                       return v < 5.0f ? 5.0f : v > 400.0f ? 400.0f : v; };
+      auto put = [](const char* var, float v) { char b[16]; snprintf(b, sizeof b, "%.2f", v / 100.0f); ps3_setting_apply(var, b); extra_set(var, b); };
+      const bool have = ps3_setting_applier("PS3_MAP_SPEED") != NULL, have_alt = ps3_setting_applier("PS3_MAP_ALT_MK") != NULL;
+      const char* ea = getenv("PS3_MAP_ALT_MK");
+      const bool alt = ea && ea[0] == '1';
+      const float mp = pct("PS3_MAP_SPEED"), mk = pct("PS3_MAP_KEY_SPEED"), mm = pct("PS3_MAP_MOUSE_SPEED");
+      mrow_slider(R, "mapspd", "Map speed (controller)", mp, 5.0f, 400.0f, 5.0f, sfmt("%.0f%%", mp), [put](float v) { put("PS3_MAP_SPEED", v); })
+          .d("How fast the World Map pans with a controller's stick. 100% is the game's.").c(0).ex("PS3_MAP_SPEED").off(!have)
+          .st(have ? "" : "This build of the game has no map speed.", !have);
+      mrow_slider(R, "mapkey", "Map speed (WASD)", mk, 5.0f, 400.0f, 5.0f, sfmt("%.0f%%", mk), [put](float v) { put("PS3_MAP_KEY_SPEED", v); })
+          .d("How fast the World Map pans with the movement keys. Hold Shift for double speed.").c(0).ex("PS3_MAP_KEY_SPEED").off(!have);
+      mrow_toggle(R, "mapalt", "Alternate Mouse & Keyboard Map Panning", alt, [](bool on) {
+          ps3_setting_apply("PS3_MAP_ALT_MK", on ? "1" : "0"); extra_set("PS3_MAP_ALT_MK", on ? "1" : "0"); })
+          .d("On the World Map: the mouse and WASD pan, the scroll wheel zooms.").c(0).ex("PS3_MAP_ALT_MK").off(!have_alt);
+      mrow_slider(R, "mapmouse", "Map speed (mouse)", mm, 5.0f, 400.0f, 5.0f, sfmt("%.0f%%", mm), [put](float v) { put("PS3_MAP_MOUSE_SPEED", v); })
+          .d("How fast the World Map pans with the mouse (alternate panning).").c(0).ex("PS3_MAP_MOUSE_SPEED").off(!have_alt || !alt).ind(); }
     { char path[600] = "";
       if (!s_census) cellPad_host_input_map_path(path, sizeof path);
       mrow_action(R, "remap", "Buttons and keys", "Remap", [] { s_sub_want = SUB_REMAP; })
