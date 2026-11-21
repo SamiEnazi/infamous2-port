@@ -2218,14 +2218,20 @@ static void live_worker()
         { const int r = live_karma_level(); if (r >= 0) { std::lock_guard<std::mutex> lk(lv.mx); lv.rank = r; } }
         { std::lock_guard<std::mutex> lk(g.mx); live_sync_locked(); }
         /* builds: every live mod's pairs, once, on or off (reading the archives takes a few
-         * seconds: done at start, so a switch turned on later works at the next pass) */
-        for (;;) {
+         * seconds each). The mods switched on are built first and put in by a pass at once;
+         * then one switched-off mod is built a round, so a switch turned on later is quick.
+         * (Building them all before the first pass kept a mod that was on out for a minute.) */
+        auto build_one = [](bool on_only) -> bool {
             std::string f, key;
             {
                 std::lock_guard<std::mutex> lk(lv.mx);
-                for (auto& kv : lv.mods) if (!kv.second.built && !kv.second.building) { f = kv.first; key = kv.second.key; kv.second.building = true; break; }
+                for (int want = 1; want >= (on_only ? 1 : 0) && f.empty(); want--)
+                    for (auto& kv : lv.mods)
+                        if (!kv.second.built && !kv.second.building && kv.second.want == (want != 0)) {
+                            f = kv.first; key = kv.second.key; kv.second.building = true; break;
+                        }
             }
-            if (f.empty()) break;
+            if (f.empty()) return false;
             Mod m;
             bool found = false;
             {
@@ -2242,7 +2248,7 @@ static void live_worker()
             }
             std::lock_guard<std::mutex> lk(lv.mx);
             auto it = lv.mods.find(f);
-            if (it == lv.mods.end() || it->second.key != key) continue;
+            if (it == lv.mods.end() || it->second.key != key) return true;
             LiveMod& L = it->second;
             L.building = false;
             L.built = true;
@@ -2258,9 +2264,12 @@ static void live_worker()
                 L.err = found ? err : "it changed while it was read";
                 fprintf(stderr, "[mods] live: \"%s\" not used: %s\n", L.name.c_str(), L.err.c_str());
             }
-        }
+            return true;
+        };
+        while (build_one(true)) {}
         live_pass();
         live_dark_update();
+        if (build_one(false)) { std::lock_guard<std::mutex> lk(lv.mx); lv.kick = true; }   /* the next one soon */
     }
 }
 
