@@ -1220,10 +1220,13 @@ void hook_cam_rate(struct ppu_context* ctx, ppu_hook_body body)
  *   while it is, the stick reads come back x PS3_MAP_SPEED (a controller) or x PS3_MAP_KEY_SPEED (the keys
  *     moved the left stick: cellPad_host_left_keys), 0.05 .. 4;
  *   PS3_MAP_ALT_MK=1 ("Alternate Mouse & Keyboard Map Panning"): cellPad gives the map the mouse
- *     (cellPad_host_map_claim / _take: no right stick, no wheel buttons while it is up); its motion is a
- *     stick (1.5 px/ms = full, x PS3_MAP_MOUSE_SPEED, smoothed like the mouse camera) added to the keys', and
- *     the wheel zooms: each notch x0.85 (up = in) on the radius the script asked for, the pan slowed by the
- *     same factor so it keeps its feel; back to the game's own zoom when the map closes.
+ *     (cellPad_host_map_claim / _take: no right stick, no wheel buttons while it is up), and the view moves
+ *     directly -- no smoothing, no acceleration: VIEW_CENTER is written here from the mouse motion (540 px =
+ *     one view radius x PS3_MAP_MOUSE_SPEED) and the keys (one radius a second x PS3_MAP_KEY_SPEED); the
+ *     script sees the keys centred, and its own small centre moves are dropped (it keeps its centre near Cole
+ *     and sends it again every frame; a jump against its previous value -- a waypoint, the map opening --
+ *     still goes through). The wheel zooms: each notch x0.85 (up = in) on the radius the script asked for;
+ *     back to the game's own zoom when the map closes.
  *   Shift held with the keys: their speed x2 (both modes); on the map Shift presses nothing else (cellPad).
  * Nothing is installed while all is default. PS3_MAP_SPEED_LOG=1: a [map] line a second. */
 typedef void (*map_fn)(struct ppu_context*);
@@ -1250,8 +1253,6 @@ bool s_map_was_up;
 float s_map_slx, s_map_sly; uint32_t s_map_sdisp;   /* the script's own last centre (0: none since the map opened) */
 bool s_map_pad_moving;                    /* a controller stick moves the map (alt mode: the script pans) */
 float s_map_zoom = 1.0f, s_map_rscript;   /* the wheel's zoom on the script's radius; the script's last radius */
-float s_map_mx, s_map_my;                 /* (unused since the direct pan) */
-double s_map_own_t = -10.0;               /* when the direct pan last moved the view */
 constexpr uint32_t kMapCenter = 0x320, kMapHeading = 0x334;
 constexpr float kMapKeyRate = 1.0f;       /* WASD at 100%: the view radius per second */
 constexpr float kMapPxRef = 540.0f;       /* mouse at 100%: this many px move the view by its radius */
@@ -1297,7 +1298,7 @@ void map_frame(struct ppu_context* ctx)
         fprintf(stderr, "[map] the World Map is %s\n", up ? "up" : "closed");
         if (!up) {
             if (s_map_zoom != 1.0f && s_map_rscript > 0.0f) map_radius_write(ctx, disp, s_map_rscript);
-            s_map_zoom = 1.0f; s_map_mx = s_map_my = 0.0f;
+            s_map_zoom = 1.0f;
             cellPad_host_map_claim(0);
             cellPad_host_map_up(0);
             s_map_sdisp = 0;
@@ -1329,7 +1330,6 @@ void map_frame(struct ppu_context* ctx)
             const float wx = sx * sn + sy * c, wy = -sx * c + sy * sn;   /* Anthony's tests 2026-11-21 (heading pi/2): screen right = world +x, up = +y */
             wrf(disp + kMapCenter, rdf(disp + kMapCenter) + wx);
             wrf(disp + kMapCenter + 4, rdf(disp + kMapCenter + 4) + wy);
-            s_map_own_t = t;
             static int said;
             if (said++ < 3)
                 fprintf(stderr, "[map] direct pan: centre (%g, %g, %g) radius %g heading %g, moved (%g, %g)\n",
@@ -1407,16 +1407,6 @@ template <int I> void map_stick_read(struct ppu_context* ctx)   /* the joystick'
     if (s_map_alt.load(std::memory_order_relaxed)) {
         if (I == 2) s_map_pad_moving = !keys && v != 0.0f;
         if (keys) out = 0.0f;   /* the keys are the direct pan's */
-    }
-    if (false) {
-        const float zx = s_map_mx * s_map_zoom, zy = s_map_my * s_map_zoom;
-        if (I == 2) out += zx;
-        else if (I == 3) out += zy;
-        else if (zx != 0.0f || zy != 0.0f) {   /* the magnitude of what X and Y now say (the pad's own is +0x0C) */
-            const uint32_t pad = vm_read32((uint32_t)ctx->gpr[3] + 0x14);
-            const float x = gptr(pad) ? rdf(pad + 4) * k + zx : zx, y = gptr(pad) ? rdf(pad + 8) * k + zy : zy;
-            out = sqrtf(x * x + y * y);
-        }
     }
     if (out == v) return;
     ctx->fpr[1] = (double)out;
