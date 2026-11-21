@@ -136,6 +136,20 @@ static int time_up(spu_context* ctx, uint32_t ret)
 {
     lcall_ls(ctx, ls32(ctx, 0x9E10), ret);
     int up = ctx->gpr[3]._u32[0] != 0;
+    /* With the tile walk skipped there is no per-tile work left for the budget
+     * to bound: the whole iterator is a few atomics. The guest's verdict then
+     * only says the SPU thread was descheduled while the decrementer ran on
+     * (host CPU starvation), and yielding hands the rest of the pass to a later
+     * kick for nothing. So the verdict is ignored and the pass always finishes.
+     * PS3RECOMP_ENG_GPU_LIGHT_BUDGET=1 keeps the guest's verdict (old). */
+    { static int keep = -1;
+      if (keep < 0) { const char* e = getenv("PS3RECOMP_ENG_GPU_LIGHT_BUDGET"); keep = e && *e == '1'; }
+      if (up && !keep) {
+          static unsigned m;
+          if (__atomic_add_fetch(&m, 1, __ATOMIC_RELAXED) <= 8)
+              fprintf(stderr, "[gpu light] time budget spent at 0x%X: ignored, pass finished (no tile work to bound)\n", ret);
+          up = 0;
+      } }
     /* PS3RECOMP_ENG_GPU_LIGHT_YIELD=<n> (diagnostic): also report the budget
      * spent on every n-th check -- what a starved SPU thread sees when the
      * decrementer runs on while it is descheduled. */
