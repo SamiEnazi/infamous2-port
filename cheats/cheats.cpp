@@ -1251,6 +1251,9 @@ map_fn s_map_orig[5];
 int s_map_log;
 bool s_map_was_up;
 float s_map_slx, s_map_sly; uint32_t s_map_sdisp;   /* the script's own last centre (0: none since the map opened) */
+float s_map_sg[2] = { 1.0f, 1.0f };       /* the follow stick's sign per screen axis (flipped if the script ran away) */
+int s_map_rise[2]; float s_map_elast[2];  /* frames its error grew with no input, the last error */
+bool s_map_input;                         /* the direct pan moved the view this frame */
 bool s_map_pad_moving;                    /* a controller stick moves the map (alt mode: the script pans) */
 float s_map_zoom = 1.0f, s_map_rscript;   /* the wheel's zoom on the script's radius; the script's last radius */
 constexpr uint32_t kMapCenter = 0x320, kMapHeading = 0x334;
@@ -1302,6 +1305,7 @@ void map_frame(struct ppu_context* ctx)
             cellPad_host_map_claim(0);
             cellPad_host_map_up(0);
             s_map_sdisp = 0;
+            s_map_sg[0] = s_map_sg[1] = 1.0f; s_map_rise[0] = s_map_rise[1] = 0;
         }
     }
     if (up) cellPad_host_map_up(1);
@@ -1319,6 +1323,7 @@ void map_frame(struct ppu_context* ctx)
      * reads see the keys as centred (map_stick_read) */
     float kx = 0.0f, ky = 0.0f;
     const bool keys = cellPad_host_left_keys_dir(&kx, &ky) != 0;
+    s_map_input = false;
     if (gptr(disp) && (dx != 0.0f || dy != 0.0f || keys)) {
         const float r = rdf(disp + kMapRadius);
         if (r > 0.0f) {
@@ -1330,6 +1335,7 @@ void map_frame(struct ppu_context* ctx)
             const float wx = sx * sn + sy * c, wy = -sx * c + sy * sn;   /* Anthony's tests 2026-11-21 (heading pi/2): screen right = world +x, up = +y */
             wrf(disp + kMapCenter, rdf(disp + kMapCenter) + wx);
             wrf(disp + kMapCenter + 4, rdf(disp + kMapCenter + 4) + wy);
+            s_map_input = true;
             static int said;
             if (said++ < 3)
                 fprintf(stderr, "[map] direct pan: centre (%g, %g, %g) radius %g heading %g, moved (%g, %g)\n",
@@ -1406,7 +1412,40 @@ template <int I> void map_stick_read(struct ppu_context* ctx)   /* the joystick'
     float out = v * k;
     if (s_map_alt.load(std::memory_order_relaxed)) {
         if (I == 2) s_map_pad_moving = !keys && v != 0.0f;
-        if (keys) out = 0.0f;   /* the keys are the direct pan's */
+        if (!s_map_pad_moving) {
+            /* The follow stick (Anthony 2026-11-21: markers went to Cole). The script keeps its own centre -- its
+             * cursor, where a marker goes -- and moves it only by the stick, so it is steered after the view: the
+             * stick it reads points from its centre (its last send) to the view's, full past a quarter of the
+             * radius, proportional below, nothing within 0.2%. The view stays the direct pan's (no smoothing);
+             * the script's cursor catches up a moment after the mouse or the keys stop. */
+            out = 0.0f;
+            const uint32_t disp = s_map_disp.load(std::memory_order_relaxed);
+            const float r = gptr(disp) ? rdf(disp + kMapRadius) : 0.0f;
+            if (r > 0.0f && s_map_sdisp == disp) {
+                const float ex = rdf(disp + kMapCenter) - s_map_slx, ey = rdf(disp + kMapCenter + 4) - s_map_sly;
+                const float h = rdf(disp + kMapHeading), c = cosf(h), sn = sinf(h);
+                float sx = (ex * sn - ey * c), sy = (ex * c + ey * sn);   /* world -> screen (the pan's inverse) */
+                if (I == 2) {   /* once a frame: a script that runs away from the view has that axis backwards */
+                    const float e[2] = { sx, sy };
+                    for (int a = 0; a < 2; a++) {
+                        const float m = fabsf(e[a]);
+                        if (!s_map_input && m > r * 0.01f && m > s_map_elast[a] * 1.01f) {
+                            if (++s_map_rise[a] >= 10) {
+                                s_map_sg[a] = -s_map_sg[a]; s_map_rise[a] = 0;
+                                fprintf(stderr, "[map] follow stick: screen axis %c flipped (the script moved away)\n", a ? 'y' : 'x');
+                            }
+                        } else if (m < s_map_elast[a]) s_map_rise[a] = 0;
+                        s_map_elast[a] = m;
+                    }
+                }
+                const float g = 4.0f / r;
+                sx *= g * s_map_sg[0]; sy *= g * s_map_sg[1];
+                if (fabsf(ex) < r * 0.002f && fabsf(ey) < r * 0.002f) sx = sy = 0.0f;
+                const float m = sqrtf(sx * sx + sy * sy);
+                if (m > 1.0f) { sx /= m; sy /= m; }
+                out = I == 2 ? sx : I == 3 ? sy : (m > 1.0f ? 1.0f : m);
+            }
+        }
     }
     if (out == v) return;
     ctx->fpr[1] = (double)out;
