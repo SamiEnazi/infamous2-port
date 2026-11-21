@@ -3,6 +3,7 @@
 # Linux build, in this folder only (nothing is installed system-wide, no root needed).
 #   tools/setup.sh --disc <folder holding PS3_GAME> [--rpcs3 <RPCS3's folder>] [--rpcs3-bin <rpcs3 AppImage>]
 #                  [--no-rpcs3] [--eboot <decrypted EBOOT.elf>] [--jobs N] [--no-desktop] [--pgo | --no-pgo]
+#                  [--link-game | --copy-game]
 # RPCS3 is not needed: the game's update (1.01 + 1.03 + 1.04, 236 MB) and the PS3 system software (197 MB, of
 # which three firmware modules are kept) come from Sony's own servers (tools/sony_files.py), unpacked and
 # decrypted with tools/ps3tool.py (downloaded from the port's GitHub when a zip came without it).
@@ -15,24 +16,35 @@
 #   --no-rpcs3   do not look for RPCS3 at all
 #   --eboot      an already decrypted 1.04 EBOOT.elf instead
 #   --jobs       compile jobs (default: half the CPU threads, at most 8: each lifted file is large)
+#   --link-game  use your game folder where it is (game/disc is a link to it): no copy, 15 GB less on this disk; the
+#                folder (and the SD card or drive it is on) has to be there whenever you play. Nothing is ever written
+#                into it (the game's update, its HDD data, saves and settings are in this folder either way).
+#   --copy-game  copy your game folder into game/disc (the default): from then on the port needs nothing outside its
+#                folder. The choice is remembered (work/setup-game); switching to --link-game deletes the copy only
+#                when every file in it is also in your game folder with the same size.
 #   --pgo        "Optimise for this PC" (Setup.exe's checkbox; tools/setup_build.ps1 -Pgo): profile-guided
 #                optimisation trained on this PC, 10 steps instead of 8 (steps 1-6 as below):
 #                 7. translate the game, then compile a training build (instrumented: PORT_PGO=gen) -> work/port/build-train
-#                 8. train it: the game plays by itself in a window for about 9 minutes, sound off (tools/pgo_train.py)
+#                 8. train it (engine + module): a new game plays by itself in a window for about 7 minutes, sound off (tools/pgo_train.py)
 #                 9. compile the game with what it learned (PORT_PGO=use:<profile>)   10. the desktop launcher
 #                PGO never makes setup fail: when the training build, the training or the optimised compile fails, the
 #                game is compiled the normal way and the line "  pgo: not used: <why>" says why. The profile stays in
 #                work/pgo-setup (never published); an update compiles with it and trains again only when hot code
 #                changed. The choice is remembered (work/setup-pgo: ./setup.sh passes --pgo again); --no-pgo forgets it.
-#                Tests: PORT_PGO_TEST=fail:llvm|fail:trainbuild|fail:compile|stale|stopafter:<s>,
-#                PORT_PGO_KEEP_TRAIN=1 keeps the training build, PORT_PGO_TRAIN=opening|save|opening,save picks the runs.
+#                On Linux the engine is compiled here too, so the training build instruments both the engine and the
+#                game module (PORT_ENGINE_PGO=gen; Windows trains the module only: its engine comes prebuilt), and step 9
+#                compiles both with their profiles (work/pgo-setup/setup-<time>.profdata + engine-<time>.profdata).
+#                Tests: PORT_PGO_TEST=fail:llvm|fail:trainbuild|fail:enginetrain|fail:compile|stale|stopafter:<s>,
+#                PORT_PGO_KEEP_TRAIN=1 keeps the training build, PORT_PGO_TRAIN=<runs> picks the runs (tools/pgo_train.py:
+#                opening, save, street, plaza; default: see pgo_runs below), PORT_PGO_ENGINE=0 trains the module only.
 # Steps:
 #   1. check this PC and the game                 6. Vulkan headers, SDL2 headers, glslang -> deps/
 #   2. the build tools -> tools-cache/            7. translate and compile the game (15-60 min)
 #      (LLVM 22.1.8, and CMake / Ninja             -> work/port/build/Infamous2Recomp
 #      when the system has none)                   8. a desktop launcher (~/.local/share/applications)
 #      and the Python tools -> work/venv
-#   3. your game linked into game/, its update and the firmware files into game/ (RPCS3's or Sony's)
+#   3. your game copied (or linked: --link-game) into game/disc, its update and the firmware files into game/
+#      (RPCS3's or Sony's)
 #   4. the 1.04 EBOOT and the firmware modules decrypted -> eboot/EBOOT_upd104.elf, work/fw
 #   5. (the Python tools: made in step 2)
 # Needs (distribution packages): a C/C++ toolchain's headers and libraries (Debian/Ubuntu:
@@ -44,7 +56,7 @@
 # Play with tools/play.sh (or the desktop launcher).
 set -eu   # (no pipefail: 'ldconfig -p | grep -q' would fail on grep's early exit)
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-disc=""; rpcs3=""; rpcs3bin=""; eboot=""; desktop=1; norpcs3=0; pgo=0
+disc=""; rpcs3=""; rpcs3bin=""; eboot=""; desktop=1; norpcs3=0; pgo=0; gamemode=""
 jobs=$(( $(nproc) / 2 )); [ $jobs -gt 8 ] && jobs=8; [ $jobs -lt 1 ] && jobs=1
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -57,7 +69,9 @@ while [ $# -gt 0 ]; do
         --no-rpcs3) norpcs3=1 ;;
         --pgo) pgo=1 ;;
         --no-pgo) pgo=0; rm -f "$root/work/setup-pgo" ;;
-        -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+        --link-game) gamemode=link ;;
+        --copy-game) gamemode=copy ;;
+        -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
         *) echo "unknown option $1 (--help)"; exit 2 ;;
     esac
     shift
@@ -403,23 +417,57 @@ venv="$root/work/venv"
 echo "  Python tools: work/venv"
 
 # ------------------------------------------------------------------------------------------------
-step 3 "your game: the disc folder linked; the game's update and the PS3 firmware files (from RPCS3 when it has them, else from Sony's servers)"
+step 3 "your game (used where it is, or copied into game/disc); the game's update and the PS3 firmware files (from RPCS3 when it has them, else from Sony's servers)"
 game="$root/game"
 mkdir -p "$game/dev_hdd0/game" "$game/gamedata"
-# (v0.6.0) the game's files are copied INTO the port's folder, so the folder can be moved or copied anywhere and
-# still plays; an older setup's link (game/disc -> your folder) is replaced by the copy. Your folder is not changed.
+# How your game folder is used (work/setup-game remembers it; --link-game / --copy-game change it):
+#  copy (the default, v0.6.0): its files are copied INTO the port's folder, so the folder can be moved or copied anywhere
+#       and still plays; an older setup's link (game/disc -> your folder) is replaced by the copy.
+#  link: game/disc is a link to your folder (as before v0.6.0, GitHub #13): nothing is copied (15 GB less), and the folder
+#       has to be there to play. The game only reads it: what it writes (its HDD data, saves) and setup's files (the
+#       update, the firmware, the decrypted EBOOT) are in this folder in both ways. tools/play.sh finds a moved folder.
+# Your folder is never changed.
+[ -z "$gamemode" ] && gamemode="$(cat "$root/work/setup-game" 2>/dev/null || true)"
+case "$gamemode" in link|copy) ;; *) gamemode=copy ;; esac
+mkdir -p "$root/work"
+listing() { (cd "$1" && find . \( -type f -o -type l \) -printf '%P\n' 2>/dev/null | sort); }
 if [ "$(readlink -f "$disc")" = "$(readlink -f "$game/disc" 2>/dev/null)" ] && [ ! -L "$game/disc" ]; then
     echo "  your game: in game/disc"
+elif [ "$gamemode" = link ]; then
+    if [ -L "$game/disc" ] && [ "$(readlink -f "$game/disc")" = "$disc" ]; then :
+    else
+        if [ -d "$game/disc" ] && [ ! -L "$game/disc" ]; then
+            # the copy an earlier setup made: deleted only when it is the same game (the same PARAM.SFO) and every file in
+            # it is in your folder too (an interrupted copy counts as a copy); anything else in game/disc stays, setup stops
+            extra=$(comm -23 <(listing "$game/disc") <(listing "$disc") | head -n 1)
+            what=""
+            if ! cmp -s "$game/disc/PS3_GAME/PARAM.SFO" "$disc/PS3_GAME/PARAM.SFO"; then what="another game (its PARAM.SFO differs from $disc)"
+            elif [ -n "$extra" ]; then what="files your game folder ($disc) does not have (e.g. $extra)"; fi
+            if [ -n "$what" ]; then
+                fail "game/disc holds $what, so it is not just a copy of your game folder: move game/disc out of the port's folder (or delete it yourself), or keep using it with --copy-game"
+            fi
+            gone=$(du -sb "$game/disc" 2>/dev/null | cut -f1); gone=${gone:-0}
+            rm -rf "$game/disc" || fail "deleting the old copy in game/disc failed"
+            echo "  the copy of your game in game/disc is deleted ($(( gone / 1073741824 )) GB freed): it is used from its own folder now"
+        fi
+        rm -f "$game/disc"
+        ln -s "$disc" "$game/disc" || fail "linking your game folder into game/disc failed"
+    fi
+    echo "  your game: used where it is ($disc; game/disc links to it, nothing is copied)"
+    case "$disc" in
+        /run/media/*|/media/*|/mnt/*) echo "  note: it is on a removable or separate drive: keep it in (and mounted) whenever you play" ;;
+    esac
 else
     need=$(du -sb "$disc" 2>/dev/null | cut -f1); need=${need:-0}
     have=$(df -P -B1 "$root" | awk 'NR==2{print $4}')
-    [ "$have" -gt $(( need + 3221225472 )) ] || fail "not enough free space to copy your game into the port's folder: it needs $(( need / 1073741824 + 1 )) GB and about 3 GB more"
+    [ "$have" -gt $(( need + 3221225472 )) ] || fail "not enough free space to copy your game into the port's folder: it needs $(( need / 1073741824 + 1 )) GB and about 3 GB more (or use it where it is, without a copy: --link-game)"
     [ -L "$game/disc" ] && rm -f "$game/disc"
     echo "  copying your game into the port's folder ($(( need / 1073741824 )) GB): from then on the port needs nothing outside its folder"
     mkdir -p "$game/disc"
     cp -a --no-preserve=ownership "$disc/." "$game/disc/" || fail "copying your game into game/disc failed"
     echo "  your game: game/disc (a copy of $disc)"
 fi
+echo "$gamemode" > "$root/work/setup-game"
 copy_tree() {   # copy_tree <src> <dst> <what>
     echo "  copying $3"; mkdir -p "$2"; cp -a --no-preserve=ownership "$1/." "$2/"
 }
@@ -623,31 +671,49 @@ if [ $pgo = 0 ]; then
     step 7 "translating and compiling the game (the long part: 15-60 minutes; each part says what it is and how far it is)"
     "$venv/bin/python" -I "$root/tools/rebuild.py" || fail "$buildfailed"
 else
-    # --pgo: tools/setup_build.ps1 -Pgo's steps 8-10, the same rules. rb <PORT_PGO or ""> <PORT_BUILD or ""> <rebuild.py
-    # arguments>: tools/rebuild.py with these two set for this one call; its lines go on and into $rbout
+    # --pgo: tools/setup_build.ps1 -Pgo's steps 8-10, the same rules. On Linux the ENGINE is trained too (it is compiled
+    # here anyway; Windows' comes prebuilt with the release, so Windows trains the game module only). rb <module PGO>
+    # <module dir> <engine PGO> <engine dir> <rebuild.py arguments>: tools/rebuild.py with PORT_PGO / PORT_BUILD /
+    # PORT_ENGINE_PGO / PORT_ENGINE_BUILD set for this one call ("" = unset); its lines go on and into $rbout
     rbout="$root/work/logs/setup-rebuild.out"
     rb() {
-        local mode="$1" dir="$2"; shift 2
+        local mode="$1" dir="$2" emode="$3" edir="$4"; shift 4
         ( if [ -n "$mode" ]; then export PORT_PGO="$mode"; else unset PORT_PGO; fi
           if [ -n "$dir" ]; then export PORT_BUILD="$dir"; else unset PORT_BUILD; fi
+          if [ -n "$emode" ]; then export PORT_ENGINE_PGO="$emode"; else unset PORT_ENGINE_PGO; fi
+          if [ -n "$edir" ]; then export PORT_ENGINE_BUILD="$edir"; else unset PORT_ENGINE_BUILD; fi
           exec "$venv/bin/python" -I "$root/tools/rebuild.py" "$@" ) 2>&1 | tee "$rbout"
         return "${PIPESTATUS[0]}"
     }
     unset PORT_PGO PORT_BUILD PORT_ENGINE_PGO PORT_ENGINE_BUILD
     llvmprof="$cache/llvm/bin/llvm-profdata"
     profile_ok() { "$llvmprof" show "$1" >/dev/null 2>&1; }   # this LLVM reads it
-    train="$root/work/port/build-train"
+    train="$root/work/port/build-train"; traine="$root/work/port/build-train-eng"
     pgodir="$root/work/pgo-setup"
     test="${PORT_PGO_TEST:-}"
-    why=""; used=""; pd=""; fallback=0
+    # The training runs (tools/pgo_train.py): PORT_PGO_TRAIN, else tools/pgo_scenes/runs.txt's first line (a release that
+    # ships training saves there can name its runs, e.g. "opening,street,plaza"), else the new game only: the same
+    # training for every player and every region
+    pgo_runs="opening"
+    if [ -f "$root/tools/pgo_scenes/runs.txt" ]; then
+        r="$(head -n 1 "$root/tools/pgo_scenes/runs.txt" | tr -d ' \r')"; [ -n "$r" ] && pgo_runs="$r"
+    fi
+    eng=1; [ "${PORT_PGO_ENGINE:-1}" = 0 ] && eng=0
+    why=""; used=""; pd=""; pde=""; fallback=0; ewhy=""
+    [ $eng = 0 ] && ewhy="PORT_PGO_ENGINE=0"
     [ "$test" = fail:llvm ] && llvmprof=""
     [ -n "$llvmprof" ] && [ -x "$llvmprof" ] || { llvmprof=""; why="the port's LLVM has no llvm-profdata"; }
-    kept=""
+    # the last training's profiles: work/pgo-setup/setup-<time>.profdata (the game module) and engine-<time>.profdata
+    kept=""; kepte=""
     if [ -n "$llvmprof" ]; then
         kept="$(ls -1 "$pgodir"/setup-*.profdata 2>/dev/null | sort | tail -n 1)"
         if [ -n "$kept" ] && ! profile_ok "$kept"; then
             echo "  the last training's profile ($(basename "$kept")) cannot be read by this LLVM: training again"
             rm -f "$kept"; kept=""
+        fi
+        if [ -n "$kept" ] && [ $eng = 1 ]; then
+            kepte="$pgodir/engine-${kept##*/setup-}"
+            if [ ! -f "$kepte" ] || ! profile_ok "$kepte"; then kepte=""; fi
         fi
     fi
     if [ -n "$kept" ]; then step 7 "translating the game, then compiling it with what the last training on this PC learned (15-60 minutes)"
@@ -655,18 +721,32 @@ else
     else step 7 "translating the game, then compiling a training build (the long part: 15-60 minutes)"; fi
     "$venv/bin/python" -I "$root/tools/rebuild.py" --only inputs,port,firmware,ppu,spu,jobs || fail "$buildfailed"
     if [ -n "$kept" ]; then
-        if rb "use:$kept" "" --only compile && [ -f "$root/work/port/build/libInfamous2Game.so" ]; then
+        if rb "use:$kept" "" "${kepte:+use:$kepte}" "" --only compile && [ -f "$root/work/port/build/libInfamous2Game.so" ]; then
             fallback=1
-            if ! grep -qE 'PGO WARNING|-- retrain when these are hot' "$rbout" && [ "$test" != stale ]; then
-                used="the training of $(date -r "$kept" +%F) still fits this version"
-            else echo "  hot code changed since the last training: training again (the game just built stays if that does not work)"; fi
+            if grep -qE 'PGO WARNING|-- retrain when these are hot' "$rbout" || [ "$test" = stale ]; then
+                echo "  hot code changed since the last training: training again (the game just built stays if that does not work)"
+            elif [ $eng = 1 ] && [ -z "$kepte" ]; then
+                echo "  the last training has no engine profile: training again, the engine too (the game just built stays if that does not work)"
+            else used="the training of $(date -r "$kept" +%F) still fits this version"; fi
         else echo "  compiling with the last training failed: training again"; fi
     fi
     if [ -z "$used" ] && [ -z "$why" ]; then
-        rm -f "$train/libInfamous2Game.so"   # never train an older one
+        rm -f "$train/libInfamous2Game.so" "$train/Infamous2Recomp"   # never train an older one
         echo "  compile log: work/logs/module-build-train.log"
-        if ! rb gen "$train" --only compile || [ ! -f "$train/libInfamous2Game.so" ] || [ ! -x "$train/Infamous2Recomp" ] || [ "$test" = fail:trainbuild ]; then
-            why="the training build did not compile (work/logs/module-build-train.log)"
+        tbuilt=0
+        if [ $eng = 1 ]; then   # the engine (work/port/build-train-eng) and the game module, both instrumented
+            if rb gen "$train" gen "$traine" --only compile && [ -f "$train/libInfamous2Game.so" ] && [ -x "$train/Infamous2Recomp" ] \
+               && [ "$test" != fail:enginetrain ] && [ "$test" != fail:trainbuild ]; then tbuilt=1
+            else
+                eng=0; ewhy="its training build did not compile (work/logs/compile-build-train-eng.log)"
+                echo "  the engine's training build did not compile: training the game module only"
+                rm -f "$train/Infamous2Recomp"
+            fi
+        fi
+        if [ $tbuilt = 0 ]; then
+            if ! rb gen "$train" "" "" --only compile || [ ! -f "$train/libInfamous2Game.so" ] || [ ! -x "$train/Infamous2Recomp" ] || [ "$test" = fail:trainbuild ]; then
+                why="the training build did not compile (work/logs/module-build-train.log)"
+            fi
         fi
     fi
     if [ -n "$used" ]; then step 8 "training: not needed ($used)"
@@ -675,38 +755,48 @@ else
     if [ -z "$used" ] && [ -z "$why" ]; then
         mkdir -p "$pgodir"
         # a new name every time: a profile at the same path whose content changed would not rebuild anything
-        pd="$pgodir/setup-$(date +%Y%m%d-%H%M%S).profdata"
+        stamp="$(date +%Y%m%d-%H%M%S)"; pd="$pgodir/setup-$stamp.profdata"; pde=""
+        targs=()
+        if [ $eng = 1 ]; then pde="$pgodir/engine-$stamp.profdata"; targs=(--engine-profdata "$pde"); fi
         stopafter=0; case "$test" in stopafter:*) stopafter="${test#stopafter:}" ;; esac
-        "$venv/bin/python" -I "$root/tools/pgo_train.py" --exe "$train/Infamous2Recomp" --profdata "$pd" --llvm-profdata "$llvmprof" \
-            --runs "${PORT_PGO_TRAIN:-opening,save}" --stop-after "$stopafter" 2>&1 | tee "$root/work/logs/pgo-train.log"
+        "$venv/bin/python" -I "$root/tools/pgo_train.py" --exe "$train/Infamous2Recomp" --profdata "$pd" ${targs[@]+"${targs[@]}"} \
+            --llvm-profdata "$llvmprof" --runs "${PORT_PGO_TRAIN:-$pgo_runs}" --stop-after "$stopafter" 2>&1 | tee "$root/work/logs/pgo-train.log"
         if [ "${PIPESTATUS[0]}" != 0 ] || [ ! -f "$pd" ]; then
             w="$(sed -n 's/^ *why: *//p' "$root/work/logs/pgo-train.log" | tail -n 1)"
             why="the training run gave nothing usable: ${w:-see the lines above}"
-            rm -f "$pd"; pd=""
+            rm -f "$pd" "$pde"; pd=""; pde=""
+        elif [ -n "$pde" ] && [ ! -f "$pde" ]; then
+            w="$(sed -n 's/^ *engine: not used: *//p' "$root/work/logs/pgo-train.log" | tail -n 1)"
+            ewhy="${w:-its counters were not usable}"; pde=""
         fi
     elif [ -z "$used" ]; then echo "  skipped: $why"; fi
-    [ "${PORT_PGO_KEEP_TRAIN:-}" = 1 ] || rm -rf "$train"   # the training build is never the game
+    [ "${PORT_PGO_KEEP_TRAIN:-}" = 1 ] || rm -rf "$train" "$traine"   # the training build is never the game
     if [ -n "$used" ]; then step 9 "compiling the game, optimised for this PC: done in step 7"
     else
         if [ -n "$pd" ]; then step 9 "compiling the game, optimised for this PC"; else step 9 "compiling the game"; fi
         built=0
         if [ -n "$pd" ]; then
             echo "  compile log: work/logs/module.log"
-            if rb "use:$pd" "" --only compile && [ "$test" != fail:compile ]; then built=1; used="trained on this PC now"
-            else why="the optimised compile failed (work/logs/module.log)"; fi
+            if rb "use:$pd" "" "${pde:+use:$pde}" "" --only compile && [ "$test" != fail:compile ]; then built=1; used="trained on this PC now"
+            else why="the optimised compile failed (work/logs/module.log, work/logs/compile.log)"; fi
         fi
         if [ $built = 0 ]; then
-            if [ $fallback = 1 ] && [ -z "$pd" ]; then used="the last training, partly out of date: $why"
+            if [ $fallback = 1 ] && [ -z "$pd" ]; then used="the last training, partly out of date: $why"; pde="$kepte"
             else
                 echo "  note: Optimise for this PC did not work this time ($why): compiling the game the normal way"
                 echo "  compile log: work/logs/module.log"
-                rb "" "" --only compile || fail "$buildfailed"
+                pde=""
+                rb "" "" "" "" --only compile || fail "$buildfailed"
             fi
         fi
     fi
     if [ -n "$used" ]; then
+        [ -n "$kepte" ] && [ -z "$pde" ] && [ "$used" != "trained on this PC now" ] && pde="$kepte"
         echo "  pgo: used ($used)"
-        if [ -n "$pd" ]; then for f in "$pgodir"/setup-*.profdata; do [ "$f" = "$pd" ] || rm -f "$f"; done; fi
+        if [ -n "$pde" ]; then echo "  pgo: the engine is optimised too"
+        else echo "  pgo: the engine is compiled the normal way${ewhy:+ (its training: $ewhy)}"; fi
+        if [ -n "$pd" ]; then for f in "$pgodir"/setup-*.profdata "$pgodir"/engine-*.profdata; do
+            [ "$f" = "$pd" ] || [ "$f" = "$pde" ] || rm -f "$f"; done; fi
         if [ "$used" = "trained on this PC now" ]; then echo "used (trained on this PC on $(date +%F))"; else echo "used ($used)"; fi > "$root/work/setup-pgo"
     else
         echo "  pgo: not used: $why"
@@ -739,3 +829,4 @@ EOF
     echo "  $apps/infamous2-port.desktop"
 else echo "  skipped (--no-desktop)"; fi
 echo "== done in $(( ($(date +%s) - t0) / 60 )) min: play with tools/play.sh (or the desktop launcher). RPCS3 is not needed (the game's update and firmware files are in game/)."
+if [ -L "$game/disc" ]; then echo "  your game is used from $(readlink "$game/disc"): it has to be there whenever you play"; fi

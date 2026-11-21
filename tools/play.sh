@@ -38,10 +38,21 @@ done
 [ -x "$exe" ] || { echo "not built yet: $exe (tools/setup.sh, or python3 -I tools/rebuild.py)"; exit 1; }
 game="$root/game"
 
-# Your game folder (GitHub issue #13): game/disc is a link to it with its full path. A game folder kept
-# inside the port's folder (or beside it) keeps the OLD path in the link when the port's folder is renamed
-# or moved: the game then shows its intro logos and a black screen. Find it at the new place and link it
-# again; else say so.
+# tell <text>: said on the terminal, and in a message box when there is none (the Play launcher, the menu entry)
+tell() {
+    printf '%s\n' "$1"
+    [ -t 1 ] && return 0
+    [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || return 0
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="inFAMOUS 2" --width=560 --text="$(printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')" 2>/dev/null
+    elif command -v kdialog >/dev/null 2>&1; then kdialog --title "inFAMOUS 2" --error "$1" 2>/dev/null; fi
+    return 0
+}
+# Your game folder (GitHub issue #13): game/disc is a link to it with its full path (setup --link-game, or a setup
+# before v0.6.0; else game/disc is a copy). A game folder kept inside the port's folder (or beside it) keeps the OLD
+# path in the link when the port's folder is renamed or moved: the game then shows its intro logos and a black screen.
+# Find it at the new place and link it again; else the same game (the title the port was built for) in RPCS3's game
+# list or an Emulation/roms/ps3 folder (EmuDeck: the Deck's own storage or any SD card); else say why.
 if [ -L "$game/disc" ] && [ ! -f "$game/disc/PS3_GAME/PARAM.SFO" ]; then
     old="$(readlink "$game/disc")"; old="${old%/}"; found=""
     for base in "$root" "$(dirname "$root")"; do
@@ -52,12 +63,46 @@ if [ -L "$game/disc" ] && [ ! -f "$game/disc/PS3_GAME/PARAM.SFO" ]; then
         done
         [ -n "$found" ] && break
     done
+    # the drive it is on: /run/media/<user>/<card> (SteamOS, KDE, GNOME), /media/..., /mnt/<drive>
+    drive=""
+    case "$old" in
+        /run/media/*/*) drive="$(printf '%s' "$old" | cut -d/ -f1-5)" ;;
+        /media/*/*) drive="$(printf '%s' "$old" | cut -d/ -f1-4)" ;;
+        /mnt/*) drive="$(printf '%s' "$old" | cut -d/ -f1-3)" ;;
+    esac
+    gone_drive=0
+    if [ -n "$drive" ]; then
+        if command -v mountpoint >/dev/null 2>&1; then mountpoint -q "$drive" 2>/dev/null || gone_drive=1
+        elif [ ! -d "$drive" ]; then gone_drive=1; fi
+    fi
+    if [ -z "$found" ] && [ $gone_drive = 0 ]; then
+        title=""   # the game the port was built for: its update folder in game/dev_hdd0/game
+        for t in "$game"/dev_hdd0/game/*/USRDIR/EBOOT.BIN; do
+            t="${t%/USRDIR/EBOOT.BIN}"; t="${t##*/}"; case "$t" in *_INSTALL|"*") ;; *) title="$t" ;; esac
+        done
+        if [ -n "$title" ]; then
+            for c in $(for y in "$HOME/.config/rpcs3/games.yml" "$HOME/.var/app/net.rpcs3.RPCS3/config/rpcs3/games.yml"; do
+                           [ -f "$y" ] && sed -n "s/^$title:[[:space:]]*//p" "$y" | tr -d "\"'" | sed 's#/*$##' | tr ' ' '\001'
+                       done) "$HOME"/Emulation/roms/ps3/* /run/media/*/Emulation/roms/ps3/* /run/media/*/*/Emulation/roms/ps3/*; do
+                c="$(printf '%s' "$c" | tr '\001' ' ')"
+                if [ -f "$c/PS3_GAME/PARAM.SFO" ] && grep -qa "$title" "$c/PS3_GAME/PARAM.SFO" 2>/dev/null; then found="$(readlink -f "$c")"; break; fi
+            done
+        fi
+    fi
     if [ -n "$found" ]; then
         rm -f "$game/disc" && ln -s "$found" "$game/disc"      # the link only, never your game
         echo "Your game folder moved (it was $old): game/disc links to $found now."
+    elif [ $gone_drive = 1 ]; then
+        tell "Your game folder is on a drive that is not there now (an SD card or USB drive?):
+$old
+
+The game is used from that folder (it was not copied into the port's folder). Put the card or drive in, wait until it shows up in the file manager, then start the game again.
+
+(To keep a copy of the game in the port's folder instead: ./setup.sh --copy-game.)"
+        exit 1
     else
-        echo "Your game folder is not where it was: game/disc still points to $old, and that folder is gone."
-        echo "Move it back there, or run tools/setup.sh again with --disc <your game folder>."
+        tell "Your game folder is not where it was: game/disc points to $old, and that folder is gone.
+Move it back there, or run Install inFAMOUS 2 again (or ./setup.sh --disc <your game folder>) and choose it."
         exit 1
     fi
 fi

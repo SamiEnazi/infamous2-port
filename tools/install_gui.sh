@@ -2,10 +2,15 @@
 # The double-click installer (Linux, Steam Deck Desktop Mode): "Install inFAMOUS 2.desktop" in the port's folder runs
 # this. The same build as ./setup.sh (tools/setup.sh), in dialogs: zenity, else kdialog; in a terminal without them.
 #   1. what it does, with the checkbox "Optimise for this PC (PGO)" (on, as in Setup.exe; tools/setup.sh --pgo)
-#   2. your game folder: the one an earlier setup used or RPCS3's game list has (asked to confirm), else a folder picker
+#   2. your game folder: the one an earlier setup used or RPCS3's game list has (asked to confirm), else a folder picker;
+#      then how to use it: from where it is (the default: no copy, the folder has to stay there) or copied into this folder
 #   3. a progress window with setup's steps (Cancel stops it; everything it says is in work/logs/install.log)
 #   4. the end: "Play inFAMOUS 2.desktop" in this folder (it starts tools/play.sh), and Play now
-# Started again once the game is built: Play / Rebuild / Optimise for this PC (or Train again).
+# Started again once the game is built: Play / Rebuild / Optimise for this PC (or Train again) / Add to Steam.
+# Add to Steam (tools/steam_shortcut.py): a non-Steam shortcut that starts tools/play.sh (Game Mode), with artwork from the
+# game's own ICON0/PIC1; it only ever ADDS an entry, writes only while Steam is closed (it asks to close it), backs the
+# file up first. Tests: PORT_STEAM_ROOT=<a copy of a Steam folder>, PORT_STEAM_CMD=<a stand-in for the steam program>,
+# PORT_STEAM_TEST_RUNNING=<a file: Steam counts as running while it exists>.
 # Nothing outside this folder is changed but the menu entry setup makes (~/.local/share/applications; kept as it is
 # when it starts another folder's game).
 set -u
@@ -14,7 +19,8 @@ cd "$here" || exit 1
 title="inFAMOUS 2 Setup"
 exe="$here/work/port/build/Infamous2Recomp"
 log="$here/work/logs/install.log"
-pgo_note="about 25 minutes more, a few % faster"
+pgo_note="about 15 minutes more, 7-9 % faster on a Steam Deck"
+gb() { echo $(( ($1 + 536870912) / 1073741824 )); }   # bytes -> GB, rounded
 
 ui=tty
 if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
@@ -47,7 +53,8 @@ ask() {   # ask <text> <yes> <no>: 0 = yes
     esac
 }
 menu() {   # menu <text> <tag> <label> [<tag> <label> ...]: prints the chosen tag (the first is preselected)
-    local text="$1" on=TRUE k=on i=0 r; shift
+    local text="$1" on=TRUE k=on i=0 r h; shift
+    h=$(( 180 + 20 * $(printf '%s\n' "$text" | wc -l) + 30 * ($# / 2) )); [ $h -lt 340 ] && h=340
     local z=() kd=() tags=()
     while [ $# -ge 2 ]; do
         z+=("$on" "$1" "$2"); kd+=("$1" "$2" "$k"); tags+=("$1"); i=$((i + 1))
@@ -55,29 +62,36 @@ menu() {   # menu <text> <tag> <label> [<tag> <label> ...]: prints the chosen ta
         on=FALSE; k=off; shift 2
     done
     case $ui in
-        zenity) zenity --list --radiolist --title="$title" --text="$(esc "$text")" --width=640 --height=340 \
+        zenity) zenity --list --radiolist --title="$title" --text="$(esc "$text")" --width=700 --height=$h \
                     --column="" --column=tag --column="" --hide-column=2 --print-column=2 --hide-header "${z[@]}" 2>/dev/null ;;
         kdialog) kdialog --title "$title" --radiolist "$text" "${kd[@]}" 2>/dev/null ;;
         *) printf '%s\n' "$text" >&2; read -r -p "Choose 1-$i: " r; [ "$r" -ge 1 ] 2>/dev/null && [ "$r" -le $i ] && printf '%s\n' "${tags[$((r - 1))]}" ;;
     esac
 }
-first_screen() {   # the intro with the PGO checkbox: prints "pgo" when ticked; 1 = cancelled
+first_screen() {   # the intro with the checkboxes: prints the ticked ones ("pgo", "steam"), one a line; 1 = cancelled
     local text="This builds inFAMOUS 2 from your own copy of the game, in this folder:
 $here
 
-It takes about 15-60 minutes and about 25 GB of free space while it builds. It copies your game into
-this folder, gets its 1.04 update and the PS3 firmware files (from RPCS3 when it has them, else from
-Sony's servers) and the build tools from GitHub (about 2 GB). Nothing is installed on the system.
+It takes 15-60 minutes (about 25 on a Steam Deck) and about 10 GB of free space (25 GB if you let
+it copy your game into this folder: you choose after picking your game folder). It gets the game's
+1.04 update and the PS3 firmware files (from RPCS3 when it has them, else from Sony's servers) and
+the build tools from GitHub (about 2 GB). Nothing is installed on the system, and your game folder
+is never changed.
 
-Optimise for this PC: the game is compiled once more with what it learns while it plays by itself
-in a window for about 9 minutes (sound off; please don't touch it). On a Steam Deck that made a busy
-street 3 % faster (no change where the graphics thread sets the pace). If it fails, you still get
-the normal build." opt="Optimise for this PC (PGO): $pgo_note"
+Optimise for this PC: the game and its engine are compiled once more with what they learn while a
+new game plays by itself in a window for about 7 minutes (the opening and the tutorial on the pier;
+sound off; please don't touch it). On a Steam Deck that made the game 7-9 % faster. If it fails,
+you still get the normal build." opt="Optimise for this PC (PGO): $pgo_note" r
+    local z=(TRUE pgo "$opt") kd=(pgo "$opt" on)
+    if [ -n "$steam_users" ]; then z+=(TRUE steam "$steam_label"); kd+=(steam "$steam_label" on); fi
     case $ui in
-        zenity) zenity --list --checklist --title="$title" --text="$(esc "$text")" --width=700 --height=360 --ok-label=Install \
-                    --column="" --column=tag --column="" --hide-column=2 --print-column=2 --hide-header TRUE pgo "$opt" 2>/dev/null ;;
-        kdialog) kdialog --title "$title" --checklist "$text" pgo "$opt" on 2>/dev/null | tr -d '"' ;;
-        *) printf '\n%s\n' "$text" >&2; ask "$opt" yes no && echo pgo; return 0 ;;
+        zenity) r="$(zenity --list --checklist --title="$title" --text="$(esc "$text")" --width=700 --height=400 --ok-label=Install \
+                    --column="" --column=tag --column="" --hide-column=2 --print-column=2 --hide-header "${z[@]}" 2>/dev/null)" || return 1
+                printf '%s\n' "$r" | tr '|' '\n' ;;
+        kdialog) r="$(kdialog --title "$title" --checklist "$text" "${kd[@]}" 2>/dev/null)" || return 1
+                 printf '%s\n' "$r" | tr -d '"' | tr ' ' '\n' ;;
+        *) printf '\n%s\n' "$text" >&2; ask "$opt" yes no && echo pgo
+           [ -n "$steam_users" ] && ask "$steam_label" yes no && echo steam; return 0 ;;
     esac
 }
 pick_folder() {   # prints the folder the player picked; 1 = cancelled
@@ -235,6 +249,81 @@ EOF
 }
 play() { play_entry; cd "$here" && exec bash "$here/tools/play.sh"; }
 
+# ------------------------------------------------------------------ Add to Steam
+steam_py() { python3 -I "$here/tools/steam_shortcut.py" "$@" ${PORT_STEAM_ROOT:+--steam "$PORT_STEAM_ROOT"}; }
+steam_users="$(steam_py users 2>/dev/null)"   # "<id>\t<most recent>\t<account>\t<file>" lines; empty = no Steam here
+steam_label="Add to Steam (a shortcut to play it in Game Mode; Steam has to be closed for a moment at the end)"
+steam_exe="$here/tools/play.sh"
+steam_name=""; steam_user=""
+steam_running() {
+    if [ -n "${PORT_STEAM_TEST_RUNNING:-}" ]; then [ -e "$PORT_STEAM_TEST_RUNNING" ]; return; fi
+    pgrep -x steam >/dev/null 2>&1
+}
+entry_dialog() {   # entry_dialog <text> <default>: prints what the player typed; 1 = cancelled
+    case $ui in
+        zenity) zenity --entry --title="$title" --width=560 --text="$(esc "$1")" --entry-text="$2" 2>/dev/null ;;
+        kdialog) kdialog --title "$title" --inputbox "$1" "$2" 2>/dev/null ;;
+        *) local r; printf '\n%s\n' "$1" >&2; read -r -p "[$2]: " r; printf '%s\n' "${r:-$2}" ;;
+    esac
+}
+steam_pick_user() {   # the Steam account to add it to: the only one, else ask (the most recently logged-in one first)
+    local n m args=() id rec acc f
+    n=$(printf '%s\n' "$steam_users" | grep -c .)
+    if [ "$n" -le 1 ]; then steam_user="$(printf '%s\n' "$steam_users" | head -n 1 | cut -f1)"; return 0; fi
+    while IFS=$'\t' read -r id rec acc f; do
+        [ "$rec" = 1 ] && args=("$id" "${acc:-account $id} (last logged in)" "${args[@]}") || args+=("$id" "${acc:-account $id}")
+    done <<< "$steam_users"
+    steam_user="$(menu "This PC has $n Steam accounts. Add inFAMOUS 2 to which one?" "${args[@]}")" || return 1
+    [ -n "$steam_user" ]
+}
+steam_ask_name() {   # the name in Steam, checked against the shortcuts already there (none is ever changed); 1 = skip
+    local name="${1:-inFAMOUS 2 (PC port)}" note="" c
+    steam_pick_user || return 1
+    while :; do
+        name="$(entry_dialog "${note}The name inFAMOUS 2 gets in your Steam library:" "$name")" || return 1
+        name="$(printf '%s' "$name" | tr -d '\n\r\t' | sed 's/^ *//; s/ *$//')"
+        [ -z "$name" ] && { name="inFAMOUS 2 (PC port)"; continue; }
+        c="$(steam_py check --user "$steam_user" --name "$name" --exe "$steam_exe" 2>/dev/null)" \
+            || c="$(steam_py check --user "$steam_user" --name "$name" --exe "$steam_exe" 2>&1 >/dev/null | tail -n 1)"
+        case "$c" in
+            ok) steam_name="$name"; return 0 ;;
+            name-taken*) note="Your Steam library already has a game called \"$name\" (it stays as it is).
+This one gets another name: \"${c#*$'\t'}\", or type your own.
+
+"; name="${c#*$'\t'}" ;;
+            exe-taken*) msg info "Steam already has a shortcut that starts the game in this folder: \"${c#*$'\t'}\". Nothing is added."; return 1 ;;
+            *) msg error "Steam's shortcut list could not be read, so nothing is added to it: $c"; return 1 ;;
+        esac
+    done
+}
+steam_add() {   # adds the shortcut (Steam closed first); says what happened
+    local r out i
+    [ -n "$steam_name" ] && [ -n "$steam_user" ] || return 0
+    while steam_running; do
+        r="$(menu "Steam is running. It keeps its list of games in memory and writes it when it closes, so the new shortcut
+can only be added while Steam is closed. Nothing else in your Steam library is changed.
+
+Close Steam now? (Downloads pause and Steam's windows close; start Steam again afterwards.)" \
+                  close "Close Steam now, then add the shortcut" retry "I closed Steam myself: add it now" skip "Not now (add it later: run Install inFAMOUS 2 again)")" || r=skip
+        case "$r" in
+            close) "${PORT_STEAM_CMD:-steam}" -shutdown >/dev/null 2>&1 &
+                   for i in $(seq 1 60); do sleep 1; steam_running || break; done
+                   steam_running && msg info "Steam is still closing. Wait until it is gone, then choose \"I closed Steam myself\"." ;;
+            retry) ;;
+            *) return 0 ;;
+        esac
+    done
+    if out="$(steam_py add --user "$steam_user" --name "$steam_name" --exe "$steam_exe" --start-dir "$here" --art "$here/game/disc/PS3_GAME" 2>&1)"; then
+        printf '%s\n' "$out" >> "$log"
+        msg info "Added to Steam: \"$steam_name\". Start Steam again: it is in your library under Non-Steam, and in Game Mode.
+
+It starts $steam_exe (if you move this folder, add it again). A copy of Steam's shortcut list from before is next to it (shortcuts.vdf.bak-...)."
+    else
+        printf '%s\n' "$out" >> "$log"
+        msg error "Adding it to Steam did not work, and Steam's list was not changed: ${out##*$'\n'}"
+    fi
+}
+
 # ------------------------------------------------------------------ what to do
 built=0; [ -x "$exe" ] && [ -f "$here/work/port/build/libInfamous2Game.so" ] && built=1
 current="$(tail -n 1 "$here/port-version.txt" 2>/dev/null)"
@@ -250,20 +339,23 @@ if [ $built = 1 ]; then
     upd=""
     [ "$(cat "$here/work/setup-built-from" 2>/dev/null)" != "$current" ] && upd="A new version of the port is in this folder: Rebuild or Optimise builds it (your saves and settings stay).
 "
+    st=(); [ -n "$steam_users" ] && st=(steam "Add to Steam (a shortcut to play it in Game Mode)")
     choice="$(menu "inFAMOUS 2 is installed in this folder.
 $now
 ${upd}What now?" \
-              play "Play" rebuild "Rebuild the normal way (after an update, or to repair it)" "${opt[@]}")" || exit 0
+              play "Play" rebuild "Rebuild the normal way (after an update, or to repair it)" "${opt[@]}" ${st[@]+"${st[@]}"})" || exit 0
     case "$choice" in
         play) play ;;
+        steam) mkdir -p "$here/work/logs"; steam_ask_name && steam_add; exit 0 ;;
         rebuild) args=(--no-pgo) ;;
         pgo) args=(--pgo) ;;
-        retrain) rm -f "$here"/work/pgo-setup/setup-*.profdata; args=(--pgo) ;;
+        retrain) rm -f "$here"/work/pgo-setup/setup-*.profdata "$here"/work/pgo-setup/engine-*.profdata; args=(--pgo) ;;
         *) exit 0 ;;
     esac
 else
     sel="$(first_screen)" || exit 0
-    if [ "$sel" = pgo ]; then args=(--pgo); else args=(--no-pgo); fi
+    if printf '%s\n' "$sel" | grep -qx pgo; then args=(--pgo); else args=(--no-pgo); fi
+    if printf '%s\n' "$sel" | grep -qx steam; then steam_ask_name || true; fi
 fi
 
 # setup's menu entry (~/.local/share/applications/infamous2-port.desktop) is kept when it starts another folder's game
@@ -271,7 +363,27 @@ entry="${XDG_DATA_HOME:-$HOME/.local/share}/applications/infamous2-port.desktop"
 menu_too=", or find inFAMOUS 2 in the application menu"
 if [ -f "$entry" ] && ! grep -qxF "Path=$here" "$entry"; then args+=(--no-desktop); menu_too=""; fi
 
-disc="$(bash "$here/setup.sh" --find-disc 2>/dev/null)"
+# The game folder an earlier setup linked (game/disc -> your folder) and it is not there: an SD card or drive that is not
+# in (or not mounted yet), or a folder that was moved or deleted
+missing_disc() {
+    local where="$1" r
+    while [ -L "$here/game/disc" ] && [ ! -f "$here/game/disc/PS3_GAME/PARAM.SFO" ]; do
+        r="$(menu "Your game folder is not there:
+$where
+
+The game is used from that folder (it was not copied). If it is on an SD card or another drive,
+put it in and wait until the desktop shows it, then choose Try again. If you moved the folder,
+choose it at its new place." \
+                  retry "Try again" pick "Choose the game folder" quit "Cancel")" || return 1
+        case "$r" in retry) ;; pick) return 1 ;; *) exit 0 ;; esac
+    done
+    return 0
+}
+disc=""
+if [ -L "$here/game/disc" ] && [ ! -f "$here/game/disc/PS3_GAME/PARAM.SFO" ]; then
+    missing_disc "$(readlink "$here/game/disc")" && disc="$(readlink -f "$here/game/disc")"
+fi
+[ -z "$disc" ] && disc="$(bash "$here/setup.sh" --find-disc 2>/dev/null)"
 if [ -n "$disc" ] && [ $built = 0 ] && ! ask "Your game: $disc
 
 Use this folder?" "Use it" "Choose another"; then disc=""; fi
@@ -281,19 +393,45 @@ while [ -z "$disc" ]; do
     disc="$(game_folder "$picked")" || { msg error "There is no PS3_GAME folder in $picked. Choose the folder that holds PS3_GAME (your disc's files)."; disc=""; }
 done
 
+# How to use it (a first install, or a game folder that was never set up here): from where it is (no copy: the default)
+# or copied into this folder. Later runs keep the choice (work/setup-game).
+if [ ! -f "$here/work/setup-game" ] || [ $built = 0 ]; then
+    size=$(du -sb "$disc" 2>/dev/null | cut -f1); size=${size:-0}
+    free=$(df -P -B1 "$here" | awk 'NR==2{print $4}')
+    keep="keep the folder where it is"; keep2="it has to stay where it is"
+    case "$disc" in /run/media/*|/media/*) keep="keep the SD card in"; keep2="keep the SD card (or drive) in whenever you play" ;; esac
+    if [ "$(stat -c %d "$disc" 2>/dev/null)" = "$(stat -c %d "$here" 2>/dev/null)" ]; then same=" (it is on the same drive as this folder, so a copy only takes room)"; else same=""; fi
+    copy_label="Copy the game into this folder ($(gb "$size") GB more; then the port needs nothing outside it)"
+    [ "$free" -gt $(( size + 3221225472 + 10737418240 )) ] || copy_label="Copy the game into this folder ($(gb "$size") GB more: there is not enough free space, $(gb "$free") GB)"
+    gmode="$(menu "Your game: $disc ($(gb "$size") GB)
+
+Use the game from its folder: nothing is copied$same. The game only reads that folder (it is never
+changed): $keep2.
+Copy the game into this folder: $(gb "$size") GB more and a few minutes longer; afterwards the SD card
+can go and this folder can be moved anywhere.
+
+Your saves, settings and the game's update are kept in this folder either way." \
+               link "Use the game from its folder (saves $(gb "$size") GB; $keep)" copy "$copy_label")" || exit 0
+    case "$gmode" in link) args+=(--link-game) ;; copy) args+=(--copy-game) ;; *) exit 0 ;; esac
+fi
+
 if run_setup --disc "$disc" "${args[@]}"; then
     play_entry
-    pgo_line="$(sed -n 's/^  pgo: //p' "$log" | tail -n 1)"
+    steam_add   # (when Add to Steam was ticked: before the last window, so Steam can be started again after it)
+    pgo_line="$(sed -n 's/^  pgo: \(used (.*\|not used: .*\)$/\1/p' "$log" | tail -n 1)"
     mins="$(sed -n 's/^== done in \([0-9]*\) min.*/\1/p' "$log" | tail -n 1)"
     case "$pgo_line" in
         "used ("*) how="Ready to play, optimised for this PC." ;;
         "not used: "*) how="Ready to play. Optimise for this PC didn't work this time (${pgo_line#not used: }), so the game was built the normal way." ;;
         *) how="Ready to play." ;;
     esac
+    linked=""
+    [ -L "$here/game/disc" ] && linked="
+Your game is used from $(readlink "$here/game/disc"): it has to be there when you play."
     if ask "$how${mins:+ (setup took $mins min)}
 
 To play later: double-click \"Play inFAMOUS 2\" in this folder ($here)${menu_too}.
-In the game: F1 = FPS counter, F2 = settings." "Play now" "Close"; then play; fi
+In the game: F1 = FPS counter, F2 = settings.$linked" "Play now" "Close"; then play; fi
 else
     why="$(sed -n 's/^== FAILED: //p' "$log" | tail -n 1)"
     miss="$(sed -n 's/^  MISS  //p' "$log")"   # step 1's checks that failed

@@ -46,7 +46,53 @@ and builds it once. On the test PC the whole install took 12 to 15 minutes.
 
 ![Setup: pick your game, one progress bar, then Play](docs/setup.png)
 
-Linux and the Steam Deck: [see below](#linux-and-steam-deck). More detail on copies and keys: [FAQ](#faq).
+Linux and the Steam Deck: [the next section](#install-on-linux-and-steam-deck). More detail on copies and keys:
+[FAQ](#faq).
+
+## Install on Linux and Steam Deck
+
+On a Steam Deck, switch to Desktop Mode first. Any Linux desktop with zenity or kdialog works the same way.
+
+1. Download **`inFAMOUS2-port-v…-Linux-x64.zip`** from the [latest release](../../releases/latest) and unpack it
+   where the game should live, for example `~/Games/inFAMOUS2` (on a Deck: the internal storage, with about 10 GB
+   free).
+2. Double-click **Install inFAMOUS 2** in that folder. If the desktop asks whether to run it, choose Execute / Run.
+3. The first window says what the install does, with two boxes, both ticked: **Optimise for this PC** (see below)
+   and **Add to Steam** (shown when Steam is installed). With Add to Steam you can change the name the game gets in
+   your Steam library. Press **Install**.
+4. **Your game folder.** The one in RPCS3's game list is offered (EmuDeck: `Emulation/roms/ps3/…`, also on the SD
+   card); press **Use it**, or **Choose another** and pick the folder that holds `PS3_GAME`.
+5. **How to use it:**
+   - **Use the game from its folder** (the default): nothing is copied, which saves about 14 GB. The game only reads
+     that folder and never changes it, so it has to be there whenever you play: keep the SD card in. If it is
+     missing, Play says so; put the card back in and start again.
+   - **Copy the game into this folder**: about 14 GB more and a few minutes longer. Afterwards the port needs nothing
+     outside its folder, the SD card can go, and the folder can be moved anywhere.
+6. Wait while it builds. A window shows each step and the minutes so far. On a Steam Deck the whole install takes
+   about 25 minutes, or about 40 with Optimise (copying the game adds about 4). With Optimise, a game window opens
+   in the middle and plays by itself for about 7 minutes, with the sound off: don't touch it or close it.
+7. With Add to Steam: Steam has to be closed for a moment, because it rewrites its list of games when it exits.
+   The installer asks to close it (or waits until you have), adds the shortcut, and tells you to start Steam again.
+8. Press **Play now**. Later, double-click **Play inFAMOUS 2** in the same folder, start **inFAMOUS 2 (PC port)**
+   from the application menu, or, with Add to Steam, start it from your Steam library, also in Game Mode.
+
+**Add to Steam** adds one non-Steam game that starts this folder's `tools/play.sh`, with artwork made from your
+game's own icon and background (`PS3_GAME/ICON0.PNG`, `PIC1.PNG`). It only ever adds an entry: your other shortcuts
+are not changed, a name that is already taken gets another one (you are asked), and Steam's list is copied to
+`shortcuts.vdf.bak-<time>` first. If you move the port's folder, add it again (installer menu: Add to Steam).
+
+**Optimise for this PC** (PGO): the game is compiled once with counters, plays a new game by itself, and is compiled
+again with what it learned on your PC. The new game is the same for every copy and every region: the title, the
+opening, and the tutorial on the pier played the way it asks (look around, run to the gate, blast it open, on toward
+the disturbance). On Linux both the game code and the engine are optimised (on Windows only the game code: the engine
+comes prebuilt). On a Steam Deck that made a busy street about 9 % and a plaza about 7 % faster. If any part of
+it fails, you get the normal build. The profile stays on your PC.
+
+**DLC** is found by itself when it is installed in RPCS3. Without RPCS3, put the DLC's unlock files (`*.edat`)
+into the `dlc` folder in the port's folder: they are picked up at the next start.
+
+Double-click **Install inFAMOUS 2** again at any time to play, rebuild (after an update, or to repair it), optimise,
+or add it to Steam. Your saves and settings stay.
 
 ## What's new in v0.6.3
 
@@ -277,19 +323,12 @@ Ubuntu 22.04 with a Radeon RX 550 (RADV), and a player's Steam Deck ([#24](../..
 The port builds and runs natively on Linux, with no Wine or Proton. There is no Setup.exe on Linux: `./setup.sh`
 does the same job, and needs no RPCS3 either.
 
-**The easy way (Steam Deck Desktop Mode, or any Linux desktop):** download `inFAMOUS2-port-v…-Linux-x64.zip` from the
-[latest release](../../releases/latest), unpack it where the game should live, and double-click **Install inFAMOUS 2**
-in that folder. It asks for your game folder (or offers the one RPCS3 knows), shows the build's progress, and leaves
-**Play inFAMOUS 2** in the same folder. **Optimise for this PC** (ticked) works like Setup.exe's: the game is compiled
-once with counters, plays by itself in a window for about 9 minutes (sound off, please don't touch it), and is compiled
-again with what it learned (PGO, trained on your PC; the profile never leaves it). On a Steam Deck that added 22 minutes
-(50 instead of 28) and made a busy street 3 % faster; where the graphics thread sets the pace (a plaza) it changed
-nothing. If any part of it fails you get the normal build. Double-click **Install inFAMOUS 2** again later to play,
-rebuild, or optimise.
+**The easy way:** the installer, see [Install on Linux and Steam Deck](#install-on-linux-and-steam-deck).
 
 **In a terminal:** unpack the zip and run `./setup.sh` (`./setup.sh --pgo` = Optimise for this PC). The first time it
-asks for your game folder, gets the update and firmware from Sony's servers, copies the game into the port's folder,
-builds it, then starts it. After that, `./setup.sh` just plays. Or from git:
+asks for your game folder, gets the update and firmware from Sony's servers, copies the game into the port's folder
+(`--link-game`: uses it where it is instead, no copy), builds it, then starts it. After that, `./setup.sh` just plays.
+Or from git:
 
 ```
 git clone https://github.com/SamiEnazi/infamous2-port

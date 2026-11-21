@@ -1,0 +1,9 @@
+# ps3 pad route v1: <ms after the anchor> <24 CellPadData button words, hex>
+# zone 2 street route (= test route t2 of 2026-11-18, which the player chose): from the autosave's spawn by the pharmacy,
+# stand 4 s (the fade-in), then push the left stick half forward (ly 0x40: Cole jogs) along the busy street toward the
+# cathedral; at the tram junction he bears right into the side street, through the alley to the cabaret square and
+# ends against the pub's wall ("Bitter Hops Ale", ~guest 46 s) until 84 s; then stands. No camera input: the follow
+# camera turns with the path.
+0 0000 0000 0000 0000 0080 0080 0080 0080 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0200 018F 0200 0200
+4017 0000 0000 0000 0000 0080 0080 0080 0040 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0200 018F 0200 0200
+84017 0000 0000 0000 0000 0080 0080 0080 0080 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0200 018F 0200 0200

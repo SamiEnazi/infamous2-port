@@ -1,0 +1,47 @@
+From: karellopez <49761113+karellopez@users.noreply.github.com>
+Subject: [PATCH] PGO training: the engine and the game module instrumented together (PS3_PGO_ENGINE_FILE)
+
+Linux builds the engine on the player's PC as well, so "Optimise for this PC" there trains both binaries. Each one
+has its own profile runtime and both read LLVM_PROFILE_FILE: with PS3_PGO_ENGINE_FILE=<path> the engine writes its
+counters there (the module keeps LLVM_PROFILE_FILE), and the PS3_PGO_DUMP_AT thread writes both ("[pgo] engine
+profile written at ..." first, then the module's usual "[pgo] profile written at ..."). Only in a build made with
+PORT_ENGINE_PGO=gen (-DPORT_PGO_GEN); without the variable nothing changes. Applies on top of 0013.
+diff --git a/main.cpp b/main.cpp
+--- a/main.cpp
++++ b/main.cpp
+@@ -243,6 +243,7 @@
+ extern "C" void cellGcm_fifo_kick_wait(unsigned ms);
+ #ifdef PORT_PGO_GEN
+ extern "C" int __llvm_profile_write_file(void);   /* compiler-rt profile runtime */
++extern "C" void __llvm_profile_set_filename(const char*);
+ #endif
+ /* The game module (slim split, 2026-11-14): the lifted code is a DLL / .so the engine binds at the
+  * start of main (ps3emu/ps3_module.h); PGO training instruments the module, not the engine. */
+@@ -678,6 +679,14 @@
+      * message and an exit (PS3_GAME_MODULE=<path>: another module file). */
+     if (ps3_module_attach() != 0)
+         return 3;
++#ifdef PORT_PGO_GEN
++    /* The engine AND the game module instrumented (Linux "Optimise for this PC": the engine is built on the
++     * player's PC too). Each binary has its own profile runtime, and both read LLVM_PROFILE_FILE: the module
++     * keeps it, PS3_PGO_ENGINE_FILE=<path> is the engine's own counters file, and the dump thread below writes
++     * both. Unset: as before (the engine's counters only, at LLVM_PROFILE_FILE). */
++    const char* pgo_engine_file = getenv("PS3_PGO_ENGINE_FILE");
++    if (pgo_engine_file && *pgo_engine_file) __llvm_profile_set_filename(pgo_engine_file);
++#endif
+     /* PS3RECOMP_ENG_GPU_LIGHT: the SPU light job's pixel work moves to the GPU. */
+     infamous2_gpu_light_install();
+     infamous2_gpu_ssao_install();
+@@ -772,6 +781,12 @@
+               while (GetTickCount64() < due) Sleep(200);
+ #ifdef PORT_PGO_GEN
+               int rc = __llvm_profile_write_file();
++              const char* ef = getenv("PS3_PGO_ENGINE_FILE");
++              if (ef && *ef && ps3_module_current() && ps3_module_current()->profile_dump) {
++                  /* both instrumented: the engine's line, then the module's under the usual words */
++                  fprintf(stderr, "[pgo] engine profile written at %.0f s (rc=%d)\n", s, rc);
++                  rc = ps3_module_profile_dump();
++              }
+ #else
+               int rc = ps3_module_profile_dump();
+ #endif

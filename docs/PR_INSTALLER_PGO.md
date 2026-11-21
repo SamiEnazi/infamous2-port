@@ -1,17 +1,20 @@
 # Linux: a double-click installer and "Optimise for this PC" (PGO)
 
-DRAFT section for the pull request description (agent inst, 2026-11-21). Numbers: a clean install on a Steam Deck
-(LCD, SteamOS 3.9.5), see "Measured" below.
+DRAFT section for the pull request description (agents inst and inst2, 2026-11-21). Numbers: clean installs on a
+Steam Deck (LCD, SteamOS 3.9.5), see "Measured" below. v2 (inst2): the game used where it is (no 14 GB copy), Optimise
+trains the engine too, the new game played the way the tutorial asks, and Add to Steam.
 
 ## What a Linux / Steam Deck player gets
 
 Unpack the Linux zip anywhere and double-click **Install inFAMOUS 2** (Desktop Mode on the Deck, or any desktop with
 zenity or kdialog; without either it opens a terminal and asks there):
 
-1. **Start screen**: what the install does (time, disk space, what is downloaded) and one checkbox, **Optimise for this
-   PC (PGO)**, ticked as in Setup.exe.
+1. **Start screen**: what the install does (time, disk space, what is downloaded) and two checkboxes, both ticked:
+   **Optimise for this PC (PGO)** (as in Setup.exe) and **Add to Steam** (shown when Steam is installed; then a box
+   for the name it gets in the library).
 2. **Your game folder**: the one RPCS3's game list has (or an earlier setup used) is offered ("Use it" / "Choose
-   another"); otherwise a folder picker. Picking `PS3_GAME` itself, or the folder above the game, works too.
+   another"); otherwise a folder picker. Picking `PS3_GAME` itself, or the folder above the game, works too. Then
+   **how to use it**: from where it is (the default, no copy) or copied into the port's folder (below).
 3. **Progress window**: "Step n of 8 (10 with PGO): <setup's own words>", the current part's detail (the build's
    "progress:" lines, the training's note "The game now opens by itself for about 9 minutes ... please don't touch it")
    and the minutes so far. Cancel asks first, then stops setup and the training game; what is done stays.
@@ -20,33 +23,88 @@ zenity or kdialog; without either it opens a terminal and asks there):
    (it starts `tools/play.sh`; `%k` keeps it working when the folder is moved). On failure: the reason, the failed
    checks of step 1, and the log's path.
 5. **Started again** once built: **Play** / **Rebuild the normal way** / **Optimise for this PC** (or **Train again**
-   when it is optimised already); a newer version in the folder is pointed out.
+   when it is optimised already) / **Add to Steam**; a newer version in the folder is pointed out.
 
-No Steam shortcut is made. Nothing outside the folder changes except the menu entry `tools/setup.sh` always made, and
-not even that when it belongs to another folder's install (a second copy no longer takes over the first one's entry).
+Nothing outside the folder changes except the menu entry `tools/setup.sh` always made (and not even that when it
+belongs to another folder's install: a second copy no longer takes over the first one's entry) and, only when Add to
+Steam is ticked, one new entry in Steam's shortcut list.
 Screenshots of every window: (to attach; taken on the Deck: work/pr/installer-shots/ in the dev tree).
 
-In a terminal nothing changes for existing users: `./setup.sh` as before, plus `./setup.sh --pgo`.
+In a terminal nothing changes for existing users: `./setup.sh` as before, plus `./setup.sh --pgo` and
+`./setup.sh --link-game`.
+
+## Use the game where it is (no 14 GB copy)
+
+Since v0.6.0 setup copies the game folder into the port's folder (`game/disc`), so the port's folder can be moved or
+copied anywhere and still plays. On a Steam Deck the game is usually on the SD card (EmuDeck), which stays in, and the
+copy costs 14 GB of internal storage and 4 minutes. Nothing needs the game files to be local: the game only reads them
+(`/dev_bdvd`, `/app_home`), and everything that is written or decrypted is in the port's folder in both ways: the
+decrypted EBOOT (`eboot/`), the firmware (`work/fw`, `game/dev_flash`), the 1.04 update (`game/dev_hdd0/game/<ID>`),
+the game's own 2.4 GB HDD data (`game/dev_hdd0/game/<ID>_INSTALL`), the saves (`game/gamedata`). (The Linux setup takes
+a decrypted folder only, so no decryption output lives in the game folder either.)
+
+- `tools/setup.sh --link-game`: `game/disc` is a link to the game folder (as before v0.6.0), nothing is copied.
+  `--copy-game` = the copy (still the terminal's default). The choice is remembered (`work/setup-game`), so an update
+  keeps it. Switching from a copy to the link deletes the copy only when it is the same game (identical `PARAM.SFO`)
+  and every file in it is also in the game folder (an interrupted copy counts); anything else stops setup with a
+  message and the copy stays.
+- **The installer asks**, after the game folder: **Use the game from its folder (saves 14 GB; keep the SD card in)**
+  (the default) or **Copy the game into this folder (14 GB more; then the port needs nothing outside it)**. The copy
+  line says so when there is not enough free space. The default is the link because on a Deck the card stays in and
+  internal space is what runs out; the copy only buys moving the folder or taking the card out.
+- **A missing or moved folder** (`tools/play.sh`): the card is not in (its `/run/media/<user>/<card>` is not mounted):
+  "Your game folder is on a drive that is not there now ... put it in, then start the game again", as a message box
+  when there is no terminal (the Play launcher, the menu entry, Steam). Moved: #13's search near the port's folder,
+  then the same game (the title the port was built for) in RPCS3's game list or any `Emulation/roms/ps3` folder (home
+  or any card): linked again. Gone: "not where it was ... run Install inFAMOUS 2 again and choose it". The installer,
+  started again with the card out: "Your game folder is not there" with Try again / Choose the game folder / Cancel.
+
+## Add to Steam
+
+A second box on the installer's first screen, **Add to Steam** (shown and ticked when Steam is installed), then a box
+with the name the game gets in the Steam library ("inFAMOUS 2 (PC port)", editable). It adds one non-Steam game that
+starts the folder's `tools/play.sh` (Game Mode works: the Deck branch of play.sh starts it fullscreen), with artwork
+made from the player's own `PS3_GAME/ICON0.PNG` and `PIC1.PNG` (ffmpeg: grid 600x900 and 920x430, hero 1920x620, a
+256x256 icon). `tools/steam_shortcut.py` does the file work:
+
+- it only ADDS an entry: Steam's binary `shortcuts.vdf` is read and must write back byte for byte, or nothing is
+  written; the new entry is appended and the old file must be the start of the new one; a copy is kept as
+  `shortcuts.vdf.bak-<time>`; a picture that exists is never overwritten;
+- a name already in the library: the name box comes back with "<name> (2)" and says why; a shortcut that already
+  starts this folder: "nothing is added";
+- Steam rewrites the file when it exits, so the entry is added only while Steam is closed: the installer asks "Close
+  Steam now" (`steam -shutdown`) / "I closed Steam myself" / "Not now", and says to start Steam again;
+- several Steam accounts: it asks (the last logged-in first).
+
+Tested only on a copy of a Steam folder (`PORT_STEAM_ROOT`, a stand-in for the steam program): the real library was
+only read.
 
 ## Optimise for this PC on Linux: the Windows rules, ported
 
 `tools/setup.sh --pgo` (10 steps instead of 8) and `tools/pgo_train.py` are `setup_build.ps1 -Pgo` and
 `pgo_train.ps1` on Linux:
 
-- **Step 7**: translate, then compile a training build: `PORT_PGO=gen` into `work/port/build-train`. As on Windows only
-  the **game module** is instrumented; the engine is compiled once, normally, into `work/port/build` and copied beside
-  it. (Linux compiles its engine locally, so engine PGO is possible later; it needs both binaries' counters written by
-  the dump thread, which today writes the module's only when the engine is not instrumented.)
+- **Step 7**: translate, then compile a training build: the **game module** (`PORT_PGO=gen`, `work/port/build-train`)
+  **and the engine** (`PORT_ENGINE_PGO=gen`, `work/port/build-train-eng`), both instrumented. On Windows the engine
+  comes prebuilt with the release, so only the module is trained there; on Linux the engine is compiled on the
+  player's PC anyway, so it is trained in the same runs. patches/port 0014: each binary has its own profile runtime
+  and both read `LLVM_PROFILE_FILE`; with `PS3_PGO_ENGINE_FILE=<path>` the engine writes its own counters there and the
+  `PS3_PGO_DUMP_AT` thread writes both (only in a `PORT_ENGINE_PGO=gen` build; without the variable nothing changes).
+  If the engine's training build does not compile, the module is trained alone (the engine then compiles normally).
 - **Step 8, training** (`tools/pgo_train.py`): the training build plays by itself in a window, sound off
   (`PS3_AUDIO_VOLUME=0`), the player's keyboard, mouse and controllers off (`PS3_KBM=0 PS3_PAD_SDL=0`), the window
   title says what is going on. The same two runs and the same engine mechanisms as Windows:
-  - **a new game** (always): START every 1.5 s from the menu's log line (`load_menu_catalog`) until the opening montage
-    starts (`intro_montage`); the scripted pad (`PAD_SCRIPT`, `tools/fast_combat.steps`' 21 inputs + the looser second
-    round, the same string as `pgo_train.ps1`) starts 17.9 s after the city-falls cutscene's subtitle opens
-    (`h_jbi_cityfalls`), through the engine's `PAD_SCRIPT_WAIT` anchor file; without that line, 300 s after the montage.
-  - **the newest story save** (when a save folder has a `STATE`): the game loads it by itself; the save pad starts at
-    the engine's first world frame 40 s or more after boot (`PS3RECOMP_ENG_WORLD_MARK(_AFTER)`), ~110 s of looking,
-    walking, jumping, aiming and firing.
+  - **a new game** (the default, and on Linux the only run by default: the same for every player and every region):
+    START every 1.5 s from the menu's log line (`load_menu_catalog`) until the opening montage starts
+    (`intro_montage`); from 17.9 s after the city-falls cutscene's subtitle opens (`h_jbi_cityfalls`), the tutorial
+    is played the way it asks, section by section (see "The new game" below).
+  - **the newest story save** (`PORT_PGO_TRAIN=opening,save`; Windows' default): the game loads it by itself; the
+    save pad starts at the engine's first world frame 40 s or more after boot (`PS3RECOMP_ENG_WORLD_MARK(_AFTER)`),
+    ~110 s of looking, walking, jumping, aiming and firing.
+  - **benchmark scenes** (optional: `--runs street,plaza`, only with training saves in `tools/pgo_scenes/<run>/gamedata`,
+    which are NOT shipped): the busy street and the plaza, each a recorded walk (`tools/pgo_scenes/<run>.pad`,
+    `PS3_PAD_REPLAY` on the frame-stepped clock) from the save's first world frame. A save is for one title ID; another
+    version of the game does not list it, so the run is skipped with a note.
   - Nothing looks at the screen; everything is the game's own log lines and flag files. Each run plays on its own copy
     of the saves (`work/pgo-setup/runs/<run>/gamedata`) and of the settings file (the folder's `settings.ini`, else
     the one `play.sh` would copy in once, else none); the shader cache is the one the game uses (warmed for play).
@@ -58,16 +116,54 @@ In a terminal nothing changes for existing users: `./setup.sh` as before, plus `
     (new game: no montage / city-falls line, or under 150 s after the montage before the story; save: no world frame,
     or under 30 s in the world) is **not** merged: its profile would mark all gameplay code cold.
 - **Step 9**: `llvm-profdata merge` (from the port's own LLVM, `tools-cache/llvm/bin`) into
-  `work/pgo-setup/setup-<time>.profdata` (a new name each time), then the module is compiled with `PORT_PGO=use:<it>`.
+  `work/pgo-setup/setup-<time>.profdata` (the module) and `engine-<time>.profdata` (the engine; the same runs, the same
+  merge rule), a new name each time, then both are compiled with them (`PORT_PGO=use:`, `PORT_ENGINE_PGO=use:`). An
+  engine profile that does not work is only left out: the engine then compiles normally and the module keeps its
+  profile (`  pgo: the engine is compiled the normal way (its training: <why>)`).
 - **PGO never makes setup fail.** No `llvm-profdata`, the training build does not compile, no run reached the game,
   the merge fails, or the optimised compile fails: the game is compiled the normal way, and setup says
   `  pgo: not used: <why>` (the installer shows the why). Updates keep the profile and compile with it; when the build
   reports hot code changed since the training (the "retrain" hint), it trains again. The choice is remembered
   (`work/setup-pgo`: `./setup.sh` passes `--pgo` again on an update); `--no-pgo` forgets it. Test switches as on
-  Windows: `PORT_PGO_TEST=fail:llvm|fail:trainbuild|fail:compile|stale|stopafter:<s>`, `PORT_PGO_TRAIN`,
-  `PORT_PGO_KEEP_TRAIN=1`.
+  Windows: `PORT_PGO_TEST=fail:llvm|fail:trainbuild|fail:enginetrain|fail:compile|stale|stopafter:<s>`,
+  `PORT_PGO_TRAIN`, `PORT_PGO_KEEP_TRAIN=1`; `PORT_PGO_ENGINE=0` trains the module only.
 - **The profile never leaves the PC**: it lives in `work/` (never in git); `tools/make_release_zip_linux.py` now
   refuses `*.profdata`, `*.profraw` and `work/` the way it refuses game files.
+
+## The new game: played the way the tutorial asks
+
+The training's new game used fast_combat.steps' fixed presses (from Windows' `pgo_train.ps1`). Watched on the Deck, it
+looked random: the camera pushed during a cutscene, a walk during the "look left" prompt, 42 s of aiming into the sky
+and 6 bolts at nothing, 30 s walking into a railing, a bolt at the gangway's chain; it never reached the gate. Linux's
+trainer now plays it section by section (`Player` and `OPENING_SECTIONS` in `tools/pgo_train.py`), on `PAD_FILE`
+(closed loop: a hold is the same short command written every 0.1 s, so it lasts its seconds at any frame rate):
+
+1. **The look tutorial** ("Use the right stick to look up / left / right": the game stops at each until it is done):
+   from 3 s after Zeke's cutscene opens (its subtitle file, `h_jbi_bus`), three calm rounds of look up, back down,
+   left, back right, each pair as long as each other, so the camera ends where the game put it: along the pier.
+2. **"Head towards the disturbance"**: run down the pier toward the EMPIRE CITY arch, a step to the left off the
+   railing the run may end against, then on until the gate stops Cole (the camera turns in behind him).
+3. **"Blast open the gate"** ("Hold L1 to aim", "Press R1 to fire lightning bolts"): the gate opens when a bolt hits
+   its chain lock between the two halves, and Cole stops a little to one side: a step back, aim, and look along the
+   gate for the lock, a bolt at the middle and then at small camera turns outward (left, right, further left, ...).
+4. Through the gate, past the people running away, down the pier as it collapses (a scripted sequence), until Cole
+   climbs the post at its end.
+5. **"Shoot at the source of disturbance"** from the post: aim and fire five bolts. (The Beast rises: a ~50 s
+   cutscene.)
+6. **"Take down the Beast"**: aim and fire, strafe, jump, three times.
+
+Watched on the Deck (iteration 4, the sweep from the middle to the left): the prompts answered in turn, the run
+straight down the pier to the arch, the gate blown open at the third bolt, the run through the collapsing pier, the
+climb, the shots at the source, the Beast's cutscene, and the fight; the whole new game 422 s, about 7 minutes. The
+final version searches outward from the middle, so fewer bolts follow once the gate is open; watched again (iteration
+5): the gate open after a few bolts, the same run, climb, shots and fight; 412 s.
+
+Nothing looks at the screen: the game's log has the two cutscene marks (`h_jbi_cityfalls`, `h_jbi_bus`) and nothing
+after them up to the gate, so the later sections are timed from the end of the one before, with moves that are right
+at any frame rate. Region: the trainer depends on no title ID; its marks are file names inside the game's data
+(`load_menu_catalog`, `intro_montage`, `h_jbi_cityfalls`, `h_jbi_bus`), the same on every disc, with `PS3_LANG=en`
+pinning the language (and so the movies and timings); the 1.04 EBOOT is the same code on the tested discs. Windows'
+`pgo_train.ps1` keeps its fixed presses (not changed here).
 
 ## SteamOS 3.9: the build works on a stock Deck again
 
@@ -80,7 +176,57 @@ mirror, SHA-256 checked, 61 MB), only its C++ headers and GCC's start files and 
 game still links against and runs with the system's own libstdc++. The step-2 compiler self-test passes, and the whole
 install below ran on it.
 
-## Measured (Steam Deck LCD, SteamOS 3.9.5, a clean install from the release zip)
+## Measured v2 (Steam Deck LCD, SteamOS 3.9.5, agent inst2)
+
+A clean install from the release zip with the v2 installer, double-clicked, Optimise ticked, "Use the game from its
+folder" (the SD card), and for the measurement below all four kinds of training run in one go
+(`PORT_PGO_TRAIN=opening,save,street,plaza`, the counters kept), the Deck preset settings + the FPS overlay:
+
+| phase | wall time |
+|---|---|
+| 2 build tools | 125 s |
+| 3 your game: linked (was 250 s with the 14 GB copy) + Sony's update and firmware (433 MB) | 23 s |
+| 4-6 decrypt, glslang | 24 s |
+| 7a translating the game (ppu 644 s, spu 11 s, jobs 60 s) | 715 s |
+| 7b training build: engine (instrumented) 43 s + module (instrumented) 547 s | 590 s |
+| 8 training, four runs: new game 386 s, save 153 s, street 147 s, plaza 161 s | 850 s |
+| 9 optimised compile: engine 37 s + module 513 s | 550 s |
+| **whole install** | **47.9 min** |
+
+With the default training (the new game only, ~400 s) that is about **40 minutes**; the normal way (no Optimise) about
+24 minutes (the translation, the engine and a normal module, 469 s). Training the engine as well costs about 1.3
+minutes (its instrumented and its optimised compile; the normal build compiles it once too); the instrumented engine
+makes the training game slower but not longer (its sections are timed). Disk: 9.1 GB after the install with the game
+used from the card (tools-cache 4.9 GB, the game's HDD data 2.4 GB; here the two training builds were kept for the
+measurement, ~2 GB, normally deleted) instead of 23 GB with the copy.
+
+**Which training** (each against the same build without PGO; engine AND module trained in every variant; Deck preset,
+GPU 1100 MHz, frame-stepped guest clock, FPS overlay on; rotated rounds, every build once per scene per round, the
+order rotated and reversed; abseq's rules on the pairs with the no-PGO run of the same round):
+
+| training (engine + module trained in each) | quick street, guest 4-20 s | plaza, guest 16-100 s | training time |
+|---|---|---|---|
+| none (the normal build) | 37.06 fps (main 23.62 ms, RSX 22.24 ms) | 40.17 fps (main 23.11, RSX 22.77) | |
+| **(a') the new game only** (the default) | 40.28 fps, **+8.71 % (SE 0.49, 6 pairs)** (main 21.64, RSX 19.37) | 43.10 fps, **+7.31 % (SE 0.95, 6)** (main 21.48, RSX 20.24) | one run, 399 s |
+| (b) our benchmark scenes: the street and the plaza (training saves) | 40.37 fps, +8.94 % (SE 0.62, 6) | 43.15 fps, +7.40 % (SE 0.57, 5) | two runs, 308 s |
+| (c) all four: the new game (the old fixed script), the newest save, street, plaza | 40.03 fps, +8.02 % (SE 0.57, 6) | 43.13 fps, +7.33 % (SE 0.54, 5) | four runs, 850 s |
+| (b) against (a') | +0.21 % (SE 0.49): no difference shown | +0.64 % (SE 0.97): no difference shown | |
+
+All accepted by abseq's rules against no PGO (ACCEPT at 14-18 SE on the street, 8-14 SE at the plaza); between the
+variants nothing reaches 2 SE. Two plaza runs went another way (draws 6385 and 6978 against a median of 8281: the
+camera or the route differed; b round 2, c round 5) and are left out with their pairs, by the rule set before the
+batch (draws more than 10 % off the scene's median). The (a') run is the tutorial as played before the gate sweep
+(it stood at the closed gate; see "The new game"), the (c) new game the old fixed presses.
+
+So training the engine as well is what counts: the player-trained module alone gave +3.05 % on the street and +0.56 %
+at the plaza (v1, below); with the engine, +8.7 % and +7.3 %. The RSX (graphics) thread, engine code, is 2.5-2.9 ms a
+frame faster, the main thread 1.6-2.0 ms. And the new game alone does as well as training on the very scenes measured:
+(b) is +0.2 % / +0.6 % over (a') with SEs of 0.5 / 1.0, so (a') leaves at most about 1 % (street) to 2.5 % (plaza) on
+the table (the 95 % bounds), and needs no save, which is why it is the default: every player gets the same training,
+whatever their copy's region. A training save is for one title ID (the street save is BCUS98125's; an EU game does not
+list it and the run is skipped).
+
+## Measured v1 (Steam Deck LCD, SteamOS 3.9.5, a clean install from the release zip)
 
 A clean install from the release zip, double-clicked as a player would, Optimise ticked, the game folder on the SD card
 (found in RPCS3's list), the player's four saves copied into the new folder first (so the save run had a save), and the
@@ -121,6 +267,23 @@ step for the plaza-type scenes (it needs the dump thread to write both binaries'
 
 ## Checked on the Deck
 
+v2 (agent inst2):
+
+- A clean install from the release zip with the new installer (`kioclient exec`, the dialogs answered by a test double,
+  no input sent): Optimise + "Use the game from its folder": `game/disc` -> the SD card folder, step 3 in seconds,
+  the engine and the module trained in the same runs (each run's engine counters 1.2 MB, written every 40 s next to
+  the module's), both profiles used (the engine's build: 2 functions "changed since the profile" = `main` and the dump
+  thread's lambda, which differ in the instrumented build only; counts 55 and 5).
+- The no-copy paths: setup's copy -> link -> remembered link -> copy, the refusals (another `PARAM.SFO`, a file the
+  game folder lacks) and an interrupted copy; play.sh with the card "out" (a link into an unmounted
+  `/run/media/deck/<card>`: the message box), a renamed folder on the card and a deleted folder in /home (re-linked to
+  the same game from RPCS3's list), and a folder that is gone with no copy anywhere (the message box).
+- Add to Steam on a copy of a Steam folder (the real library only read): the guard saw the player's own
+  "inFAMOUS 2 (PC port)" entry by name and by program; the copy got one more entry, the old file a byte-for-byte
+  prefix of the new one, the backup, the artwork; the installer's flow with a stand-in for `steam -shutdown`.
+
+v1 (agent inst):
+
 - The whole flow above, launched the way Dolphin does (`kioclient exec`), with the player's saves copied in: 50.5 min,
   both training runs used, "every compiled function matched its profile".
 - **Rebuild the normal way** from the installer's menu: 20 min, the other install's menu entry untouched.
@@ -137,6 +300,24 @@ step for the plaza-type scenes (it needs the dump thread to write both binaries'
 - kdialog's progress window through qdbus6 (value, label, cancel, close); zenity 3.44 and kdialog 26.04 on SteamOS.
 
 ## Files
+
+v2:
+
+- `tools/setup.sh`: `--link-game` / `--copy-game` (step 3), the engine trained and used with the module (step 7-9),
+  the default run list (the new game; `tools/pgo_scenes/runs.txt` can name others).
+- `setup.sh`: a remembered link whose folder is gone is said before it asks; `--link-game` / `--copy-game` in the help.
+- `tools/install_gui.sh`: the game folder choice (link / copy), the missing-folder dialog, Add to Steam (checkbox, name
+  box, Steam closed for the write, a menu item later).
+- `tools/steam_shortcut.py` (new): users / check / add for Steam's binary `shortcuts.vdf`, artwork with ffmpeg.
+- `tools/play.sh`: the missing / moved game folder (the card not in, re-link by title), message boxes without a terminal.
+- `tools/pgo_train.py`: `--engine-profdata` (the engine's counters), the `Player` and `OPENING_SECTIONS` (the tutorial as
+  asked), the optional scene runs (`--runs street,plaza`, `--scene-dir`), no close at a counters write, test switches
+  `PORT_PGO_KEEP_RAW` / `PORT_PGO_KEEP_RUN`.
+- `patches/port/0014-pgo-engine-and-module-counters.patch` (new): `PS3_PGO_ENGINE_FILE`.
+- `tools/pgo_scenes/` (new): the two recorded walks and a README; no saves.
+- `README.md`: "Install on Linux and Steam Deck" right after the Windows steps; the Linux section points to it.
+
+v1:
 
 - `Install inFAMOUS 2.desktop` (new, executable): runs `tools/install_gui.sh` through `%k`.
 - `tools/install_gui.sh` (new): the installer (zenity, kdialog, terminal).

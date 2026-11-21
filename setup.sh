@@ -5,7 +5,9 @@
 #   ./setup.sh --setup            build (or rebuild after an update) without playing
 #   ./setup.sh --play [...]       play only (tools/play.sh and its options)
 #   ./setup.sh --disc <folder> [tools/setup.sh options]   say where your game folder is (the one holding PS3_GAME)
-#   ./setup.sh --pgo              build "optimised for this PC": the game trains itself in a window for about 9 minutes
+#   ./setup.sh --link-game        use your game folder where it is (no copy, 15 GB less; it has to be there to play)
+#   ./setup.sh --copy-game        copy it into the port's folder (the default); the choice is remembered
+#   ./setup.sh --pgo              build "optimised for this PC": a new game plays itself in a window for about 7 minutes
 #                                 (about 25 minutes more in all; tools/setup.sh --pgo). Remembered for later builds
 #                                 (updates); --no-pgo builds the normal way again
 #   ./setup.sh --find-disc        print the game folder setup would use (an earlier setup's, or RPCS3's game list)
@@ -86,7 +88,10 @@ build() {
     if [ $have_disc = 0 ]; then
         local disc=""
         # the folder an earlier setup linked (game/disc) is used again
-        if [ -f "$here/game/disc/PS3_GAME/PARAM.SFO" ]; then disc="$(readlink -f "$here/game/disc")"; fi
+        if [ -f "$here/game/disc/PS3_GAME/PARAM.SFO" ]; then disc="$(readlink -f "$here/game/disc")"
+        elif [ -L "$here/game/disc" ]; then
+            say "Your game folder is not there: $(readlink "$here/game/disc") (the game is used from it, not copied: is it on an SD card or drive that is not in?). Put it in and run setup again, or give the folder." >&2
+        fi
         [ -z "$disc" ] && disc="$(find_disc)"
         [ -z "$disc" ] && disc="$(ask_disc)"
         if [ -z "$disc" ]; then
@@ -145,7 +150,7 @@ case "${1:-}" in
     --find-disc)
         if [ -f "$here/game/disc/PS3_GAME/PARAM.SFO" ]; then readlink -f "$here/game/disc"; exit 0; fi
         find_disc; exit ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     "") ;;
     *) mode="setup-then-play" ;;   # tools/setup.sh options, e.g. --disc <folder>
 esac
