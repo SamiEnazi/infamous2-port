@@ -809,6 +809,7 @@ struct Mod {
     bool for_game = false;
     bool live = false;                   /* mod.json "live": true -- patched in memory, on and off at once (live_*) */
     std::vector<std::pair<int, std::string>> levels;   /* a live mod's "karma_levels": karma level (0-6) -> its folder */
+    int dark = 0;                        /* a live mod's "dark_bolts": bit r = karma level r, 0x80 = always */
     std::vector<Module> modules;
     bool on = true;                      /* the saved choice */
     bool have_pick = false;
@@ -1284,6 +1285,13 @@ static std::vector<Mod> scan()
                 for (size_t i = 0; i < kj->ok.size(); i++)
                     for (int q = 0; q < 7; q++)
                         if (ieq(kj->ok[i], kKarmaLevels[q]) && kj->ov[i].t == 3 && !kj->ov[i].s.empty()) m.levels.push_back({ q, kj->ov[i].s });
+        if (const J* dj = j.get("dark_bolts")) {   /* true, or the karma levels it is for */
+            if (dj->t == 1 && dj->s == "true") m.dark = 0x80;
+            else if (dj->t == 4)
+                for (const J& a : dj->a)
+                    for (int q = 0; q < 7; q++)
+                        if (a.t == 3 && ieq(a.s, kKarmaLevels[q])) m.dark |= 1 << q;
+        }
         auto it = st.find(lower(folder));
         if (it != st.end()) {
             if (it->second.have_on) m.on = it->second.on;
@@ -1750,6 +1758,7 @@ struct LiveMod {
     std::string key, name;
     std::vector<LivePair> pairs;
     std::vector<int> var;               /* "karma_levels": karma level (0-6) -> variant; empty: one variant (1) */
+    int dark = 0;                       /* "dark_bolts" (Mod::dark) */
     bool want = false, built = false, building = false;
     int revert = 0;                     /* passes left that write the originals back */
     int target = 0;                     /* the variant the last pass put in (0: the game's own) */
@@ -1922,7 +1931,7 @@ static void live_sync_locked()
             if (L.built && (L.want || L.revert)) { LiveMod old = L; old.want = false; old.revert = 3; lv.retired.push_back(std::move(old)); }
             L = LiveMod();
         }
-        L.key = key; L.name = m.name;
+        L.key = key; L.name = m.name; L.dark = m.dark;
         const bool want = ok && m.on && use;
         if (L.want && !want) L.revert = 3;
         if (want) L.revert = 0;
@@ -1933,6 +1942,31 @@ static void live_sync_locked()
             kv.second.want = false;
             if (!kv.second.revert) kv.second.revert = 3;
         }
+}
+
+/* "dark_bolts": the arcs' dark shader, as the Black lightning cheat draws them (cheats.cpp sets the hook) */
+extern "C" void (*g_mods_dark_bolts_hook)(int on);
+void (*g_mods_dark_bolts_hook)(int on) = nullptr;
+
+static bool live_dark_for(const LiveMod& m, int rank)
+{
+    return m.want && m.built && m.err.empty() && !m.pairs.empty() &&
+           ((m.dark & 0x80) || (rank >= 0 && ((m.dark >> rank) & 1)));
+}
+
+static void live_dark_update()
+{
+    static int last = -1;
+    int on = 0;
+    {
+        std::lock_guard<std::mutex> lk(lv.mx);
+        for (auto& kv : lv.mods) if (live_dark_for(kv.second, lv.rank)) on = 1;
+    }
+    if (on != last && g_mods_dark_bolts_hook) {
+        g_mods_dark_bolts_hook(on);
+        fprintf(stderr, "[mods] live: dark bolts %s\n", on ? "on" : "off");
+        last = on;
+    }
 }
 
 #ifdef _WIN32
@@ -2091,7 +2125,7 @@ static void live_worker()
                 const auto now = std::chrono::steady_clock::now();
                 if (now >= until) break;
                 bool lev = false;
-                for (auto& kv : lv.mods) if (kv.second.want && kv.second.built && !kv.second.var.empty()) lev = true;
+                for (auto& kv : lv.mods) if (kv.second.want && kv.second.built && (!kv.second.var.empty() || (kv.second.dark & 0x7F))) lev = true;
                 const auto step = lev ? (std::min)(until, now + std::chrono::milliseconds(500)) : until;
                 lv.cv.wait_until(lk, step, [] { return lv.kick; });
                 if (lev && !lv.kick) {
@@ -2148,6 +2182,7 @@ static void live_worker()
             }
         }
         live_pass();
+        live_dark_update();
     }
 }
 
@@ -2176,9 +2211,10 @@ static std::string live_status_locked(const Mod& m)
     if (!L || !L->built) return "On: getting ready (a few seconds after the game starts)";
     if (!L->err.empty()) return "Not used: " + L->err;
     std::string lvl;
-    if (!L->var.empty()) lvl = lv.rank >= 0 ? std::string(" (karma level: ") + kKarmaLevels[lv.rank] + ")" : " (karma level not known yet)";
+    if (!L->var.empty() || (L->dark & 0x7F)) lvl = lv.rank >= 0 ? std::string(" (karma level: ") + kKarmaLevels[lv.rank] + ")" : " (karma level not known yet)";
     if (!L->in_place) return "On" + lvl + ": waiting for the game to load what it changes";
-    return "On now" + lvl + ": " + std::to_string(L->in_place) + " place(s) in memory changed";
+    return "On now" + lvl + ": " + std::to_string(L->in_place) + " place(s) in memory changed" +
+           (live_dark_for(*L, lv.rank) ? ", black bolts" : "");
 }
 
 static void init_body();

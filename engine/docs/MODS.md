@@ -209,6 +209,16 @@ The worker reads the karma level every half second the way the game finds it
 it changes. A level the mod does not name uses the mod's own `files/`, which
 is also what the Manager and older ports apply at load.
 
+### Black bolts
+
+`"dark_bolts": true` (or a list of karma levels, e.g. `["Infamous", "Outlaw"]`)
+draws Cole's electric arcs with the game's own dark (evil) lightning shader
+while the mod is on: a black core with the outside colour of the evil bolt
+textures. It is the same draw swap as Cheats > Black lightning
+(`cheats/cheats.cpp`, `hook_arc_draw`), switched by the mod. Additive
+glows cannot be black (black adds no light), so a mod made for black
+bolts should give the glows' cores the outside colour instead.
+
 ## How it works
 
 The game reads a file from its PSARC archives when one of them has it, and
