@@ -1753,7 +1753,12 @@ extern "C" { extern uint8_t* vm_base; extern void (*g_vm_host_io_hook)(uint32_t 
 
 static double g_live_last_ms = 0;   /* the last pass (the worker paces itself by it) */
 
-struct LivePair { std::vector<Bytes> v; std::vector<uint32_t> k; };   /* v[0]: the game's bytes; v[i]: variant i's (k: their keys) */
+/* v[0]: the game's bytes; v[i]: variant i's (k: their keys). weak[i]: v[i] is too plain to be looked for (zeros,
+ * one flat colour: it is everywhere in memory, so a search for it would write into other things). Such a pair is
+ * placed from the other windows of its texture or packed file (grp; off = its offset in the game's file): where
+ * one of them is found, this one is at the same distance. places: where it was found (kept across passes). */
+struct LivePair { std::vector<Bytes> v; std::vector<uint32_t> k; std::vector<char> weak; bool any_weak = false;
+                  uint32_t grp = 0; uint64_t off = 0; bool grp_weak = false; std::vector<uint64_t> places; };
 struct LiveMod {
     std::string key, name;
     std::vector<LivePair> pairs;
@@ -1775,6 +1780,16 @@ static struct {
     bool started = false, kick = false;
     int rank = -1;                         /* Cole's karma level as last read (-1: not known) */
 } lv;
+
+/* Too plain to look for: fewer than 4 different byte values in the whole window (a black or zeroed run of
+ * texture blocks, an empty table) -- such bytes are found all over the guest's memory. */
+static bool live_weak(const Bytes& b)
+{
+    bool seen[256] = {};
+    int n = 0;
+    for (uint8_t c : b) if (!seen[c]) { seen[c] = true; if (++n >= 4) return false; }
+    return true;
+}
 
 static uint32_t live_key_at(const Bytes& b)
 {
@@ -1820,7 +1835,8 @@ static void live_apply(const LiveDiff& d, size_t a, Bytes& w)
  * file o (dm); a window may reach out to [lim0, lim1) (the texture or packed
  * file) to be 32 bytes long. */
 static void live_windows(const Bytes& o, const std::vector<bool>& dm, const std::vector<LiveDiff>& ds,
-                         size_t r0, size_t r1, size_t lim0, size_t lim1, std::vector<LivePair>& out, std::set<Bytes>& seen)
+                         size_t r0, size_t r1, size_t lim0, size_t lim1, std::vector<LivePair>& out, std::set<Bytes>& seen,
+                         uint32_t grp)
 {
     r1 = (std::min)(r1, o.size()); lim1 = (std::min)(lim1, o.size());
     size_t i = r0;
@@ -1834,10 +1850,15 @@ static void live_windows(const Bytes& o, const std::vector<bool>& dm, const std:
         while (b < o.size() && dm[b]) b++;
         b = (std::min)((b + 3) & ~(size_t)3, o.size());
         LivePair p;
+        p.grp = grp; p.off = a;
         p.v.emplace_back(o.begin() + (ptrdiff_t)a, o.begin() + (ptrdiff_t)b);
         if (p.v[0].size() >= 8 && seen.insert(p.v[0]).second) {
             for (const LiveDiff& d : ds) { Bytes w = p.v[0]; live_apply(d, a, w); p.v.push_back(std::move(w)); }
-            for (const Bytes& x : p.v) p.k.push_back(live_key_at(x));
+            for (const Bytes& x : p.v) {
+                p.k.push_back(live_key_at(x));
+                p.weak.push_back(live_weak(x) ? 1 : 0);
+                if (p.weak.back()) p.any_weak = true;
+            }
             out.push_back(std::move(p));
         }
         i = b;
@@ -1864,6 +1885,7 @@ static bool live_build(const Mod& m, std::vector<LivePair>& out, std::vector<int
     for (const Mod& x : vm) targets.insert(x.targets.begin(), x.targets.end());
     Arcs arcs;
     std::set<Bytes> seen;
+    uint32_t grp = 0;   /* one per texture / packed file range (LivePair::grp) */
     for (const std::string& t : targets) {
         int idx = -1;
         Psarc* arc = arcs.find(t, idx);
@@ -1906,9 +1928,12 @@ static bool live_build(const Mod& m, std::vector<LivePair>& out, std::vector<int
                 }
             }
         }
-        for (const auto& r : rs) live_windows(o, dm, ds, r[0], r[1], r[2], r[3], out, seen);
+        for (const auto& r : rs) live_windows(o, dm, ds, r[0], r[1], r[2], r[3], out, seen, ++grp);
     }
     if (out.empty()) { err = "its patches change nothing in the game's files"; return false; }
+    std::set<uint32_t> wg;
+    for (const LivePair& p : out) if (p.any_weak) wg.insert(p.grp);
+    for (LivePair& p : out) p.grp_weak = wg.count(p.grp) != 0;
     return true;
 }
 
@@ -1997,6 +2022,7 @@ static void live_pass()
     std::vector<uint64_t> bloom((size_t)1 << 18, 0);   /* 2^24 bits */
     auto hsh = [](uint64_t v) { return (uint32_t)((v * 0x9E3779B97F4A7C15ull) >> 40); };
     auto add = [&](LivePair& p, LiveMod& m, int from, int to) {
+        if (p.weak[(size_t)from]) return;   /* never looked for (see LivePair) */
         uint64_t v;
         memcpy(&v, p.v[(size_t)from].data() + p.k[(size_t)from], 8);
         tab.insert({ v, LiveEnt{ &p, &m, from, to } });
@@ -2008,6 +2034,8 @@ static void live_pass()
     for (auto& kv : lv.mods) ms.push_back(&kv.second);
     for (LiveMod& m : lv.retired) ms.push_back(&m);
     bool any = false;
+    std::vector<std::pair<LiveMod*, int>> act;   /* the mods this pass serves, and the variant each puts in */
+    std::map<std::pair<const LiveMod*, uint32_t>, std::vector<uint64_t>> bases;   /* where a group's file starts */
     for (LiveMod* m : ms) {
         if (!m->built) continue;
         m->tmp = 0;
@@ -2018,6 +2046,7 @@ static void live_pass()
         else continue;
         m->target = t;
         any = true;
+        act.push_back({ m, t });
         for (LivePair& p : m->pairs) {
             const Bytes& w = p.v[(size_t)t];
             for (size_t i = 0; i < p.v.size(); i++) {
@@ -2074,6 +2103,15 @@ static void live_pass()
                             SIZE_T g2 = 0;
                             if (!ReadProcessMemory(me, vm_base + at, cur.data(), cur.size(), &g2) || g2 != cur.size()) continue;
                             if (memcmp(cur.data(), f.data(), f.size())) continue;
+                            if (e.p->any_weak) {   /* remembered: it may be found by its plain form only later */
+                                auto& pl = e.p->places;
+                                if (std::find(pl.begin(), pl.end(), at) == pl.end() && pl.size() < 16) pl.push_back(at);
+                            }
+                            if (e.p->grp_weak && at >= e.p->off) {   /* its group's plain windows are placed from here */
+                                auto& bl = bases[{ e.m, e.p->grp }];
+                                const uint64_t base = at - e.p->off;
+                                if (std::find(bl.begin(), bl.end(), base) == bl.end() && bl.size() < 16) bl.push_back(base);
+                            }
                             if (e.from == e.to) { e.m->tmp++; continue; }
                             const Bytes& w = e.p->v[(size_t)e.to];
                             if (io) io((uint32_t)at, (uint32_t)w.size(), 0);
@@ -2087,6 +2125,46 @@ static void live_pass()
                 }
             }
             ea = re;
+        }
+    }
+    /* The pairs with a plain form: at the places they were found, whatever form they hold now becomes the wanted
+     * one; a place that holds none of their forms any more (the memory went to something else) is forgotten. */
+    for (auto& mt : act) {
+        LiveMod* m = mt.first;
+        const int t = mt.second;
+        for (LivePair& p : m->pairs) {
+            if (!p.any_weak) continue;
+            const Bytes& w = p.v[(size_t)t];
+            auto bi = bases.find({ m, p.grp });
+            if (bi != bases.end())
+                for (uint64_t base : bi->second) {
+                    const uint64_t at = base + p.off;
+                    if (std::find(p.places.begin(), p.places.end(), at) != p.places.end() || p.places.size() >= 16) continue;
+                    cur.resize(w.size());
+                    SIZE_T g2 = 0;
+                    if (!ReadProcessMemory(me, vm_base + at, cur.data(), cur.size(), &g2) || g2 != cur.size()) continue;
+                    for (const Bytes& x : p.v)
+                        if (x.size() == cur.size() && !memcmp(cur.data(), x.data(), x.size())) { p.places.push_back(at); break; }
+                }
+            for (size_t j = 0; j < p.places.size();) {
+                const uint64_t at = p.places[j];
+                cur.resize(w.size());
+                SIZE_T g2 = 0;
+                if (!ReadProcessMemory(me, vm_base + at, cur.data(), cur.size(), &g2) || g2 != cur.size()) {
+                    p.places.erase(p.places.begin() + (ptrdiff_t)j);
+                    continue;
+                }
+                if (!memcmp(cur.data(), w.data(), w.size())) { if (t && p.weak[(size_t)t]) m->tmp++; j++; continue; }
+                bool known = false;
+                for (const Bytes& x : p.v) if (x.size() == cur.size() && !memcmp(cur.data(), x.data(), x.size())) known = true;
+                if (!known) { p.places.erase(p.places.begin() + (ptrdiff_t)j); continue; }
+                if (io) io((uint32_t)at, (uint32_t)w.size(), 0);
+                SIZE_T put = 0;
+                const bool okw = WriteProcessMemory(me, vm_base + at, w.data(), w.size(), &put) && put == w.size();
+                if (io) io((uint32_t)at, (uint32_t)w.size(), 1);
+                if (okw) { wrote++; m->wrote++; if (t) m->tmp++; }
+                j++;
+            }
         }
     }
     lk.lock();
