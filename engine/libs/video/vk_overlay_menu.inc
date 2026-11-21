@@ -731,11 +731,12 @@ static void page_mods(Rows& R)
         const bool who = m.author[0] && strcmp(m.author, "unknown");
         std::string by = sfmt("%s%s%s%s", ver ? "v" : "", ver ? m.version : "", who ? (ver ? " by " : "By ") : "", who ? m.author : "");
         const bool good = m.active && m.on && m.next;
-        const bool bad = !m.for_game || !strncmp(m.status, "Not used", 8) || (m.on && !m.next);
+        const bool bad = !m.for_game || !strncmp(m.status, "Not used", 8) || (m.on && !m.next && !m.live);
         MRow& r = mrow_toggle(R, ("mod:" + std::string(m.folder)).c_str(), m.name, m.on != 0, [i](bool on) { ps3_game_mods_set_on(i, on ? 1 : 0); });
         r.d(by.empty() ? sfmt("Folder: %s", m.folder) : by).st(m.status, bad).off(!m.for_game)
-         .wh((m.on != 0) != (m.active != 0) ? WH_PENDING : WH_RESTART);
-        r.nt(sfmt("%d file(s), %d texture patch(es), %d xpps patch(es)%s", m.n_files, m.n_tex, m.n_xpps, good ? ", in use now" : ""));
+         .wh(m.live ? WH_INSTANT : (m.on != 0) != (m.active != 0) ? WH_PENDING : WH_RESTART);
+        if (m.live) r.nt(sfmt("Live mod: %d texture patch(es), %d xpps patch(es), on and off at once", m.n_tex, m.n_xpps));
+        else r.nt(sfmt("%d file(s), %d texture patch(es), %d xpps patch(es)%s", m.n_files, m.n_tex, m.n_xpps, good ? ", in use now" : ""));
         r.pic = pic_for(i, m);
         if (m.clash && m.on)
             mrow_action(R, ("prefer:" + std::string(m.folder)).c_str(), "Use this one instead", "Use", [i] { ps3_game_mods_prefer(i); })

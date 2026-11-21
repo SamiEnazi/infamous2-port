@@ -86,7 +86,10 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <condition_variable>
+#include <unordered_map>
 #include <tuple>
+#include <array>
 #include <vector>
 #include <ctype.h>
 #include "ps3emu/ps3_game_mods.h"
@@ -798,10 +801,15 @@ struct Module { std::string id, name, group_id, group_name; std::vector<std::str
 struct Part { std::string path, target; };                         /* a mod file and the game file it changes (lower case) */
 struct Tex : Part { uint32_t off = 0; int w = 0, h = 0, mips = 0; std::string fmt, name; };
 struct Xp : Part { int index = 0; uint32_t abs = 0, choff = 0, len = 0; bool chunk = false; std::string name; };
+/* Cole's karma levels, as the game orders them (its rank table, live_karma_level) */
+static const char* const kKarmaLevels[7] = { "Infamous", "Outlaw", "Thug", "Neutral", "Guardian", "Champion", "Hero" };
 struct Mod {
     std::string folder, path, name, author, version, game, err;
     std::string image;                   /* mod.json "image", as written (image_path checks it) */
     bool for_game = false;
+    bool live = false;                   /* mod.json "live": true -- patched in memory, on and off at once (live_*) */
+    std::vector<std::pair<int, std::string>> levels;   /* a live mod's "karma_levels": karma level (0-6) -> its folder */
+    int dark = 0;                        /* a live mod's "dark_bolts": bit r = karma level r, 0x80 = always */
     std::vector<Module> modules;
     bool on = true;                      /* the saved choice */
     bool have_pick = false;
@@ -1138,6 +1146,10 @@ static void read_parts(Mod& m)
     for (const Tex& p : m.tex) m.targets.insert(p.target);
     for (const Xp& p : m.xp) m.targets.insert(p.target);
     if (m.targets.empty()) m.err = "it has no .xpps files, texture patches or xpps patches (with these options)";
+    if (m.live && m.err.empty()) {   /* live: bytes written over what the game loaded, so nothing may move */
+        if (!m.files.empty()) m.err = "a live mod can only patch bytes (texture patches, xpps _offset_ patches), not replace whole files";
+        for (const Xp& x : m.xp) if (m.err.empty() && !x.chunk) m.err = "a live mod cannot replace a packed file whole (" + x.name + "): only _offset_ patches";
+    }
     /* what the files are now (a mod replaced from a zip under the same folder
      * name changes it): the menu compares it with the start's */
     uint64_t h = 1469598103934665603ull;
@@ -1237,6 +1249,17 @@ static void state_write_locked()
     if (!write_all(g.state_path, b)) fprintf(stderr, "[mods] could not save %s\n", g.state_path.c_str());
 }
 
+/* A live mod's karma level: its patches, out of <mod>/<folder> (files/ in it, as a mod's). */
+static Mod live_level_mod(const Mod& m, const std::string& folder)
+{
+    Mod x = m;
+    x.path = join(m.path, folder);
+    x.modules.clear(); x.levels.clear();
+    if (folder.find("..") != std::string::npos || !is_dir(x.path)) { x.err = "its folder (" + folder + ") is not in the mod"; return x; }
+    read_parts(x);
+    return x;
+}
+
 /* The mod folders: <dir>/<x>/mod.json, or <dir>/<x>/<y>/mod.json (a zip
  * unpacked into a folder of its own name). Dot folders are skipped. */
 static std::vector<Mod> scan()
@@ -1256,6 +1279,19 @@ static std::vector<Mod> scan()
         m.game = game_key(j.str("game"));
         m.for_game = m.game == "inf2";
         m.image = j.str("image");
+        if (const J* lj = j.get("live")) m.live = lj->t == 1 ? lj->s == "true" : (lj->t == 2 && lj->s != "0");
+        if (const J* kj = j.get("karma_levels"))
+            if (kj->t == 5)
+                for (size_t i = 0; i < kj->ok.size(); i++)
+                    for (int q = 0; q < 7; q++)
+                        if (ieq(kj->ok[i], kKarmaLevels[q]) && kj->ov[i].t == 3 && !kj->ov[i].s.empty()) m.levels.push_back({ q, kj->ov[i].s });
+        if (const J* dj = j.get("dark_bolts")) {   /* true, or the karma levels it is for */
+            if (dj->t == 1 && dj->s == "true") m.dark = 0x80;
+            else if (dj->t == 4)
+                for (const J& a : dj->a)
+                    for (int q = 0; q < 7; q++)
+                        if (a.t == 3 && ieq(a.s, kKarmaLevels[q])) m.dark |= 1 << q;
+        }
         auto it = st.find(lower(folder));
         if (it != st.end()) {
             if (it->second.have_on) m.on = it->second.on;
@@ -1264,6 +1300,12 @@ static std::vector<Mod> scan()
         }
         if (!jerr.empty()) m.err = jerr;
         else if (m.for_game) { read_modules(m); read_parts(m); }
+        if (m.live && !m.levels.empty() && m.err.empty())
+            for (const auto& l : m.levels) {   /* every level's patches must read; their files are part of the mod's key */
+                const Mod x = live_level_mod(m, l.second);
+                if (!x.err.empty()) { m.err = std::string("karma level ") + kKarmaLevels[l.first] + ": " + x.err; break; }
+                m.stamp = (m.stamp ^ x.stamp) * 1099511628211ull + (uint64_t)l.first;
+            }
         out.push_back(std::move(m));
     };
     for (const std::string& n : list_dir(g.dir)) {
@@ -1357,7 +1399,8 @@ static std::string sig_line(const char* kind, const std::string& p)
  * this exact build. dry: only whether it builds (nothing read from or
  * written to the cache). */
 static bool build(const std::string& name, const Part* base, const std::vector<const Tex*>& tex,
-                  const std::vector<const Xp*>& xp, Arcs& arcs, std::string& out_path, std::string& err, bool dry = false)
+                  const std::vector<const Xp*>& xp, Arcs& arcs, std::string& out_path, std::string& err, bool dry = false,
+                  Bytes* keep = nullptr)
 {
     out_path = join(g.cache, name);
     std::string sig = "gmods 1\n";
@@ -1374,7 +1417,7 @@ static bool build(const std::string& name, const Part* base, const std::vector<c
     for (const Tex* t : tex) sig += sig_line("tex", t->path);
     for (const Xp* x : xp) sig += sig_line("xpps", x->path);
     Bytes old;
-    if (!dry && finfo(out_path).ok && read_all(out_path + ".sig", old) && std::string(old.begin(), old.end()) == sig) return true;
+    if (!dry && !keep && finfo(out_path).ok && read_all(out_path + ".sig", old) && std::string(old.begin(), old.end()) == sig) return true;
 
     Bytes d;
     if (base) { if (!read_all(base->path, d)) { err = "cannot read " + base->path; return false; } }
@@ -1475,6 +1518,7 @@ static bool build(const std::string& name, const Part* base, const std::vector<c
             if (!in_range) { err = x->name + ": a table entry of " + name + " lies outside it"; return false; }
         }
     }
+    if (keep) { keep->swap(d); return true; }   /* a live mod's pairs (live_build) */
     if (dry) return true;
     if (!write_all(out_path, d)) { err = "cannot write " + out_path; return false; }
     Bytes sb(sig.begin(), sig.end());
@@ -1540,7 +1584,7 @@ static std::vector<size_t> plan_pass(const std::vector<Mod>& mods, const std::ve
     std::vector<size_t> used;
     for (size_t i : order) {
         const Mod& m = mods[i];
-        if (!m.on || !m.for_game || !m.err.empty() || out.count(lower(m.folder))) continue;
+        if (m.live || !m.on || !m.for_game || !m.err.empty() || out.count(lower(m.folder))) continue;   /* live: not served at load */
         std::vector<size_t> clash;
         for (size_t u : used) if (mods_clash(m, mods[u])) clash.push_back(u);
         if (clash.empty()) { used.push_back(i); continue; }
@@ -1679,6 +1723,578 @@ static std::string settings_dir()
 #endif
 }
 
+/* ---- live mods (mod.json "live": true) -------------------------------------
+ * A live mod's texture patches and xpps chunk patches (file_<i>_<abs>_offset_<o>)
+ * are not served to the game at load. The game loads its own files, and a
+ * worker thread finds the patched bytes' originals in guest memory (main
+ * memory 0x30000000-0x50000000, where the game keeps what it loaded, and RSX
+ * local memory 0xC0000000-0xD0000000, where the textures are) and writes the
+ * mod's bytes over them; turned off, it writes the originals back. So the
+ * menu's switch works at once, without a restart, and what the game loads
+ * later (another part of the city) is patched within a few seconds.
+ *
+ * Each patch is diffed against the game's original file (out of the
+ * archives) into windows: a changed run, 4-byte aligned, with at least 32
+ * bytes in all, matched exactly. Writes are bracketed for the write tracker
+ * (g_vm_host_io_hook), as the file layer's reads into guest memory are, so
+ * the draw engine sees the new texture bytes.
+ *
+ *   PS3_GAME_MODS_LIVE_SECS    seconds between passes (default 4; a pass
+ *                              takes longer apart from that when one pass
+ *                              is slow: at most ~5% of a core)
+ * mod.json "karma_levels": { "Hero": "<folder>", ... } (the 7 levels:
+ * Infamous, Outlaw, Thug, Neutral, Guardian, Champion, Hero) gives a live mod
+ * other patches for each of Cole's karma levels, in <mod>/<folder>/files as a
+ * mod's own; the worker reads the karma level every half second and puts the
+ * level's bytes in when it changes (a level not named uses the mod's own).
+ * Log lines start "[mods] live:". */
+
+extern "C" { extern uint8_t* vm_base; extern void (*g_vm_host_io_hook)(uint32_t ea, uint32_t len, int end); }
+
+static double g_live_last_ms = 0;   /* the last pass (the worker paces itself by it) */
+
+/* v[0]: the game's bytes; v[i]: variant i's (k: their keys). weak[i]: v[i] is too plain to be looked for (zeros,
+ * one flat colour: it is everywhere in memory, so a search for it would write into other things). Such a pair is
+ * placed from the other windows of its texture or packed file (grp; off = its offset in the game's file): where
+ * one of them is found, this one is at the same distance. places: where it was found (kept across passes). */
+struct LivePair { std::vector<Bytes> v; std::vector<uint32_t> k; std::vector<char> weak; bool any_weak = false;
+                  uint32_t grp = 0; uint64_t off = 0; bool grp_weak = false; std::vector<uint64_t> places; };
+struct LiveMod {
+    std::string key, name;
+    std::vector<LivePair> pairs;
+    std::vector<int> var;               /* "karma_levels": karma level (0-6) -> variant; empty: one variant (1) */
+    int dark = 0;                       /* "dark_bolts" (Mod::dark) */
+    bool want = false, built = false, building = false;
+    int revert = 0;                     /* passes left that write the originals back */
+    int target = 0;                     /* the variant the last pass put in (0: the game's own) */
+    std::string err;
+    uint64_t in_place = 0, wrote = 0;   /* the last pass: windows found in the mod's bytes; written in total */
+    uint64_t tmp = 0;                   /* (the pass's count)*/
+};
+
+static struct {
+    std::mutex mx;
+    std::condition_variable cv;
+    std::map<std::string, LiveMod> mods;   /* lower(folder) */
+    std::vector<LiveMod> retired;          /* an old build of a mod (options or files changed), still to undo */
+    bool started = false, kick = false;
+    int rank = -1;                         /* Cole's karma level as last read (-1: not known) */
+} lv;
+
+/* Too plain to look for: fewer than 4 different byte values in the whole window (a black or zeroed run of
+ * texture blocks, an empty table) -- such bytes are found all over the guest's memory. */
+static bool live_weak(const Bytes& b)
+{
+    bool seen[256] = {};
+    int n = 0;
+    for (uint8_t c : b) if (!seen[c]) { seen[c] = true; if (++n >= 4) return false; }
+    return true;
+}
+
+static uint32_t live_key_at(const Bytes& b)
+{
+    uint32_t best = 0;
+    int bn = -1;
+    for (uint32_t k = 0; k + 8 <= b.size() && k < 4096; k += 4) {
+        bool seen[256] = {};
+        int n = 0;
+        for (int i = 0; i < 8; i++) if (!seen[b[k + i]]) { seen[b[k + i]] = true; n++; }
+        if (n > bn) { bn = n; best = k; if (n == 8) break; }
+    }
+    return best;
+}
+
+/* A variant's changes to a game file: its changed runs (start -> bytes). */
+struct LiveDiff { std::map<size_t, Bytes> runs; };
+
+static void live_diff(const Bytes& o, const Bytes& n, LiveDiff& d, std::vector<bool>& dm)
+{
+    size_t i = 0;
+    while (i < o.size()) {
+        if (o[i] == n[i]) { i++; continue; }
+        size_t e = i;
+        while (e < o.size() && o[e] != n[e]) dm[e++] = true;
+        d.runs[i].assign(n.begin() + (ptrdiff_t)i, n.begin() + (ptrdiff_t)e);
+        i = e;
+    }
+}
+
+/* w: the game's bytes at [a, a + w.size()); puts the variant's changes in. */
+static void live_apply(const LiveDiff& d, size_t a, Bytes& w)
+{
+    auto it = d.runs.upper_bound(a);
+    if (it != d.runs.begin()) --it;
+    for (; it != d.runs.end() && it->first < a + w.size(); ++it) {
+        const size_t r0 = it->first, r1 = r0 + it->second.size();
+        const size_t c0 = (std::max)(r0, a), c1 = (std::min)(r1, a + w.size());
+        for (size_t i = c0; i < c1; i++) w[i - a] = it->second[i - r0];
+    }
+}
+
+/* The windows of [r0, r1) (a patch) where any variant differs from the game's
+ * file o (dm); a window may reach out to [lim0, lim1) (the texture or packed
+ * file) to be 32 bytes long. */
+static void live_windows(const Bytes& o, const std::vector<bool>& dm, const std::vector<LiveDiff>& ds,
+                         size_t r0, size_t r1, size_t lim0, size_t lim1, std::vector<LivePair>& out, std::set<Bytes>& seen,
+                         uint32_t grp)
+{
+    r1 = (std::min)(r1, o.size()); lim1 = (std::min)(lim1, o.size());
+    size_t i = r0;
+    while (i < r1) {
+        if (!dm[i]) { i++; continue; }
+        size_t e = i + 1, j = i + 1;
+        while (j < r1 && j - e < 16) { if (dm[j]) e = j + 1; j++; }
+        size_t a = i & ~(size_t)3, b = e;
+        if (b - a < 32) b = (std::min)(a + 32, lim1);
+        if (b - a < 32) { const size_t a2 = b >= 32 ? ((b - 32) & ~(size_t)3) : 0; if (a2 >= lim0) a = a2; }
+        while (b < o.size() && dm[b]) b++;
+        b = (std::min)((b + 3) & ~(size_t)3, o.size());
+        LivePair p;
+        p.grp = grp; p.off = a;
+        p.v.emplace_back(o.begin() + (ptrdiff_t)a, o.begin() + (ptrdiff_t)b);
+        if (p.v[0].size() >= 8 && seen.insert(p.v[0]).second) {
+            for (const LiveDiff& d : ds) { Bytes w = p.v[0]; live_apply(d, a, w); p.v.push_back(std::move(w)); }
+            for (const Bytes& x : p.v) {
+                p.k.push_back(live_key_at(x));
+                p.weak.push_back(live_weak(x) ? 1 : 0);
+                if (p.weak.back()) p.any_weak = true;
+            }
+            out.push_back(std::move(p));
+        }
+        i = b;
+    }
+}
+
+/* A live mod's windows: variant 1 is the mod's own patches; a mod with
+ * "karma_levels" adds one variant per level (var: level -> variant; a level
+ * it does not name uses variant 1). */
+static bool live_build(const Mod& m, std::vector<LivePair>& out, std::vector<int>& var, std::string& err)
+{
+    std::vector<Mod> vm(1, m);
+    var.clear();
+    if (!m.levels.empty()) {
+        var.assign(7, 1);
+        for (const auto& l : m.levels) {
+            Mod x = live_level_mod(m, l.second);
+            if (!x.err.empty()) { err = std::string("karma level ") + kKarmaLevels[l.first] + ": " + x.err; return false; }
+            var[(size_t)l.first] = (int)vm.size() + 1;   /* vm[i] is variant i + 1 (v[0]: the game's) */
+            vm.push_back(std::move(x));
+        }
+    }
+    std::set<std::string> targets;
+    for (const Mod& x : vm) targets.insert(x.targets.begin(), x.targets.end());
+    Arcs arcs;
+    std::set<Bytes> seen;
+    uint32_t grp = 0;   /* one per texture / packed file range (LivePair::grp) */
+    for (const std::string& t : targets) {
+        int idx = -1;
+        Psarc* arc = arcs.find(t, idx);
+        if (!arc) { err = t + " is not in the game's archives"; return false; }
+        Bytes o;
+        if (!arc->entry((uint32_t)idx, o)) { err = "cannot read " + t + " out of the archives"; return false; }
+        std::vector<LiveDiff> ds(vm.size());
+        std::vector<bool> dm(o.size(), false);
+        std::set<std::array<size_t, 4>> rs;
+        XpLayout L;
+        bool have_l = false;
+        for (size_t vi = 0; vi < vm.size(); vi++) {
+            const Mod& x = vm[vi];
+            std::vector<const Tex*> tl;
+            std::vector<const Xp*> xl;
+            for (const Tex& q : x.tex) if (q.target == t) tl.push_back(&q);
+            for (const Xp& q : x.xp) if (q.target == t) xl.push_back(&q);
+            if (tl.empty() && xl.empty()) continue;
+            Bytes n;
+            std::string path;
+            if (!build(t, nullptr, tl, xl, arcs, path, err, false, &n)) return false;
+            if (n.size() != o.size()) { err = t + ": a live mod must not change the file's size"; return false; }
+            live_diff(o, n, ds[vi], dm);
+            if (!tl.empty()) {
+                const size_t dso = be32(&o[40]);
+                for (const Tex* q : tl) {
+                    const size_t at = dso + q->off, sz = dxt_size(q->w, q->h, q->fmt, q->mips);
+                    rs.insert({ at, at + sz, at, at + sz });
+                }
+            }
+            if (!xl.empty()) {
+                if (!have_l) { if (!xp_layout(o, L, err)) { err = t + ": " + err; return false; } have_l = true; }
+                for (const Xp* q : xl) {
+                    int fi = -1;
+                    if (q->index >= 0 && q->index < (int)L.files.size()) fi = q->index;
+                    else for (size_t i = 0; i < L.files.size(); i++) if ((uint64_t)L.data_off + L.files[i].off == q->abs) fi = (int)i;
+                    if (fi < 0) continue;
+                    const size_t a0 = (size_t)L.data_off + L.files[(size_t)fi].off, a1 = a0 + L.files[(size_t)fi].size;
+                    rs.insert({ a0 + q->choff, a0 + q->choff + q->len, a0, a1 });
+                }
+            }
+        }
+        for (const auto& r : rs) live_windows(o, dm, ds, r[0], r[1], r[2], r[3], out, seen, ++grp);
+    }
+    if (out.empty()) { err = "its patches change nothing in the game's files"; return false; }
+    std::set<uint32_t> wg;
+    for (const LivePair& p : out) if (p.any_weak) wg.insert(p.grp);
+    for (LivePair& p : out) p.grp_weak = wg.count(p.grp) != 0;
+    return true;
+}
+
+static bool use_next();
+
+/* With g.mx held: what each live mod should be now (the saved switch and "Use mods"). */
+static void live_sync_locked()
+{
+    std::lock_guard<std::mutex> lk(lv.mx);
+    const bool use = use_next();
+    std::set<std::string> present;
+    for (const Mod& m : g.list) {
+        if (!m.live) continue;
+        const std::string f = lower(m.folder);
+        present.insert(f);
+        const bool ok = m.for_game && m.err.empty();
+        const std::string key = mod_key(m);
+        LiveMod& L = lv.mods[f];
+        if (L.key != key && !L.key.empty()) {   /* other options or files: undo the old build, make the new one */
+            if (L.built && (L.want || L.revert)) { LiveMod old = L; old.want = false; old.revert = 3; lv.retired.push_back(std::move(old)); }
+            L = LiveMod();
+        }
+        L.key = key; L.name = m.name; L.dark = m.dark;
+        const bool want = ok && m.on && use;
+        if (L.want && !want) L.revert = 3;
+        if (want) L.revert = 0;
+        L.want = want;
+    }
+    for (auto& kv : lv.mods)
+        if (!present.count(kv.first) && (kv.second.want || kv.second.revert)) {   /* its folder is gone */
+            kv.second.want = false;
+            if (!kv.second.revert) kv.second.revert = 3;
+        }
+}
+
+/* "dark_bolts": the arcs' dark shader, as the Black lightning cheat draws them (cheats.cpp sets the hook) */
+extern "C" void (*g_mods_dark_bolts_hook)(int on);
+void (*g_mods_dark_bolts_hook)(int on) = nullptr;
+
+static bool live_dark_for(const LiveMod& m, int rank)
+{
+    return m.want && m.built && m.err.empty() && !m.pairs.empty() &&
+           ((m.dark & 0x80) || (rank >= 0 && ((m.dark >> rank) & 1)));
+}
+
+static void live_dark_update()
+{
+    static int last = -1;
+    int on = 0;
+    {
+        std::lock_guard<std::mutex> lk(lv.mx);
+        for (auto& kv : lv.mods) if (live_dark_for(kv.second, lv.rank)) on = 1;
+    }
+    if (on != last && g_mods_dark_bolts_hook) {
+        g_mods_dark_bolts_hook(on);
+        fprintf(stderr, "[mods] live: dark bolts %s\n", on ? "on" : "off");
+        last = on;
+    }
+}
+
+#ifdef _WIN32
+struct LiveEnt { LivePair* p; LiveMod* m; int from, to; };   /* v[from] -> v[to]; from == to: count only (in place) */
+
+/* Cole's karma level (0-6) as the game finds it: the first of its 7 ranges
+ * (0x00745EC8, (min, max) big-endian floats) that holds the karma
+ * (0x00A64E40), else Neutral; -1 when it cannot be read. */
+static int live_karma_level()
+{
+    uint8_t t[56], k[4];
+    SIZE_T g1 = 0, g2 = 0;
+    const HANDLE me = GetCurrentProcess();
+    if (!vm_base || !ReadProcessMemory(me, vm_base + 0x00745EC8u, t, sizeof t, &g1) || g1 != sizeof t) return -1;
+    if (!ReadProcessMemory(me, vm_base + 0x00A64E40u, k, sizeof k, &g2) || g2 != sizeof k) return -1;
+    auto f = [](const uint8_t* p) { const uint32_t u = be32(p); float x; memcpy(&x, &u, 4); return x; };
+    const float kv = f(k);
+    if (kv != kv) return -1;
+    for (int i = 0; i < 7; i++) if (!(f(t + 8 * i) <= f(t + 8 * i + 4))) return -1;   /* not the table (yet) */
+    for (int i = 0; i < 7; i++) if (f(t + 8 * i) <= kv && kv <= f(t + 8 * i + 4)) return i;
+    return 3;
+}
+
+static void live_pass()
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    std::unordered_multimap<uint64_t, LiveEnt> tab;
+    std::vector<uint64_t> bloom((size_t)1 << 18, 0);   /* 2^24 bits */
+    auto hsh = [](uint64_t v) { return (uint32_t)((v * 0x9E3779B97F4A7C15ull) >> 40); };
+    auto add = [&](LivePair& p, LiveMod& m, int from, int to) {
+        if (p.weak[(size_t)from]) return;   /* never looked for (see LivePair) */
+        uint64_t v;
+        memcpy(&v, p.v[(size_t)from].data() + p.k[(size_t)from], 8);
+        tab.insert({ v, LiveEnt{ &p, &m, from, to } });
+        const uint32_t h = hsh(v);
+        bloom[h >> 6] |= 1ull << (h & 63);
+    };
+    std::unique_lock<std::mutex> lk(lv.mx);
+    std::vector<LiveMod*> ms;
+    for (auto& kv : lv.mods) ms.push_back(&kv.second);
+    for (LiveMod& m : lv.retired) ms.push_back(&m);
+    bool any = false;
+    std::vector<std::pair<LiveMod*, int>> act;   /* the mods this pass serves, and the variant each puts in */
+    std::map<std::pair<const LiveMod*, uint32_t>, std::vector<uint64_t>> bases;   /* where a group's file starts */
+    for (LiveMod* m : ms) {
+        if (!m->built) continue;
+        m->tmp = 0;
+        if (m->pairs.empty()) continue;
+        int t;
+        if (m->want) t = m->var.empty() ? 1 : lv.rank >= 0 ? m->var[(size_t)lv.rank] : m->target > 0 ? m->target : 1;
+        else if (m->revert > 0) t = 0;
+        else continue;
+        m->target = t;
+        any = true;
+        act.push_back({ m, t });
+        for (LivePair& p : m->pairs) {
+            const Bytes& w = p.v[(size_t)t];
+            for (size_t i = 0; i < p.v.size(); i++) {
+                if ((int)i == t) { if (t) add(p, *m, t, t); continue; }
+                if (p.v[i] == w) continue;
+                bool dup = false;
+                for (size_t q = 0; q < i && !dup; q++) dup = (int)q != t && p.v[q] == p.v[i];
+                if (!dup) add(p, *m, (int)i, t);
+            }
+        }
+    }
+    if (!any) return;
+    /* the pairs stay put while the pass runs: only this thread changes them */
+    lk.unlock();
+    const HANDLE me = GetCurrentProcess();
+    void (*const io)(uint32_t, uint32_t, int) = g_vm_host_io_hook;
+    static const uint32_t kRegions[][2] = { { 0x30000000u, 0x50000000u }, { 0xC0000000u, 0xD0000000u } };
+    const size_t kChunk = 4u << 20;
+    std::vector<uint8_t> buf(kChunk + 8), cur;
+    uint64_t wrote = 0, scanned = 0;
+    for (const auto& r : kRegions) {
+        uint64_t ea = r[0];
+        while (ea < r[1]) {
+            MEMORY_BASIC_INFORMATION mbi;
+            if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
+            const uint64_t rb = (uint64_t)((uint8_t*)mbi.BaseAddress - vm_base), re = (std::min<uint64_t>)(rb + mbi.RegionSize, r[1]);
+            const DWORD pr = mbi.Protect;
+            const bool readable = mbi.State == MEM_COMMIT && !(pr & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                                  (pr & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE));
+            if (readable) {
+                for (uint64_t c = (std::max)(ea, rb); c < re; c += kChunk) {
+                    const size_t n = (size_t)(std::min<uint64_t>)(kChunk, re - c);
+                    SIZE_T got = 0;
+                    const size_t want = (size_t)(std::min<uint64_t>)(n + 8, r[1] - c);
+                    if (!ReadProcessMemory(me, vm_base + c, buf.data(), want, &got) || got < 8) {
+                        if (!ReadProcessMemory(me, vm_base + c, buf.data(), n, &got) || got < 8) continue;
+                    }
+                    scanned += n;
+                    const size_t lim = (std::min<size_t>)(n, got - 7);
+                    for (size_t p = 0; p < lim; p += 4) {
+                        uint64_t v;
+                        memcpy(&v, buf.data() + p, 8);
+                        const uint32_t h = hsh(v);
+                        if (!((bloom[h >> 6] >> (h & 63)) & 1)) continue;
+                        auto range = tab.equal_range(v);
+                        for (auto it = range.first; it != range.second; ++it) {
+                            const LiveEnt& e = it->second;
+                            const uint32_t k = e.p->k[(size_t)e.from];
+                            const Bytes& f = e.p->v[(size_t)e.from];
+                            if (c + p < k) continue;
+                            const uint64_t at = c + p - k;
+                            if (at < r[0] || at + f.size() > r[1]) continue;
+                            cur.resize(f.size());
+                            SIZE_T g2 = 0;
+                            if (!ReadProcessMemory(me, vm_base + at, cur.data(), cur.size(), &g2) || g2 != cur.size()) continue;
+                            if (memcmp(cur.data(), f.data(), f.size())) continue;
+                            if (e.p->any_weak) {   /* remembered: it may be found by its plain form only later */
+                                auto& pl = e.p->places;
+                                if (std::find(pl.begin(), pl.end(), at) == pl.end() && pl.size() < 16) pl.push_back(at);
+                            }
+                            if (e.p->grp_weak && at >= e.p->off) {   /* its group's plain windows are placed from here */
+                                auto& bl = bases[{ e.m, e.p->grp }];
+                                const uint64_t base = at - e.p->off;
+                                if (std::find(bl.begin(), bl.end(), base) == bl.end() && bl.size() < 16) bl.push_back(base);
+                            }
+                            if (e.from == e.to) { e.m->tmp++; continue; }
+                            const Bytes& w = e.p->v[(size_t)e.to];
+                            if (io) io((uint32_t)at, (uint32_t)w.size(), 0);
+                            SIZE_T put = 0;
+                            const bool okw = WriteProcessMemory(me, vm_base + at, w.data(), w.size(), &put) && put == w.size();
+                            if (io) io((uint32_t)at, (uint32_t)w.size(), 1);
+                            if (okw) { wrote++; e.m->wrote++; if (e.to) e.m->tmp++; }
+                            break;
+                        }
+                    }
+                }
+            }
+            ea = re;
+        }
+    }
+    /* The pairs with a plain form: at the places they were found, whatever form they hold now becomes the wanted
+     * one; a place that holds none of their forms any more (the memory went to something else) is forgotten. */
+    for (auto& mt : act) {
+        LiveMod* m = mt.first;
+        const int t = mt.second;
+        for (LivePair& p : m->pairs) {
+            if (!p.any_weak) continue;
+            const Bytes& w = p.v[(size_t)t];
+            auto bi = bases.find({ m, p.grp });
+            if (bi != bases.end())
+                for (uint64_t base : bi->second) {
+                    const uint64_t at = base + p.off;
+                    if (std::find(p.places.begin(), p.places.end(), at) != p.places.end() || p.places.size() >= 16) continue;
+                    cur.resize(w.size());
+                    SIZE_T g2 = 0;
+                    if (!ReadProcessMemory(me, vm_base + at, cur.data(), cur.size(), &g2) || g2 != cur.size()) continue;
+                    for (const Bytes& x : p.v)
+                        if (x.size() == cur.size() && !memcmp(cur.data(), x.data(), x.size())) { p.places.push_back(at); break; }
+                }
+            for (size_t j = 0; j < p.places.size();) {
+                const uint64_t at = p.places[j];
+                cur.resize(w.size());
+                SIZE_T g2 = 0;
+                if (!ReadProcessMemory(me, vm_base + at, cur.data(), cur.size(), &g2) || g2 != cur.size()) {
+                    p.places.erase(p.places.begin() + (ptrdiff_t)j);
+                    continue;
+                }
+                if (!memcmp(cur.data(), w.data(), w.size())) { if (t && p.weak[(size_t)t]) m->tmp++; j++; continue; }
+                bool known = false;
+                for (const Bytes& x : p.v) if (x.size() == cur.size() && !memcmp(cur.data(), x.data(), x.size())) known = true;
+                if (!known) { p.places.erase(p.places.begin() + (ptrdiff_t)j); continue; }
+                if (io) io((uint32_t)at, (uint32_t)w.size(), 0);
+                SIZE_T put = 0;
+                const bool okw = WriteProcessMemory(me, vm_base + at, w.data(), w.size(), &put) && put == w.size();
+                if (io) io((uint32_t)at, (uint32_t)w.size(), 1);
+                if (okw) { wrote++; m->wrote++; if (t) m->tmp++; }
+                j++;
+            }
+        }
+    }
+    lk.lock();
+    for (LiveMod* m : ms) { if (m->built) m->in_place = m->tmp; if (!m->want && m->revert > 0) m->revert--; }
+    lv.retired.erase(std::remove_if(lv.retired.begin(), lv.retired.end(), [](const LiveMod& m) { return m.revert <= 0; }), lv.retired.end());
+    lk.unlock();
+    const double ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    static double last_logged = -1;
+    if (wrote || last_logged < 0) {
+        fprintf(stderr, "[mods] live: pass over %llu MB in %.0f ms, %llu place(s) written\n",
+                (unsigned long long)(scanned >> 20), ms_, (unsigned long long)wrote);
+        last_logged = ms_;
+    }
+    g_live_last_ms = ms_;
+}
+#else
+static int live_karma_level() { return -1; }
+static void live_pass() {}
+#endif
+
+static void live_worker()
+{
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+    const char* s = getenv("PS3_GAME_MODS_LIVE_SECS");
+    const double secs = s && atof(s) > 0.2 ? atof(s) : 4.0;
+    for (;;) {
+        {
+            /* a mod with karma levels on: the karma level is read every half second,
+             * and a change is put in at once */
+            const double wait = (std::max)(secs, g_live_last_ms * 20.0 / 1000.0);
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds((int64_t)(wait * 1000));
+            std::unique_lock<std::mutex> lk(lv.mx);
+            while (!lv.kick) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= until) break;
+                bool lev = false;
+                for (auto& kv : lv.mods) if (kv.second.want && kv.second.built && (!kv.second.var.empty() || (kv.second.dark & 0x7F))) lev = true;
+                const auto step = lev ? (std::min)(until, now + std::chrono::milliseconds(500)) : until;
+                lv.cv.wait_until(lk, step, [] { return lv.kick; });
+                if (lev && !lv.kick) {
+                    lk.unlock();
+                    const int r = live_karma_level();
+                    lk.lock();
+                    if (r >= 0 && r != lv.rank) { lv.rank = r; break; }
+                }
+            }
+            lv.kick = false;
+        }
+        { const int r = live_karma_level(); if (r >= 0) { std::lock_guard<std::mutex> lk(lv.mx); lv.rank = r; } }
+        { std::lock_guard<std::mutex> lk(g.mx); live_sync_locked(); }
+        /* builds: every live mod's pairs, once, on or off (reading the archives takes a few
+         * seconds: done at start, so a switch turned on later works at the next pass) */
+        for (;;) {
+            std::string f, key;
+            {
+                std::lock_guard<std::mutex> lk(lv.mx);
+                for (auto& kv : lv.mods) if (!kv.second.built && !kv.second.building) { f = kv.first; key = kv.second.key; kv.second.building = true; break; }
+            }
+            if (f.empty()) break;
+            Mod m;
+            bool found = false;
+            {
+                std::lock_guard<std::mutex> lk(g.mx);
+                for (const Mod& x : g.list) if (lower(x.folder) == f && mod_key(x) == key) { m = x; found = true; break; }
+            }
+            std::vector<LivePair> pairs;
+            std::vector<int> var;
+            std::string err;
+            bool ok = false;
+            if (found) {
+                try { ok = live_build(m, pairs, var, err); }
+                catch (const std::exception& e) { err = std::string("could not be read (") + e.what() + ")"; }
+            }
+            std::lock_guard<std::mutex> lk(lv.mx);
+            auto it = lv.mods.find(f);
+            if (it == lv.mods.end() || it->second.key != key) continue;
+            LiveMod& L = it->second;
+            L.building = false;
+            L.built = true;
+            if (ok) {
+                L.pairs.swap(pairs);
+                L.var.swap(var);
+                L.err.clear();
+                size_t bytes = 0;
+                for (const LivePair& p : L.pairs) bytes += p.v[0].size();
+                fprintf(stderr, "[mods] live: \"%s\" ready: %zu place(s) to find (%zu bytes)%s\n", L.name.c_str(), L.pairs.size(), bytes,
+                        L.var.empty() ? "" : ", with karma levels");
+            } else {
+                L.err = found ? err : "it changed while it was read";
+                fprintf(stderr, "[mods] live: \"%s\" not used: %s\n", L.name.c_str(), L.err.c_str());
+            }
+        }
+        live_pass();
+        live_dark_update();
+    }
+}
+
+/* Wake the worker (a switch changed, the list was read again); start it on first need. */
+static void live_kick()
+{
+    std::lock_guard<std::mutex> lk(lv.mx);
+    lv.kick = true;
+    if (!lv.started) {
+        lv.started = true;
+        std::thread(live_worker).detach();
+    }
+    lv.cv.notify_one();
+}
+
+/* With g.mx held: the menu's line for a live mod. */
+static std::string live_status_locked(const Mod& m)
+{
+    if (!m.err.empty()) return "Not used: " + m.err;
+    if (!m.for_game) return "Made for " + std::string(game_label(m.game)) + ", not inFAMOUS 2";
+    if (!use_next()) return "Not used: mods are off";
+    std::lock_guard<std::mutex> lk(lv.mx);
+    auto it = lv.mods.find(lower(m.folder));
+    const LiveMod* L = it != lv.mods.end() && it->second.key == mod_key(m) ? &it->second : nullptr;
+    if (!m.on) return L && L->revert ? "Off: putting the game's own back" : "Off. A live mod: it changes the game at once, no restart";
+    if (!L || !L->built) return "On: getting ready (a few seconds after the game starts)";
+    if (!L->err.empty()) return "Not used: " + L->err;
+    std::string lvl;
+    if (!L->var.empty() || (L->dark & 0x7F)) lvl = lv.rank >= 0 ? std::string(" (karma level: ") + kKarmaLevels[lv.rank] + ")" : " (karma level not known yet)";
+    if (!L->in_place) return "On" + lvl + ": waiting for the game to load what it changes";
+    return "On now" + lvl + ": " + std::to_string(L->in_place) + " place(s) in memory changed" +
+           (live_dark_for(*L, lv.rank) ? ", black bolts" : "");
+}
+
 static void init_body();
 static void test_start();   /* PS3_GAME_MODS_TEST, below */
 static void init()
@@ -1742,6 +2358,11 @@ static void init_body()
             std::lock_guard<std::mutex> lk(g.mx);
             g.list.swap(mods);
             g.gen++;
+        }
+        {
+            bool any = false;
+            { std::lock_guard<std::mutex> lk(g.mx); for (const Mod& m : g.list) if (m.live) any = true; }
+            if (any) live_kick();
         }
         test_start();
     }
@@ -1899,6 +2520,7 @@ static void plan_locked()
 static std::string status_locked(size_t i, const std::string& changes)
 {
     const Mod& m = g.list[i];
+    if (m.live) return live_status_locked(m);
     const Plan& P = g.plan;
     auto it = g.start.find(lower(m.folder));
     const bool active = it != g.start.end() && it->second.active;
@@ -2281,9 +2903,12 @@ static void rescan_now()
     std::vector<Mod> mods;
     try { mods = scan(); }
     catch (const std::exception& e) { fprintf(stderr, "[mods] could not read the mods folder again (%s)\n", e.what()); return; }
+    bool live = false;
+    for (const Mod& m : mods) if (m.live) live = true;
     std::lock_guard<std::mutex> lk(g.mx);
     g.list.swap(mods);
     g.gen++;
+    if (live || lv.started) live_kick();
 }
 
 /* ---- PS3_GAME_MODS_TEST: the menu's actions from a script (tests) ---------------- */
@@ -2441,6 +3066,7 @@ extern "C" int ps3_game_mods_get(int i, ps3_game_mod* o)
     o->on = m.on; o->for_game = m.for_game;
     o->n_files = (int)m.files.size(); o->n_tex = (int)m.tex.size(); o->n_xpps = (int)m.xp.size();
     o->n_modules = (int)m.modules.size();
+    o->live = m.live;
     auto it = g.start.find(lower(m.folder));
     o->active = it != g.start.end() && it->second.active;
     o->next = g.plan.next[(size_t)i];
@@ -2487,6 +3113,7 @@ extern "C" void ps3_game_mods_set_on(int i, int on)
     g.list[(size_t)i].on = on != 0;
     g.gen++;
     state_write_locked();
+    if (g.list[(size_t)i].live) live_kick();   /* a live mod: on or off now */
 }
 
 extern "C" void ps3_game_mods_pick(int i, int k, int on)
@@ -2522,9 +3149,11 @@ extern "C" void ps3_game_mods_pick(int i, int k, int on)
     }
     std::lock_guard<std::mutex> lk(g.mx);
     if (i >= (int)g.list.size() || g.list[(size_t)i].folder != m.folder) return;   /* rescanned meanwhile */
+    const bool live = m.live;
     g.list[(size_t)i] = std::move(m);
     g.gen++;
     state_write_locked();
+    if (live) live_kick();
 }
 
 /* "Use this one instead" (a mod left out by a clash): a priority above every

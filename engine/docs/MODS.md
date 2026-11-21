@@ -169,6 +169,56 @@ applied), and the new one waits for the old one to end.
 The game's file names are flat (`cole_default.xpps`, `zeke.xpps`), so a file is
 matched by its name.
 
+## Live mods (port only)
+
+A mod whose `mod.json` has `"live": true` is switched on and off at once, with
+no restart (the Mods page marks it **Instant**). Such a mod may only patch
+bytes in place: texture patches and `xpps_patches` with `_offset_` (no whole
+files, no whole packed files, nothing that changes a file's size). The
+Manager and older ports ignore the key and apply the patches at load as usual.
+
+The game loads its own files; a worker thread
+(`runtime/ppu/ppu_fs_mods.h`, `live_*`) diffs each patch against the game's
+original file (out of the archives) into windows of at least 32 bytes, finds
+them in guest main memory (`0x30000000`-`0x50000000`) and RSX local memory
+(`0xC0000000`-`0xD0000000`, where the textures are), and writes the mod's bytes
+over them; turned off, it writes the originals back. Writes are bracketed by
+`g_vm_host_io_hook`, so the draw engine's write tracking sees the new texture
+bytes. Every live mod's windows are made at start (a few seconds, on or off),
+then a pass every 4 s (`PS3_GAME_MODS_LIVE_SECS`; ~0.4 s over ~380 MB) also
+patches what the game loads later. The status line counts the places changed.
+Log lines start `[mods] live:`.
+
+### Karma levels
+
+A live mod can change with Cole's karma level. `karma_levels` names a folder
+for any of the seven levels (`Infamous`, `Outlaw`, `Thug`, `Neutral`,
+`Guardian`, `Champion`, `Hero`); each folder holds `files/` with patches, as
+the mod's own:
+
+```json
+{
+  "game": "inf2", "name": "Karma Lightning", "live": true,
+  "karma_levels": { "Infamous": "levels/infamous", "Hero": "levels/hero" }
+}
+```
+
+The worker reads the karma level every half second the way the game finds it
+(the karma float at `0x00A64E40`, the first of the seven ranges at
+`0x00745EC8` that holds it, else Neutral) and puts the level's bytes in when
+it changes. A level the mod does not name uses the mod's own `files/`, which
+is also what the Manager and older ports apply at load.
+
+### Black bolts
+
+`"dark_bolts": true` (or a list of karma levels, e.g. `["Infamous", "Outlaw"]`)
+draws Cole's electric arcs with the game's own dark (evil) lightning shader
+while the mod is on: a black core with the outside colour of the evil bolt
+textures. It is the same draw swap as Cheats > Black lightning
+(`cheats/cheats.cpp`, `hook_arc_draw`), switched by the mod. Additive
+glows cannot be black (black adds no light), so a mod made for black
+bolts should give the glows' cores the outside colour instead.
+
 ## How it works
 
 The game reads a file from its PSARC archives when one of them has it, and

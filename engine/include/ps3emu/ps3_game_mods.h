@@ -36,6 +36,7 @@ typedef struct {
     int  clash;           /* left out from the next start by a clash, and "Use this one instead" would use it */
     char prefer[240];     /* with clash: what that does ("Climbing Gloves and Karmic Logo Tshirt will be left out") */
     char status[300];     /* one line for the menu: what it changes, or why it is not used */
+    int  live;            /* mod.json "live": true -- on and off at once, no restart (patched in memory) */
 } ps3_game_mod;
 
 typedef struct {
