@@ -13,6 +13,9 @@ The rules (the player's Steam library is theirs):
    byte for byte as it was (checked: a file this script cannot write back exactly is not touched) with the new entry
    appended. A name or program already in the file is refused ("check" says which; the installer offers another name).
  - shortcuts.vdf is copied to shortcuts.vdf.bak-<time> before it is written.
+ - The new file keeps the old file's permissions (Steam writes it rwxr-xr-x; rwxr-xr-x for a new file too). Other tools
+   rely on that: NonSteamLaunchers' NSL Game Scanner (a background service on many Decks) empties a shortcuts.vdf that
+   isn't executable, so a rw-r--r-- file lost the player's whole non-Steam list (v0.6.3-deck3).
  - Steam keeps the file in memory and writes it when it exits, so the caller writes only while Steam is closed
    (tools/install_gui.sh checks, asks the player to close it, and says to start it again).
  - Artwork (optional, --art): from PS3_GAME/ICON0.PNG and PIC1.PNG with ffmpeg when the system has it, into
@@ -254,10 +257,14 @@ def main():
         bak = path + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
         shutil.copy2(path, bak)
         print("  backup: " + bak)
+    mode = (os.stat(path).st_mode & 0o7777) if before else 0o755
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(data)
+    os.chmod(tmp, mode)          # the old file's permissions (see the rules above); os.replace would drop them
     os.replace(tmp, path)
+    if (os.stat(path).st_mode & 0o7777) != mode:
+        print(f"  warning: could not keep the file's permissions ({oct(mode)}): {path}")
     print(f"  added: \"{a.name}\" (app id {aid}) -> {qexe}, in {path}")
 
 

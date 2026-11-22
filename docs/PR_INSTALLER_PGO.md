@@ -142,6 +142,20 @@ made from the player's own `PS3_GAME/ICON0.PNG` and `PIC1.PNG` (ffmpeg: grid 600
 Tested only on a copy of a Steam folder (`PORT_STEAM_ROOT`, a stand-in for the steam program): the real library was
 only read.
 
+**Fixed after v0.6.3-deck3 (2026-11-22): keep the file's permissions.** On the player's Deck, Add to Steam emptied the
+whole non-Steam list a few seconds after it wrote. `steam_shortcut.py` wrote a new file and swapped it in, so
+Steam's `rwxr-xr-x` became `rw-r--r--`. NonSteamLaunchers' **NSL Game Scanner** (a user service,
+`~/.config/systemd/user/NSLGameScanner.py`, run every ~10 s) checks `os.access(shortcuts.vdf, X_OK)`. If the file
+isn't executable, it writes an empty `{'shortcuts': {}}` and then re-adds only its own launchers. 73 entries became 5:
+Ubisoft Connect, EA App, Repair EA App, NonSteamLaunchers and AC IV. The copy test never had the scanner, so it didn't
+show this.
+
+- Recovered from the tool's own `shortcuts.vdf.bak-20261122-162844` with Steam closed. The scanner then read the file
+  and wrote it back unchanged. Proton mappings (config.vdf) and collections were untouched.
+- The fix: the new file gets the old file's mode (`rwxr-xr-x` for a new file), and a warning is printed if it can't.
+- Checked on a copy: the mode is kept, all 73 entries plus the new one; NSL's own `vdf.binary_loads` reads the result.
+- On the real Deck with the scanner running: added, the scanner rewrote the file, and all 74 were kept.
+
 ## Optimise for this PC on Linux: the Windows rules, ported
 
 `tools/setup.sh --pgo` (10 steps instead of 8) and `tools/pgo_train.py` are `setup_build.ps1 -Pgo` and
