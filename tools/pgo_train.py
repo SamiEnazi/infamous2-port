@@ -216,10 +216,12 @@ PLAY_ENV = {
 # play.sh's tuning defaults (each can be set from outside, as there)
 PLAY_DEFAULTS = {
     "PS3RECOMP_GCM_SPIN_US": "0", "PS3RECOMP_VK_TQ_SPIN_US": "0", "PS3RECOMP_VK_PIPE_THREADS": "1", "PS3_FRAMECLOCK_US": "250",
-    "PS3_NATIVE_JOBS_THREADS": "4", "PS3_PAD_THREAD_US": "4000", "PS3_NATIVE_JOBS_PRIO": "1", "PS3RECOMP_ENG_R8": "3",
+    "PS3_PAD_THREAD_US": "4000", "PS3_NATIVE_JOBS_PRIO": "1", "PS3RECOMP_ENG_R8": "3",
     "PS3RECOMP_VK_THREADED": "1", "PS3_CPU_PLACE_VKW": "1", "PS3_CPU_PLACE": "rsxcore", "PS3_STATIC_TLS_RETRY": "1",
     "PS3RECOMP_VK_SHADER_CACHE": os.path.join(ROOT, "work", "shader_cache"),   # the cache play uses (warmed)
 }
+if valve:   # 4 job threads on a Steam Deck only (play.sh); elsewhere the engine's own rule (physical cores - 2, at most 8)
+    PLAY_DEFAULTS["PS3_NATIVE_JOBS_THREADS"] = "4"
 base_env = dict(os.environ)
 for k, v in PLAY_DEFAULTS.items():
     base_env.setdefault(k, v)

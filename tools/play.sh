@@ -243,9 +243,13 @@ if [ $spulight = 0 ]; then export PS3RECOMP_ENG_GPU_LIGHT=07000B80:07384B80 PS3R
 # sleeps its whole period; Windows wakes it early). Each can still be set from outside.
 : "${PS3RECOMP_GCM_SPIN_US:=0}" "${PS3RECOMP_VK_TQ_SPIN_US:=0}" "${PS3RECOMP_VK_PIPE_THREADS:=1}" "${PS3_FRAMECLOCK_US:=250}"
 export PS3RECOMP_GCM_SPIN_US PS3RECOMP_VK_TQ_SPIN_US PS3RECOMP_VK_PIPE_THREADS PS3_FRAMECLOCK_US
-# (deck-merge) v0.6's native job runner: 4 pool threads (its default, physical cores - 2, is 2 here). Det bench at the
-# plaza, 2026-11-18: 2 threads 37.8 fps (the main thread runs jobs in its waits: 26 ms/frame), 3 40.8, 4 41.0.
-: "${PS3_NATIVE_JOBS_THREADS:=4}"; export PS3_NATIVE_JOBS_THREADS
+# (deck-merge) v0.6's native job runner on a Steam Deck (LCD and OLED: the board vendor Valve, as above): 4 pool threads
+# (its default, physical cores - 2, is 2 there). Det bench at the plaza, 2026-11-18: 2 threads 37.8 fps (the main thread
+# runs jobs in its waits: 26 ms/frame), 3 40.8, 4 41.0. Every other PC keeps the engine's own rule (physical cores - 2,
+# at most 8): it is left unset there. Everything else below is for every Linux PC.
+if [ "$(cat /sys/devices/virtual/dmi/id/board_vendor 2>/dev/null)" = Valve ]; then
+    : "${PS3_NATIVE_JOBS_THREADS:=4}"; export PS3_NATIVE_JOBS_THREADS
+fi
 # (deck-v063) v0.6.3's controller thread reads the pads every 1 ms by default: here every 4 ms. On the Deck's controller
 # (SDL HIDAPI) a pass costs 40-55 us, so 1 ms = 32 ms of CPU a second (755 passes), 4 ms = 13 ms (234 passes), on the
 # CPUs the main thread and the job pool share; street det bench with SDL pads on, guest 4-20 s, 4 runs each: 46.46 vs
@@ -357,9 +361,11 @@ while :; do
     break
 done
 echo "Exited (code $rc) after $(( ($(date +%s) - t0) / 60 )) min. Logs: $out"
-if [ $nolog = 0 ] && [ -f "$out/playlog.tsv" ] && command -v python3 >/dev/null; then
+# the session's summary, with setup's own Python (tools-cache/python), else the system's
+py="$root/tools-cache/python/bin/python3"; [ -x "$py" ] || py="$(command -v python3 || true)"
+if [ $nolog = 0 ] && [ -f "$out/playlog.tsv" ] && [ -n "$py" ]; then
     cap=$(grep -oE 'frame cap (off|[0-9.]+)' "$out/stderr.log" | tail -1 | awk '{print $3}')
     [ "$cap" = off ] && cap=0
-    python3 -I "$root/tools/playlog_report.py" "$out" --cap "${cap:-60}" 2>&1 || true
+    "$py" -I "$root/tools/playlog_report.py" "$out" --cap "${cap:-60}" 2>&1 || true
 fi
 exit $rc
