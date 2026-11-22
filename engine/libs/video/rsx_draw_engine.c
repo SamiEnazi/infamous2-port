@@ -7311,6 +7311,89 @@ static __attribute__((noinline)) void eng_fd_hud_note(void)
     if (__builtin_expect(on < 0, 0)) { const char* e = getenv("PS3RECOMP_ENG_FASTDRAW_HUD"); on = !(e && e[0] == '0'); }
     s_fd_hud_block = s_hud_n != 0 && (!on || s_hud_n < 0 || s_hud_after || s_ov_mode || s_hud_frame != g.frames);
 }
+/* (GitHub #47 / #105, agent wide) PS3RECOMP_WIDE_NEXTFRAME (default 1; 0 = as before): the title's next frame can start
+ * before the present that ends this one. inFAMOUS 2 flips through the cellGcmSetFlipCommand import (no flip word in
+ * its command stream: GCM_FLIP_STATS shows 0 FIFO flips), and the frame clock presents a pending flip between drains;
+ * now and then a drain runs on past the frame's end into the next frame (seen on the Deck: one present holding two
+ * frames, 16,438 draws against ~8,000), so one present (g.frames) holds the head of the next frame or all of it. Those
+ * draws came after this frame's composite (s_hud_after still set) and are display-sized (the 1280x720 G-buffer and
+ * post targets), so they were pinned as the HUD: every pass of the next frame's picture was squeezed into the 16:9
+ * rectangle again, reading the pass before (0.9^4 of the height at 16:10 in the frame caught, centred), and its
+ * composite showed that for one frame -- the "flicker" of #47 / #105, more often at a high frame rate. (Its 3D vertex
+ * programs, world matrix then view-projection, also went through eng_wide_ui_vp as "UI quads": the frame's hitch.)
+ * The HUD is drawn into the composite's own target (the display buffer); a display-sized draw
+ * after the composite into ANOTHER target is the next frame's, so it starts the next slice here (s_hud_after = 0: it
+ * and the rest of that frame fill the wide picture, as its draws after the present do). A later draw into the composite's
+ * target in the same present takes the break back (the next frame cannot draw into the buffer still waiting to be shown,
+ * so that is this frame's HUD after an off-screen pass: pinned as before). Called for every draw of the
+ * HUD block (after the composite the short tail is refused, so none is missed); a call of its own, so sink_end_body's
+ * control flow and PGO profile stay as they were. PS3RECOMP_WIDE_LOG=1 lists each such frame ([widenext]). */
+static u32 s_hc_loc = ~0u, s_hc_off = ~0u, s_hc_draw;    /* the slice's composite: its target, its draw */
+static u32 s_wn_n, s_wn_draw, s_wn_off, s_wn_hud;        /* WIDE_LOG: next-frame draws seen, the first one's, HUD after it */
+static u32 s_wn_back;                                    /* breaks taken back (a draw into the composite's target after one) */
+static int s_wn_broke;                                   /* this present's frame was broken by eng_hud_next_frame */
+static u32 s_p3_n;                                       /* WIDE_LOG: those draws pinned all the same (NEXTFRAME=0, or taken back) */
+static u64 s_wn_fp;
+static int eng_wide_log(void)
+{
+    static int wl = -1;
+    if (__builtin_expect(wl < 0, 0)) { const char* e = getenv("PS3RECOMP_WIDE_LOG"); wl = e && *e == '1'; }
+    return wl;
+}
+static __attribute__((noinline)) void eng_hud_next_frame(u32 target, u64 fp)
+{
+    static int on = -1;
+    if (__builtin_expect(on < 0, 0)) { const char* e = getenv("PS3RECOMP_WIDE_NEXTFRAME"); on = !(e && e[0] == '0'); }
+    const eng_surface* s = &g.surfaces[target];
+    int composite = 0;   /* as the caller decides them (its own values are not passed: its profile) */
+    for (int k = 0; k < s_hud_n; k++) if (fp && fp == s_hud_fp[k]) composite = 1;
+    const int display = s->w == g.width && s->h == g.height;
+    if (composite) { s_hc_loc = s->location; s_hc_off = s->offset; s_hc_draw = g.guest_draws; s_wn_broke = 0; return; }
+    if (!display) return;
+    const int other = s->offset != s_hc_off || s->location != s_hc_loc;
+    if (!other) {
+        if (s_wn_n && s_hud_after) s_wn_hud++;
+        /* the composite's target again after a break: still its frame's HUD (the next frame cannot draw into the
+         * buffer still waiting to be shown), so the break was not the next frame -- pinned again */
+        if (s_wn_broke && !s_hud_after) { s_hud_after = 1; s_wn_broke = 0; s_wn_back++; }
+    } else if (s_hud_after) {
+        if (!s_wn_n++) { s_wn_draw = g.guest_draws; s_wn_off = s->offset; s_wn_fp = fp; }
+        if (on) { s_hud_slice++; s_hud_after = 0; s_wn_broke = 1; }   /* the next frame: fills, as after the present */
+    }
+    /* WIDE_LOG's count of the bug: a display draw after the composite into another target that is still pinned as
+     * the HUD (the caller then decides hud = s_hud_after) -- a pass of a picture squeezed into the 16:9 rectangle */
+    if (other && s_hud_after) s_p3_n++;
+}
+/* Before the present (the bars block, eng_present): WIDE_LOG's line for a frame that held the head of the next one, and
+ * the counts once every 10 s. A call of its own (eng_present's profile). */
+static __attribute__((noinline)) void eng_hud_next_frame_log(void)
+{
+    static u32 frames, hits, sq; static unsigned long long t0;
+    frames++;
+    if (s_p3_n) sq++;
+    if (s_wn_n) {
+        hits++;
+        if (eng_wide_log()) {
+            static u32 n;
+            if (n++ < 300u)
+                fprintf(stderr, "[widenext] frame %u: the next frame began before this present: display draws into other targets "
+                                "after the composite, the first at draw %u into 0x%08X (fp %016llx); %u of them pinned as the HUD%s; "
+                                "the last composite at draw %u into 0x%08X, %u draws into it after the first; %u draws%s\n",
+                        g.frames, s_wn_draw, s_wn_off, (unsigned long long)s_wn_fp, s_p3_n,
+                        s_p3_n ? " (a squeezed picture)" : " (none: they filled)", s_hc_draw, s_hc_off, s_wn_hud, g.guest_draws,
+                        s_wn_back ? " (break taken back)" : "");
+        }
+    }
+    s_wn_n = s_wn_hud = s_wn_back = s_p3_n = 0; s_wn_broke = 0;
+    extern unsigned long long ps3_ms_now(void);
+    const unsigned long long now = ps3_ms_now();
+    if (!t0) t0 = now;
+    if (now - t0 >= 10000ull) {
+        if (eng_wide_log()) fprintf(stderr, "[widenext] 10 s: %u frame(s) of %u held the head of the next one, %u of them with "
+                                            "its draws pinned as the HUD\n", hits, frames, sq);
+        frames = hits = sq = 0; t0 = now;
+    }
+}
 
 #include "rsx_draw_delta.inc"   /* (rnd1) PS3RECOMP_ENG_DELTA */
 #include "rsx_draw_fast.inc"    /* (fastdraw) PS3RECOMP_ENG_FASTDRAW */
@@ -8287,6 +8370,7 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
             int composite = 0;
             for (int k = 0; k < s_hud_n; k++) if (fk && fk == s_hud_fp[k]) composite = 1;
             display = g.surfaces[target].w == g.width && g.surfaces[target].h == g.height;
+            eng_hud_next_frame(target, fk);   /* (#47) a draw of the next frame before this one's present */
             if (composite) { s_hud_after = 1; s_hud_seen = s_hud_slice; s_hud_comp_vp = vk; s_ov_mode = 0; s_ov_cnt = 0; }
             else if (display) hud = s_hud_after || s_ov_mode;
             /* (dofov) PS3RECOMP_WIDE_FILL (default 1): a draw after the composite that covers the whole guest
@@ -8749,6 +8833,7 @@ static void eng_present(u32 buffer_id)
                   if (++s_ov_cnt >= ENW_FRAMES && now - s_ov_t0 >= ENW_MS) s_ov_mode = 1;
               }
           } }
+        eng_hud_next_frame_log();   /* (#47) WIDE_LOG */
         const int bars = !s_hud_after && s_ov_mode;
         { static int wl = -1; static int last = -1;   /* PS3RECOMP_WIDE_LOG=1: a change of the bars verdict (GitHub #47) */
           if (wl < 0) { const char* e = getenv("PS3RECOMP_WIDE_LOG"); wl = e && *e == '1'; }
