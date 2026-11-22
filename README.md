@@ -60,7 +60,7 @@ AVX2, a graphics driver with Vulkan (Mesa or NVIDIA's; desktops have it already)
    where the game should live, for example `~/Games/inFAMOUS2` (on a Deck: the internal storage, with about 10 GB
    free).
 2. Double-click the program **Install inFAMOUS 2** in that folder. If the desktop asks whether to run it, choose
-   Execute / Run. (KDE and the Steam Deck can also use the entry **Install inFAMOUS 2.desktop** beside it.)
+   Execute / Run.
    **GNOME** (Ubuntu, Fedora Workstation): if the file manager does not start it, right-click it and choose
    **Run as a Program**, or open a terminal in the folder and type `bash tools/install_gui.sh`. Without zenity or
    kdialog the installer asks its questions in a terminal window.
@@ -80,8 +80,9 @@ AVX2, a graphics driver with Vulkan (Mesa or NVIDIA's; desktops have it already)
    in the middle and plays by itself for about 7 minutes, with the sound off: don't touch it or close it.
 7. With Add to Steam: Steam has to be closed for a moment, because it rewrites its list of games when it exits.
    The installer asks to close it (or waits until you have), adds the shortcut, and tells you to start Steam again.
-8. Press **Play now**. Later, double-click **Play inFAMOUS 2** in the same folder, start **inFAMOUS 2 (PC port)**
-   from the application menu, or, with Add to Steam, start it from your Steam library, also in Game Mode.
+8. Press **Play now**. Later, double-click the program **Play inFAMOUS 2** in the same folder (no Steam needed),
+   start **inFAMOUS 2 (PC port)** from the application menu, or, with Add to Steam, start it from your Steam library,
+   also in Game Mode. Before the game is built, Play inFAMOUS 2 starts the installer.
 
 **Add to Steam** adds one non-Steam game that starts this folder's `tools/play.sh`, with artwork made from your
 game's own icon and background (`PS3_GAME/ICON0.PNG`, `PIC1.PNG`). It only ever adds an entry: your other shortcuts

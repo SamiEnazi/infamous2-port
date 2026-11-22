@@ -35,7 +35,6 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[ -x "$exe" ] || { echo "not built yet: $exe (tools/setup.sh, or python3 -I tools/rebuild.py)"; exit 1; }
 game="$root/game"
 
 # tell <text>: said on the terminal, and in a message box when there is none (the Play launcher, the menu entry)
@@ -48,6 +47,8 @@ tell() {
     elif command -v kdialog >/dev/null 2>&1; then kdialog --title "inFAMOUS 2" --error "$1" 2>/dev/null; fi
     return 0
 }
+[ -x "$exe" ] || { tell "inFAMOUS 2 isn't built yet: double-click Install inFAMOUS 2 in this folder, or run ./setup.sh.
+(Missing: $exe)"; exit 1; }
 # Your game folder (GitHub issue #13): game/disc is a link to it with its full path (setup --link-game, or a setup
 # before v0.6.0; else game/disc is a copy). A game folder kept inside the port's folder (or beside it) keeps the OLD
 # path in the link when the port's folder is renamed or moved: the game then shows its intro logos and a black screen.
@@ -112,16 +113,16 @@ psarc="$game/disc/PS3_GAME/USRDIR/cache/psarc"
 if [ -d "$game/disc/PS3_GAME" ]; then
     for f in core.psarc music.psarc; do
         if [ ! -f "$psarc/$f" ]; then
-            echo "Your game folder is missing some of the game's files: $f (in PS3_GAME/USRDIR/cache/psarc)."
-            echo "Copy the complete game folder again (the one with PS3_GAME), then start the game again."
+            tell "Your game folder is missing some of the game's files: $f (in PS3_GAME/USRDIR/cache/psarc).
+Copy the complete game folder again (the one with PS3_GAME), then start the game again."
             exit 1
         fi
     done
     for f in core.psarc music.psarc install1/infamous1.psarc_s install2/infamous2.psarc_s; do
         if [ -f "$psarc/$f" ] && [ "$(head -c 4 "$psarc/$f")" != "PSAR" ]; then
-            echo "Your game's files can't be read: $f doesn't start like a game archive."
-            echo "The copy is still encrypted or damaged. The port needs a decrypted copy of the game folder,"
-            echo "the same kind RPCS3 uses for a disc game."
+            tell "Your game's files can't be read: $f doesn't start like a game archive.
+The copy is still encrypted or damaged. The port needs a decrypted copy of the game folder,
+the same kind RPCS3 uses for a disc game."
             exit 1
         fi
     done
@@ -216,7 +217,7 @@ fi
 [ -n "${PS3_OVERLAY_INI+x}" ] || export PS3_OVERLAY_INI="$root/settings.ini" PS3_CHEATS_SPOTS="$root/spots.ini" PS3_GAME_MODS_STATE="$root/mods.ini"
 [ -n "${PS3RECOMP_VK_SHADER_CACHE+x}" ] || export PS3RECOMP_VK_SHADER_CACHE="$root/work/shader_cache"
 if ! grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
-    echo "This PC's CPU has no AVX2, and the game is built for CPUs with it (Intel 4th gen / AMD Ryzen or newer)."; exit 1
+    tell "This PC's CPU has no AVX2, and the game is built for CPUs with it (Intel 4th gen / AMD Ryzen or newer)."; exit 1
 fi
 export PS3_VFS_ROOT="$game/disc" PS3_HDD0_ROOT="$game/dev_hdd0" PS3_DEV_FLASH="$flash" \
        PS3_GAMEDATA_ROOT="$game/gamedata" PS3_TITLE="inFAMOUS 2" PS3_GAME_MODS_DIR="$mods" \

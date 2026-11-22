@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # The double-click installer (Linux, Steam Deck Desktop Mode): the program "Install inFAMOUS 2" in the port's folder
-# (tools/launcher/install_launcher.c: GNOME's file manager runs programs, not .desktop files from a folder) or
-# "Install inFAMOUS 2.desktop" (KDE's Dolphin, the Deck) runs this; so does `bash tools/install_gui.sh`. The same build as ./setup.sh (tools/setup.sh), in dialogs: zenity, else kdialog; in a terminal without them.
+# (tools/launcher/launcher.c: GNOME's file manager runs programs, not .desktop files from a folder) runs this, and so
+# does "Play inFAMOUS 2" before the game is built; so does `bash tools/install_gui.sh`. The same build as ./setup.sh (tools/setup.sh), in dialogs: zenity, else kdialog; in a terminal without them.
 #   1. what it does, with the checkbox "Optimise for this PC (PGO)" (on, as in Setup.exe; tools/setup.sh --pgo)
 #   2. your game folder: the one an earlier setup used or RPCS3's game list has (asked to confirm), else a folder picker;
 #      then how to use it: from where it is (the default: no copy, the folder has to stay there) or copied into this folder
 #   3. a progress window with setup's steps (Cancel stops it; everything it says is in work/logs/install.log)
-#   4. the end: "Play inFAMOUS 2.desktop" in this folder (it starts tools/play.sh), and Play now
+#   4. the end: Play now (later: the program "Play inFAMOUS 2" in this folder starts tools/play.sh)
 # Started again once the game is built: Play / Rebuild / Optimise for this PC (or Train again) / Add to Steam.
 # Add to Steam (tools/steam_shortcut.py): a non-Steam shortcut that starts tools/play.sh (Game Mode), with artwork from the
 # game's own ICON0/PIC1; it only ever ADDS an entry, writes only while Steam is closed (it asks to close it), backs the
@@ -17,6 +17,13 @@
 set -u
 here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 cd "$here" || exit 1
+# v0.6.3-deck2/deck3 kept .desktop files in this folder next to the programs of the same name: the programs replace
+# them (only ours are removed: the name and the "sh %k" start line); the programs stay executable
+for n in "Install inFAMOUS 2" "Play inFAMOUS 2"; do
+    f="$here/$n.desktop"
+    [ -f "$f" ] && grep -qxF "Name=$n" "$f" && grep -qF "sh %k" "$f" && rm -f "$f"
+    [ -f "$here/$n" ] && [ ! -x "$here/$n" ] && chmod +x "$here/$n" 2>/dev/null
+done
 title="inFAMOUS 2 Setup"
 exe="$here/work/port/build/Infamous2Recomp"
 log="$here/work/logs/install.log"
@@ -236,24 +243,7 @@ $detail}
     return $rc
 }
 
-play_entry() {   # "Play inFAMOUS 2.desktop" in this folder (%k: its own place, so the folder can be moved)
-    local f="$here/Play inFAMOUS 2.desktop" icon="$here/work/icon/icon0.png"
-    [ -f "$icon" ] || icon=applications-games
-    cat > "$f" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Play inFAMOUS 2
-Comment=inFAMOUS 2, natively on Linux (your own copy, recompiled)
-Exec=sh -c 'exec bash "\$(dirname "\$1")/tools/play.sh"' sh %k
-Icon=$icon
-Terminal=false
-Categories=Game;
-EOF
-    chmod +x "$f"
-    command -v gio >/dev/null 2>&1 && gio set "$f" metadata::trusted true 2>/dev/null
-    return 0
-}
-play() { play_entry; cd "$here" && exec bash "$here/tools/play.sh"; }
+play() { cd "$here" && exec bash "$here/tools/play.sh"; }
 
 # ------------------------------------------------------------------ Add to Steam
 # Python: setup's own (tools-cache/python, tools/buildenv.sh), else the system's; on a system with none, setup's is
@@ -379,6 +369,8 @@ fi
 # setup's menu entry (~/.local/share/applications/infamous2-port.desktop) is kept when it starts another folder's game
 entry="${XDG_DATA_HOME:-$HOME/.local/share}/applications/infamous2-port.desktop"
 menu_too=", or find inFAMOUS 2 in the application menu"
+play_how="double-click \"Play inFAMOUS 2\" in this folder ($here)"
+[ -f "$here/Play inFAMOUS 2" ] || play_how="./setup.sh --play in this folder ($here)"
 if [ -f "$entry" ] && ! grep -qxF "Path=$here" "$entry"; then args+=(--no-desktop); menu_too=""; fi
 
 # The game folder an earlier setup linked (game/disc -> your folder) and it is not there: an SD card or drive that is not
@@ -434,7 +426,6 @@ Your saves, settings and the game's update are kept in this folder either way." 
 fi
 
 if run_setup --disc "$disc" "${args[@]}"; then
-    play_entry
     steam_add   # (when Add to Steam was ticked: before the last window, so Steam can be started again after it)
     pgo_line="$(sed -n 's/^  pgo: \(used (.*\|not used: .*\)$/\1/p' "$log" | tail -n 1)"
     mins="$(sed -n 's/^== done in \([0-9]*\) min.*/\1/p' "$log" | tail -n 1)"
@@ -448,7 +439,7 @@ if run_setup --disc "$disc" "${args[@]}"; then
 Your game is used from $(readlink "$here/game/disc"): it has to be there when you play."
     if ask "$how${mins:+ (setup took $mins min)}
 
-To play later: double-click \"Play inFAMOUS 2\" in this folder ($here)${menu_too}.
+To play later: ${play_how}${menu_too}.
 In the game: F1 = FPS counter, F2 = settings.$linked" "Play now" "Close"; then play; fi
 else
     why="$(sed -n 's/^== FAILED: //p' "$log" | tail -n 1)"

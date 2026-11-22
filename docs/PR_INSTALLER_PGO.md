@@ -4,12 +4,14 @@ DRAFT section for the pull request description (agents inst and inst2, 2026-11-2
 installs on a Steam Deck (LCD, SteamOS 3.9.5), see "Measured" below. v2 (inst2): the game used where it is (no 14 GB
 copy), Optimise trains the engine too, the new game played the way the tutorial asks, and Add to Steam. v3 (uni): the
 same installer on every distribution with nothing to install (a downloaded build environment), a double-click program
-for GNOME, and the Deck's job-thread count only on the Deck. v3 is not tested yet as a whole install (see "v3").
+for GNOME, and the Deck's job-thread count only on the Deck. v3 was installed by the player on a Steam Deck and an
+Ubuntu 22.04 laptop (2026-11-22). v4: Add to Steam keeps shortcuts.vdf's permissions (see "Add to Steam"), a
+**Play inFAMOUS 2** program, and no .desktop or .cmd files in the Linux folder.
 
 ## What a Linux / Steam Deck player gets
 
 Unpack the Linux zip anywhere and double-click the program **Install inFAMOUS 2** (Desktop Mode on the Deck, or any
-desktop; KDE can use **Install inFAMOUS 2.desktop** too; GNOME, when its file manager will not start it: right-click,
+desktop; GNOME, when its file manager will not start it: right-click,
 **Run as a Program**, or `bash tools/install_gui.sh`). The installer uses zenity or kdialog; without either it opens a
 terminal and asks there:
 
@@ -82,15 +84,25 @@ same files on every distribution, each pinned to an exact version, address and S
   the game module's objects stay: the module links nothing but itself).
 - **No xz or unzip** on the system: LLVM's `.tar.xz` and Ninja's zip are unpacked by the port's Python.
 
-**The launcher** (`tools/launcher/install_launcher.c`, ~200 lines): GNOME's file manager runs programs on a
-double-click but not `.desktop` files kept in a folder, so the zip's top folder also has a program **Install inFAMOUS
-2**. It has no C library at all (Linux system calls, `-nostdlib -static`: 3 KB with lld, 9 KB with GNU ld), so the
+**The launchers** (`tools/launcher/launcher.c`, ~230 lines, compiled twice): GNOME's file manager runs programs on a
+double-click but not `.desktop` files kept in a folder, so the zip's top folder has two programs, **Install inFAMOUS
+2** and **Play inFAMOUS 2** (`-DPLAY`). Play starts `bash tools/play.sh` with its arguments when
+`work/port/build/Infamous2Recomp` is there, else the installer; play.sh shows its errors in a message box when it has
+no terminal (the game folder gone, files missing or encrypted, no AVX2, not built). It has no C library at all (Linux system calls, `-nostdlib -static`: 3 KB with lld, 9 KB with GNU ld), so the
 same file runs on any x86-64 Linux. It starts `tools/install_gui.sh` from its own folder; without zenity / kdialog it
 opens a terminal (konsole, ptyxis, kgx, gnome-terminal, xfce4-terminal, mate-terminal, tilix, x-terminal-emulator,
 alacritty, kitty, foot, xterm; install_gui.sh's own list is the same). It is not committed as a binary:
 `tools/make_release_zip_linux.py` compiles it from the commit's source (`--llvm`, else `PORT_LLVM`, else
 tools-cache/llvm, else clang on PATH; lld, else the GNU linker), checks it is a static executable, prints its SHA-256,
-and adds it (mode 755) with **How to install on Linux.txt**. `Install inFAMOUS 2.desktop` stays for KDE.
+and adds it (mode 755) with **How to install on Linux.txt**.
+
+v4: no `.desktop` files in the folder any more. Dolphin showed "Install inFAMOUS 2" twice (the program and the
+entry), and the installer's "Play inFAMOUS 2.desktop" did nothing on GNOME. The programs work everywhere, and the
+installer removes the old entries (only ours: the name and the `sh %k` line). The Windows starters at the top
+(`Setup.cmd`, `Play inFAMOUS 2.cmd`) are left out of the Linux zip, and the zip script refuses any other
+`.desktop` / `.cmd` / `.bat` / `.exe` at the top. Kept: setup's menu entry
+(`~/.local/share/applications/infamous2-port.desktop`). It isn't in the folder, it shows the game in the application
+menu, and Steam's "Add a Non-Steam Game" lists it.
 
 **Job threads: the Deck only.** `PS3_NATIVE_JOBS_THREADS=4` is set by `tools/play.sh` (and the trainer) only on a
 Steam Deck (board vendor Valve: LCD and OLED); every other PC gets the engine's own rule (physical cores - 2, at most
@@ -390,8 +402,8 @@ v3 (uni):
 - `tools/libc_headers.sh`: the fallback now; Python from `PORT_PY`; plain advice (no packages).
 - `tools/rebuild_win.py`: RUNPATH `$ORIGIN` for the Linux engine, `PORT_SDL2_RUNTIME` copied beside it (and into
   training builds).
-- `tools/launcher/install_launcher.c` (new), `tools/make_release_zip_linux.py` (compiles it into the zip, adds
-  "How to install on Linux.txt").
+- `tools/launcher/install_launcher.c` (new; v4: `launcher.c`, also Play), `tools/make_release_zip_linux.py` (compiles
+  it into the zip, adds "How to install on Linux.txt"; v4: both programs, no Windows starters).
 - `tools/install_gui.sh`: setup's Python for Add to Steam (downloaded first on a system with no python3), more terminals.
 - `tools/play.sh`, `tools/pgo_train.py`: 4 job threads on a Deck only; play.sh's summary with setup's Python.
 - `README.md`: the Linux install says it is the same everywhere with nothing to install, and how to start it on GNOME.

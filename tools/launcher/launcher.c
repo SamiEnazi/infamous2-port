@@ -1,18 +1,29 @@
-/* "Install inFAMOUS 2": the double-click program at the top of the Linux release's folder.
+/* "Install inFAMOUS 2" and "Play inFAMOUS 2": the two double-click programs at the top of the Linux release's folder
+ * (this one source, compiled twice: -DPLAY for Play). They are programs, not .desktop files, because GNOME's file
+ * manager runs a program on a double-click but not a .desktop file kept in a folder; KDE's Dolphin (the Steam Deck),
+ * Xfce's Thunar and the others run programs too (Dolphin may ask first: Execute).
  *
- * It starts tools/install_gui.sh (the installer: zenity, kdialog, or the text way in a terminal) from the folder it is
- * in. GNOME's file manager runs a program on a double-click but not a .desktop file kept in a folder; KDE's Dolphin,
- * Xfce's Thunar and the others run programs too (Dolphin uses "Install inFAMOUS 2.desktop", which stays beside it).
+ * Install inFAMOUS 2 starts tools/install_gui.sh (the installer: zenity, kdialog, or the text way in a terminal) from
+ * the folder it is in:
  *   - started from a terminal, or with no desktop (no DISPLAY / WAYLAND_DISPLAY): bash tools/install_gui.sh, here;
  *   - zenity or kdialog there: the same (the installer shows its own windows);
  *   - neither: a terminal window running it (konsole, GNOME's ptyxis / kgx / gnome-terminal, xfce4-terminal, ...).
+ * Play inFAMOUS 2 starts the game, bash tools/play.sh (its arguments passed on), when it is built
+ * (work/port/build/Infamous2Recomp); play.sh shows its own messages in a window when there is no terminal. Not built
+ * yet: the installer, the same way as Install inFAMOUS 2.
  * Without bash or the script it says so on stderr and exits 1.
  *
  * No C library and no dynamic loader: Linux system calls only, built static (-nostdlib -static), so the same file runs
- * on every x86-64 Linux. tools/make_release_zip_linux.py compiles it into the zip (it is not committed as a binary):
+ * on every x86-64 Linux. tools/make_release_zip_linux.py compiles both into the zip (not committed as binaries):
  *   clang --target=x86_64-linux-gnu -Os -static -nostdlib -ffreestanding -fno-pic -no-pie -fuse-ld=lld \
- *         -o "Install inFAMOUS 2" tools/launcher/install_launcher.c
+ *         [-DPLAY] -o "Install inFAMOUS 2" tools/launcher/launcher.c
  */
+
+#ifdef PLAY
+#define WHO "Play inFAMOUS 2: "
+#else
+#define WHO "Install inFAMOUS 2: "
+#endif
 
 typedef unsigned long usize;
 
@@ -118,25 +129,45 @@ __attribute__((noreturn)) static void quit(int code)
 __attribute__((used, noreturn)) void start_c(long* sp)
 {
     long argc = sp[0];
+    char** argv = (char**)(sp + 1);
     char** envp = (char**)(sp + 1 + argc + 1);
     static char self[PATH_MAX], dir[PATH_MAX], script[PATH_MAX], bash[PATH_MAX], term[PATH_MAX];
 
     long n = sys3(SYS_readlink, (long)"/proc/self/exe", (long)self, PATH_MAX - 1);
-    if (n <= 0) { say("Install inFAMOUS 2: cannot tell which folder it is in (/proc/self/exe)\n"); quit(1); }
+    if (n <= 0) { say(WHO "cannot tell which folder it is in (/proc/self/exe)\n"); quit(1); }
     self[n] = 0;
     while (n > 0 && self[n - 1] != '/') n--;
-    if (n <= 1) { say("Install inFAMOUS 2: odd program path\n"); quit(1); }
+    if (n <= 1) { say(WHO "odd program path\n"); quit(1); }
     memcpy(dir, self, (usize)(n - 1));
     dir[n - 1] = 0;
-    if (!join(script, dir, "/tools/install_gui.sh", 0) || sys3(SYS_access, (long)script, R_OK, 0) != 0) {
-        say("Install inFAMOUS 2: tools/install_gui.sh is not next to this program: unpack the whole zip, then start it again\n");
-        quit(1);
-    }
     if (!which(bash, envp, "bash")) {
         if (sys3(SYS_access, (long)"/bin/bash", X_OK, 0) == 0) join(bash, "/bin/bash", 0, 0);
-        else { say("Install inFAMOUS 2: no bash on this system\n"); quit(1); }
+        else { say(WHO "no bash on this system\n"); quit(1); }
     }
     sys3(SYS_chdir, (long)dir, 0, 0);
+#ifdef PLAY
+    {   /* built: the game, with this program's arguments (e.g. --fullscreen) */
+        static char game[PATH_MAX];
+        static char* a[64];
+        if (join(script, dir, "/tools/play.sh", 0) && sys3(SYS_access, (long)script, R_OK, 0) == 0 &&
+            join(game, dir, "/work/port/build/Infamous2Recomp", 0) && sys3(SYS_access, (long)game, X_OK, 0) == 0) {
+            long k = 0;
+            a[k++] = bash;
+            a[k++] = script;
+            for (long i = 1; i < argc && k < 63; i++) a[k++] = argv[i];
+            a[k] = 0;
+            sys3(SYS_execve, (long)bash, (long)a, (long)envp);
+            say(WHO "starting bash failed\n");
+            quit(1);
+        }
+    }   /* not built yet: the installer */
+#else
+    (void)argv;
+#endif
+    if (!join(script, dir, "/tools/install_gui.sh", 0) || sys3(SYS_access, (long)script, R_OK, 0) != 0) {
+        say(WHO "tools/install_gui.sh is not next to this program: unpack the whole zip, then start it again\n");
+        quit(1);
+    }
 
     const char* disp = getenv_(envp, "DISPLAY");
     const char* wl = getenv_(envp, "WAYLAND_DISPLAY");
@@ -144,7 +175,7 @@ __attribute__((used, noreturn)) void start_c(long* sp)
     char* run_here[] = {bash, script, 0};
     if (isatty0() || !desktop || which(term, envp, "zenity") || which(term, envp, "kdialog")) {
         sys3(SYS_execve, (long)bash, (long)run_here, (long)envp);
-        say("Install inFAMOUS 2: starting bash failed\n");
+        say(WHO "starting bash failed\n");
         quit(1);
     }
     /* no dialog program: a terminal window with the installer's text way. How each one takes a command: */
@@ -161,7 +192,7 @@ __attribute__((used, noreturn)) void start_c(long* sp)
     }
     /* no terminal either: the installer itself says what it can (its last resort is the same search) */
     sys3(SYS_execve, (long)bash, (long)run_here, (long)envp);
-    say("Install inFAMOUS 2: starting bash failed\n");
+    say(WHO "starting bash failed\n");
     quit(1);
 }
 
