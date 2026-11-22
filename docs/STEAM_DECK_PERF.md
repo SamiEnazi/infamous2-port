@@ -7,6 +7,14 @@ Since 2026-11-19 the work continues on the local branch `deck-v063` = deck-perf 
 what each upstream addition costs, the A/B against the installed hd3; build mg3r = the hd4 candidate).
 2026-11-20, roadmap step 6 (agent hd5): today's three pieces combined, defaults decided (play.sh PRIO 1 + R8 3, the store
 lift on Linux builds), PGO retrain mg5r; build work/port/hd5c = the hd5 candidate (section 6 "Step 6 result", section 4).
+2026-11-22, the upstream PR's video (agent cmp; NOTES.md "PR comparison: upstream v0.6.3 vs deck-perf PGO"): one
+real-clock street take per build, recorded (Deck preset, 1280x800 window, 60 fps cap, HUD on, GPU 1100; upstream with its
+own launcher env = 2 job threads): route 2-44 s **upstream v0.6.3 29.3 fps vs wide4 (= installed hd7) 47.8 fps
+(+63 %)**, p99 44.3 vs 31.1 ms, > 50 ms 6 / 0 a minute, worst 55 / 48 ms; the 15 s of the video (route 2-17 s) 28.0 vs
+46.0 (+64.5 %). Single takes: an example, not a statistic. Media: work/pr/compare-v063/ (fork: release v0.6.3-deck4,
+branch pr-media). **Caveat found then: the Deck is docked to a 3840x2160 monitor, so the Deck-preset FULLSCREEN benches
+(i2-*, inst*, wide-*) ran with a 4K swapchain, not 1280x800**; both sides of every A/B alike, so their percentages
+stand. The takes above used `PS3RECOMP_VK_FULLSCREEN=0 PS3RECOMP_VK_WINDOW_SIZE=1280x800`.
 2026-11-20, roadmap step 8 (agent sz2): the three big options sized with bench-only measurement modes (section 6 "Step 8
 result"): the existing Vulkan recording worker on CPU 7 is +2.1 % on the street today; Edge's math off the CPU is worth
 more than thought (contention with the main thread); ThinLTO and the other compiler-level call fixes give nothing.
