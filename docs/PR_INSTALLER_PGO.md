@@ -1,7 +1,7 @@
 # Linux: a double-click installer and "Optimise for this PC" (PGO)
 
 DRAFT section for the pull request description (agents inst and inst2, 2026-11-21; uni, 2026-11-22). Numbers: clean
-installs on a Steam Deck (LCD, SteamOS 3.9.5), see "Measured" below. v2 (inst2): the game used where it is (no 14 GB
+installs on a Steam Deck (OLED, SteamOS 3.9.5), see "Measured" below. v2 (inst2): the game used where it is (no 14 GB
 copy), Optimise trains the engine too, the new game played the way the tutorial asks, and Add to Steam. v3 (uni): the
 same installer on every distribution with nothing to install (a downloaded build environment), a double-click program
 for GNOME, and the Deck's job-thread count only on the Deck. v3 was installed by the player on a Steam Deck and an
@@ -267,7 +267,7 @@ mirror, SHA-256 checked, 61 MB), only its C++ headers and GCC's start files and 
 game still links against and runs with the system's own libstdc++. The step-2 compiler self-test passes, and the whole
 install below ran on it.
 
-## Measured v2 (Steam Deck LCD, SteamOS 3.9.5, agent inst2)
+## Measured v2 (Steam Deck OLED, SteamOS 3.9.5, agent inst2)
 
 A clean install from the release zip with the v2 installer, double-clicked, Optimise ticked, "Use the game from its
 folder" (the SD card), and for the measurement below all four kinds of training run in one go
@@ -317,7 +317,7 @@ the table (the 95 % bounds), and needs no save, which is why it is the default: 
 whatever their copy's region. A training save is for one title ID (the street save is BCUS98125's; an EU game does not
 list it and the run is skipped).
 
-## Measured v1 (Steam Deck LCD, SteamOS 3.9.5, a clean install from the release zip)
+## Measured v1 (Steam Deck OLED, SteamOS 3.9.5, a clean install from the release zip)
 
 A clean install from the release zip, double-clicked as a player would, Optimise ticked, the game folder on the SD card
 (found in RPCS3's list), the player's four saves copied into the new folder first (so the save run had a save), and the
