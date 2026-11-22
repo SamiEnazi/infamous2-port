@@ -94,6 +94,12 @@ into the `dlc` folder in the port's folder: they are picked up at the next start
 Double-click **Install inFAMOUS 2** again at any time to play, rebuild (after an update, or to repair it), optimise,
 or add it to Steam. Your saves and settings stay.
 
+**For the best performance on a Steam Deck, set the GPU clock to 1100 MHz:** in Game Mode, open Quick Access (…)
+→ Performance → Advanced view → Manual GPU clock control → 1100 MHz, ideally with "Use per-game profile" on for this
+game. The Deck's CPU and GPU share one 15 W budget. Above about 1100 MHz the GPU takes power the CPU needs, and the
+game gets slower and less steady: on a busy street, 1400 MHz was 5-7 % slower than 1100 and 1600 MHz about 10 %
+slower. 1000-1200 MHz were about the same.
+
 ## What's new in v0.6.3
 
 A hotfix.
