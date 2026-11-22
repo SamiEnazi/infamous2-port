@@ -1,13 +1,17 @@
 # Linux: a double-click installer and "Optimise for this PC" (PGO)
 
-DRAFT section for the pull request description (agents inst and inst2, 2026-11-21). Numbers: clean installs on a
-Steam Deck (LCD, SteamOS 3.9.5), see "Measured" below. v2 (inst2): the game used where it is (no 14 GB copy), Optimise
-trains the engine too, the new game played the way the tutorial asks, and Add to Steam.
+DRAFT section for the pull request description (agents inst and inst2, 2026-11-21; uni, 2026-11-22). Numbers: clean
+installs on a Steam Deck (LCD, SteamOS 3.9.5), see "Measured" below. v2 (inst2): the game used where it is (no 14 GB
+copy), Optimise trains the engine too, the new game played the way the tutorial asks, and Add to Steam. v3 (uni): the
+same installer on every distribution with nothing to install (a downloaded build environment), a double-click program
+for GNOME, and the Deck's job-thread count only on the Deck. v3 is not tested yet as a whole install (see "v3").
 
 ## What a Linux / Steam Deck player gets
 
-Unpack the Linux zip anywhere and double-click **Install inFAMOUS 2** (Desktop Mode on the Deck, or any desktop with
-zenity or kdialog; without either it opens a terminal and asks there):
+Unpack the Linux zip anywhere and double-click the program **Install inFAMOUS 2** (Desktop Mode on the Deck, or any
+desktop; KDE can use **Install inFAMOUS 2.desktop** too; GNOME, when its file manager will not start it: right-click,
+**Run as a Program**, or `bash tools/install_gui.sh`). The installer uses zenity or kdialog; without either it opens a
+terminal and asks there:
 
 1. **Start screen**: what the install does (time, disk space, what is downloaded) and two checkboxes, both ticked:
    **Optimise for this PC (PGO)** (as in Setup.exe) and **Add to Steam** (shown when Steam is installed; then a box
@@ -32,6 +36,65 @@ Screenshots of every window: (to attach; taken on the Deck: work/pr/installer-sh
 
 In a terminal nothing changes for existing users: `./setup.sh` as before, plus `./setup.sh --pgo` and
 `./setup.sh --link-game`.
+
+## v3: the same on every distribution, nothing to install
+
+Before v3 step 1 checked the distribution's packages (a C/C++ toolchain, python3 with venv, the Vulkan loader, SDL2)
+and told the player to install what was missing; SteamOS, which has no headers and a read-only system, got its own
+glibc / gcc packages downloaded. Now `tools/setup.sh` downloads the whole build environment into `tools-cache/`, the
+same files on every distribution, each pinned to an exact version, address and SHA-256 (`tools/buildenv.sh`):
+
+| what | from | size | SHA-256 |
+|---|---|---|---|
+| Python 3.14.10 (python-build-standalone 20261026, `x86_64-unknown-linux-gnu-install_only_stripped`) | GitHub (astral-sh) | 37 MB (109 MB unpacked) | `4d3c16c5...412aed` |
+| sysroot: `libc6`, `libc6-dev` 2.35-0ubuntu3 (Ubuntu 22.04's glibc) | archive.ubuntu.com, else Launchpad | 3.2 + 2.1 MB | `ea9a27e0...6b6db2`, `cc37cab5...370c56` |
+| sysroot: `linux-libc-dev` 5.15.0-25.25 (kernel headers) | same | 1.3 MB | `1b2a9302...5336d8` |
+| sysroot: `libgcc-12-dev`, `libstdc++-12-dev`, `libgcc-s1` 12.3.0-1ubuntu1~22.04.3 (GCC 12.3) | same | 2.6 + 2.2 + 0.05 MB | `a9933d99...eddca0e`, `250f538c...6ed1e`, `d383e642...4589a` |
+| SDL 2.32.10 (`libsdl2-2.0-0` 2.32.10+dfsg-4+steamrt1.1+srt1, Valve's Steam Runtime 1 build) | repo.steampowered.com | 0.6 MB | `102f431d...e91052` |
+| LLVM 22.1.8, CMake 3.31.3, Ninja 1.11.1, Vulkan headers, glslang 15.1.0, SDL2 2.30.10 headers | GitHub (as before; CMake and Ninja now always, never the system's) | | as before |
+
+- **The sysroot** (`tools-cache/sysroot`, 40 MB unpacked by `tools/buildenv.py deb`: no dpkg or ar needed; absolute
+  links made relative so nothing points at the system; no docs, locales, sanitizer libraries or static libc) is the
+  compiler's whole world: `tools-cache/llvm/bin/clang.cfg` = `--sysroot=<CFGDIR>/../../sysroot -static-libgcc`,
+  `clang++.cfg` adds `-static-libstdc++` (clang does not warn about config-file options a compile does not use). The
+  headers, crt files, `libc_nonshared.a`, the kernel headers, libgcc and libstdc++ all come from there, nothing from
+  `/usr/include`, and the game links against glibc 2.35's own `libc.so.6`, so it asks for no newer symbol versions.
+  The engine then needs `libSDL2-2.0.so.0 libm.so.6 libc.so.6 ld-linux-x86-64.so.2` and nothing newer than
+  GLIBC_2.35 (`tools/buildenv.py elf` checks it after the build and in the compiler self-test); the game module links
+  nothing at all (as before). Runtime needs: glibc 2.35 or newer and the GPU's Vulkan driver.
+- **SDL2** for the game is Valve's own Steam Runtime build (2.32.10), which loads X11, PulseAudio / PipeWire / ALSA,
+  udev and D-Bus by itself when they are there (it has no Wayland backend: `tools/play.sh` already starts the game
+  through XWayland on a Wayland desktop). The engine links against it and finds it beside itself
+  (`work/port/build/libSDL2-2.0.so.0`, RUNPATH `$ORIGIN`, copied with the engine into training builds). Valve's pool
+  keeps only its newest build: when the pinned file is gone, setup uses the system's `libSDL2-2.0.so.0` as before and
+  says so. Another SDL2 for one session: `SDL_DYNAMIC_API=/usr/lib/libSDL2-2.0.so.0 tools/play.sh`.
+- **Python**: `tools-cache/python` runs step 1's game checks, `work/venv` (made again when an older setup made it
+  with the system's python3), every tool setup runs, the installer's Steam helper and play.sh's session summary.
+- **Step 1** checks only what cannot be downloaded: x86-64, AVX2, glibc 2.35 or newer, a Vulkan driver (the loader
+  and an ICD file), free disk space (MISS under 12 GB), curl / tar / gzip; plain words, no package names.
+- **Fallback, so the Deck cannot regress:** when the sysroot cannot be downloaded or unpacked, or its compiler
+  self-test fails (a C and a C++ program compile, link, run, and the C++ one needs no `libstdc++.so.6`), setup writes
+  the old `.cfg` (the system's own GCC folder, else SteamOS's gcc package into `tools-cache/sysroot-gcc`; SteamOS's
+  glibc / linux-api-headers headers into `tools-cache/sysroot-fix`) and tests that. The C++ library is then linked
+  the old way (dynamically).
+- **A changed compiler set** (the first build after this update, or the fallback) rebuilds what was compiled with the
+  other one: glslang (`deps/glslang-install-linux/.toolchain`) and the engine's CMake build (`work/setup-toolchain`;
+  the game module's objects stay: the module links nothing but itself).
+- **No xz or unzip** on the system: LLVM's `.tar.xz` and Ninja's zip are unpacked by the port's Python.
+
+**The launcher** (`tools/launcher/install_launcher.c`, ~200 lines): GNOME's file manager runs programs on a
+double-click but not `.desktop` files kept in a folder, so the zip's top folder also has a program **Install inFAMOUS
+2**. It has no C library at all (Linux system calls, `-nostdlib -static`: 3 KB with lld, 9 KB with GNU ld), so the
+same file runs on any x86-64 Linux. It starts `tools/install_gui.sh` from its own folder; without zenity / kdialog it
+opens a terminal (konsole, ptyxis, kgx, gnome-terminal, xfce4-terminal, mate-terminal, tilix, x-terminal-emulator,
+alacritty, kitty, foot, xterm; install_gui.sh's own list is the same). It is not committed as a binary:
+`tools/make_release_zip_linux.py` compiles it from the commit's source (`--llvm`, else `PORT_LLVM`, else
+tools-cache/llvm, else clang on PATH; lld, else the GNU linker), checks it is a static executable, prints its SHA-256,
+and adds it (mode 755) with **How to install on Linux.txt**. `Install inFAMOUS 2.desktop` stays for KDE.
+
+**Job threads: the Deck only.** `PS3_NATIVE_JOBS_THREADS=4` is set by `tools/play.sh` (and the trainer) only on a
+Steam Deck (board vendor Valve: LCD and OLED); every other PC gets the engine's own rule (physical cores - 2, at most
+8). Every other Deck tuning in play.sh stays on for every Linux PC.
 
 ## Use the game where it is (no 14 GB copy)
 
@@ -167,6 +230,8 @@ pinning the language (and so the movies and timings); the 1.04 EBOOT is the same
 
 ## SteamOS 3.9: the build works on a stock Deck again
 
+(v3: this is now the fallback; the sysroot above is the normal way on SteamOS too.)
+
 On SteamOS 3.9.5 (this Deck, build 20261023.100) `./setup.sh` stopped at step 1: `MISS C++ headers and libraries`.
 SteamOS 3.9's image has no `/usr/include` at all and keeps only `gcc-libs` (libstdc++.so.6, libgcc_s.so.1): no C++
 headers, no `crtbeginS.o`, no `libgcc.a`. #81's fix covered the C headers only. `tools/libc_headers.sh` now does the
@@ -300,6 +365,22 @@ v1 (agent inst):
 - kdialog's progress window through qdbus6 (value, label, cancel, close); zenity 3.44 and kdialog 26.04 on SteamOS.
 
 ## Files
+
+v3 (uni):
+
+- `tools/buildenv.sh` (new): the pins and `be_python`, `be_sysroot`, `be_cfg`, `be_sdl2`, `be_vulkan`.
+- `tools/buildenv.py` (new): `deb` (unpacks .deb packages into a sysroot), `untar` (no xz), `elf` (what a binary needs).
+- `tools/setup.sh`: step 1's checks, Python first; step 2 the sysroot with the old way as the fallback, CMake / Ninja
+  always the port's, the venv on the port's Python; step 6 Valve's SDL2, glslang rebuilt on a new compiler set; step 7
+  the engine reconfigured on a new compiler set, and what the game program needs.
+- `tools/libc_headers.sh`: the fallback now; Python from `PORT_PY`; plain advice (no packages).
+- `tools/rebuild_win.py`: RUNPATH `$ORIGIN` for the Linux engine, `PORT_SDL2_RUNTIME` copied beside it (and into
+  training builds).
+- `tools/launcher/install_launcher.c` (new), `tools/make_release_zip_linux.py` (compiles it into the zip, adds
+  "How to install on Linux.txt").
+- `tools/install_gui.sh`: setup's Python for Add to Steam (downloaded first on a system with no python3), more terminals.
+- `tools/play.sh`, `tools/pgo_train.py`: 4 job threads on a Deck only; play.sh's summary with setup's Python.
+- `README.md`: the Linux install says it is the same everywhere with nothing to install, and how to start it on GNOME.
 
 v2:
 

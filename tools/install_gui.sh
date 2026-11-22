@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The double-click installer (Linux, Steam Deck Desktop Mode): "Install inFAMOUS 2.desktop" in the port's folder runs
-# this. The same build as ./setup.sh (tools/setup.sh), in dialogs: zenity, else kdialog; in a terminal without them.
+# The double-click installer (Linux, Steam Deck Desktop Mode): the program "Install inFAMOUS 2" in the port's folder
+# (tools/launcher/install_launcher.c: GNOME's file manager runs programs, not .desktop files from a folder) or
+# "Install inFAMOUS 2.desktop" (KDE's Dolphin, the Deck) runs this; so does `bash tools/install_gui.sh`. The same build as ./setup.sh (tools/setup.sh), in dialogs: zenity, else kdialog; in a terminal without them.
 #   1. what it does, with the checkbox "Optimise for this PC (PGO)" (on, as in Setup.exe; tools/setup.sh --pgo)
 #   2. your game folder: the one an earlier setup used or RPCS3's game list has (asked to confirm), else a folder picker;
 #      then how to use it: from where it is (the default: no copy, the folder has to stay there) or copied into this folder
@@ -28,9 +29,14 @@ if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
     elif command -v kdialog >/dev/null 2>&1; then ui=kdialog; fi
 fi
 if [ $ui = tty ] && [ ! -t 0 ]; then   # double-clicked, no zenity or kdialog: the text way in a terminal
-    for t in konsole gnome-terminal xfce4-terminal xterm; do
+    for t in konsole ptyxis kgx gnome-terminal xfce4-terminal mate-terminal tilix x-terminal-emulator alacritty kitty foot xterm; do
         command -v $t >/dev/null 2>&1 || continue
-        if [ $t = gnome-terminal ]; then exec $t -- bash "$0"; else exec $t -e bash "$0"; fi
+        case $t in
+            ptyxis|kgx|gnome-terminal|tilix) exec $t -- bash "$0" ;;
+            xfce4-terminal|mate-terminal) exec $t -x bash "$0" ;;
+            kitty|foot) exec $t bash "$0" ;;
+            *) exec $t -e bash "$0" ;;
+        esac
     done
     exit 1
 fi
@@ -75,8 +81,8 @@ $here
 It takes 15-60 minutes (about 25 on a Steam Deck) and about 10 GB of free space (25 GB if you let
 it copy your game into this folder: you choose after picking your game folder). It gets the game's
 1.04 update and the PS3 firmware files (from RPCS3 when it has them, else from Sony's servers) and
-the build tools from GitHub (about 2 GB). Nothing is installed on the system, and your game folder
-is never changed.
+its own build tools (about 2 GB, into this folder). Nothing is installed on the system, it works the
+same on every Linux, and your game folder is never changed.
 
 Optimise for this PC: the game and its engine are compiled once more with what they learn while a
 new game plays by itself in a window for about 7 minutes (the opening and the tutorial on the pier;
@@ -250,7 +256,19 @@ EOF
 play() { play_entry; cd "$here" && exec bash "$here/tools/play.sh"; }
 
 # ------------------------------------------------------------------ Add to Steam
-steam_py() { python3 -I "$here/tools/steam_shortcut.py" "$@" ${PORT_STEAM_ROOT:+--steam "$PORT_STEAM_ROOT"}; }
+# Python: setup's own (tools-cache/python, tools/buildenv.sh), else the system's; on a system with none, setup's is
+# downloaded first (37 MB), so the first screen can offer Add to Steam
+pyexe="$here/tools-cache/python/bin/python3"
+if [ ! -x "$pyexe" ]; then
+    pyexe="$(command -v python3 || true)"
+    if [ -z "$pyexe" ]; then
+        mkdir -p "$here/tools-cache/dl" "$here/work/logs"
+        if ( . "$here/tools/libc_headers.sh" && . "$here/tools/buildenv.sh" && be_python "$here/tools-cache" "$here/tools-cache/dl" ) >> "$here/work/logs/install.log" 2>&1; then
+            pyexe="$here/tools-cache/python/bin/python3"
+        fi
+    fi
+fi
+steam_py() { [ -n "$pyexe" ] || return 1; "$pyexe" -I "$here/tools/steam_shortcut.py" "$@" ${PORT_STEAM_ROOT:+--steam "$PORT_STEAM_ROOT"}; }
 steam_users="$(steam_py users 2>/dev/null)"   # "<id>\t<most recent>\t<account>\t<file>" lines; empty = no Steam here
 steam_label="Add to Steam (a shortcut to play it in Game Mode; Steam has to be closed for a moment at the end)"
 steam_exe="$here/tools/play.sh"

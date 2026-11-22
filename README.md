@@ -51,12 +51,19 @@ Linux and the Steam Deck: [the next section](#install-on-linux-and-steam-deck). 
 
 ## Install on Linux and Steam Deck
 
-On a Steam Deck, switch to Desktop Mode first. Any Linux desktop with zenity or kdialog works the same way.
+It works the same on every 64-bit Linux (SteamOS, Bazzite, Ubuntu, Fedora, Arch, ...), with nothing to install
+first and no password: everything the build needs is downloaded into the port's own folder. Your PC needs a CPU with
+AVX2, a graphics driver with Vulkan (Mesa or NVIDIA's; desktops have it already) and a Linux from 2022 or later
+(glibc 2.35: Ubuntu 22.04, Debian 12, Fedora 36, SteamOS 3.5 and newer). On a Steam Deck, switch to Desktop Mode first.
 
 1. Download **`inFAMOUS2-port-v…-Linux-x64.zip`** from the [latest release](../../releases/latest) and unpack it
    where the game should live, for example `~/Games/inFAMOUS2` (on a Deck: the internal storage, with about 10 GB
    free).
-2. Double-click **Install inFAMOUS 2** in that folder. If the desktop asks whether to run it, choose Execute / Run.
+2. Double-click the program **Install inFAMOUS 2** in that folder. If the desktop asks whether to run it, choose
+   Execute / Run. (KDE and the Steam Deck can also use the entry **Install inFAMOUS 2.desktop** beside it.)
+   **GNOME** (Ubuntu, Fedora Workstation): if the file manager does not start it, right-click it and choose
+   **Run as a Program**, or open a terminal in the folder and type `bash tools/install_gui.sh`. Without zenity or
+   kdialog the installer asks its questions in a terminal window.
 3. The first window says what the install does, with two boxes, both ticked: **Optimise for this PC** (see below)
    and **Add to Steam** (shown when Steam is installed). With Add to Steam you can change the name the game gets in
    your Steam library. Press **Install**.
@@ -342,21 +349,21 @@ cd infamous2-port
 ./setup.sh                      # or: ./setup.sh --disc <your game folder>
 ```
 
-- `tools/setup.sh` lists what it needs from your distribution (a C/C++ toolchain, python3 with venv, the Vulkan
-  loader, SDL2). Unlike Windows, it downloads its build tools (LLVM 22.1.8, CMake / Ninja when the system has none)
-  and builds the engine itself: there are no prebuilt Linux tools yet.
+- **Nothing to install, on any distribution:** `tools/setup.sh` downloads its whole build environment into the
+  port's `tools-cache/` (each file pinned to a version and SHA-256 checked; about 2 GB, nothing outside the folder):
+  LLVM 22.1.8, CMake, Ninja, a portable Python 3.14, the C/C++ headers and libraries (a sysroot made of Ubuntu
+  22.04's glibc 2.35 and GCC 12 packages, so the game builds the same everywhere and runs on any glibc 2.35 or newer,
+  with the C++ library linked in), SDL2 (Valve's Steam Runtime build, put beside the game) and the Vulkan headers.
+  It checks only what cannot be downloaded: an x86-64 CPU with AVX2, glibc 2.35 or newer, a Vulkan driver and free
+  space. Unlike Windows, it builds the engine itself: there are no prebuilt Linux tools yet.
 - **Fedora, openSUSE** and other `lib64` distributions work since v0.6.0 ([#64](../../pull/64)).
 - **NixOS:** build and play inside the FHS environment in [`tools/nixos/fhs-env.nix`](tools/nixos/fhs-env.nix)
   (the commands are at the top of that file). Tested by its author on NixOS 26.05 with a Radeon 780M.
-- **Steam Deck (SteamOS 3.5 and later):** `./setup.sh` in Desktop Mode, nothing to install first (new on 18 Nov,
-  not confirmed on a Deck yet: please report how it goes in [#81](../../issues/81)). SteamOS comes
-  without the C library's headers and its system folders are read-only, so setup downloads them (12 MB, from Valve's
-  package mirror, SHA-256 checked) into the port's own `tools-cache/` ([#81](../../issues/81)); SteamOS 3.9 also lacks
-  the C++ headers and GCC's start files, so setup takes those from SteamOS's own gcc package too (61 MB; built and
-  played that way on a Deck with SteamOS 3.9.5). The other way still
-  works: a player built it inside an Ubuntu Distrobox container and plays it in Game Mode
-  ([#24](../../issues/24)); a game built in a container is started from that container too
-  (`distrobox enter <name> -- <port folder>/setup.sh`).
+- **Steam Deck (SteamOS 3.5 and later):** the installer or `./setup.sh` in Desktop Mode, nothing to install first,
+  the same as on any other distribution. If the build environment cannot be downloaded or does not work, setup falls
+  back to the way before it: SteamOS's own glibc, linux-api-headers and gcc packages (from Valve's package mirror,
+  SHA-256 checked; [#81](../../issues/81)). A game built inside a Distrobox container is started from that container
+  too (`distrobox enter <name> -- <port folder>/setup.sh`, [#24](../../issues/24)).
 - **v0.6.0 on Linux was built and run by us on Ubuntu 22.04 with a Radeon RX 550 (RADV)**: it installs, starts and
   plays there (slowly: that card is the limit). No Linux frame rate is claimed. Please [report](../../issues) how it runs on
   your distribution and GPU.

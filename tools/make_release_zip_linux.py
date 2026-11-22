@@ -2,13 +2,18 @@
 release's file by "linux" in its name: the port at one commit (git archive: committed files only, LF line ends),
 setup.sh at the top (it does everything: finds the game, builds it once, plays), and port-version.txt. Scripts keep
 their executable bit (Unix modes in the zip). It never holds a game file, firmware or a PGO profile (refused if one is found).
+Also at the top: the double-click program "Install inFAMOUS 2" (tools/launcher/install_launcher.c, compiled here: static,
+no C library, the same file for every x86-64 Linux; its SHA-256 is printed) and "How to install on Linux.txt".
     python -I tools/make_release_zip_linux.py --version 0.5.4 --repo <clone of SamiEnazi/infamous2-port>
-                                              [--commit HEAD] [--out <folder>]
+                                              [--commit HEAD] [--out <folder>] [--llvm <LLVM folder>]
+--llvm: the clang to compile the launcher with (default: PORT_LLVM, else tools-cache/llvm of the repo or of this
+script's folder, else clang on PATH); linked with its lld, else with the GNU linker (ld.bfd).
 """
 import argparse
 import io
 import os
 import re
+import struct
 import subprocess
 import sys
 import tarfile
@@ -20,6 +25,7 @@ ap.add_argument("--version", required=True)
 ap.add_argument("--repo", required=True)
 ap.add_argument("--commit", default="HEAD")
 ap.add_argument("--out", default=".")
+ap.add_argument("--llvm", default="")
 a = ap.parse_args()
 
 sha = subprocess.run(["git", "-C", a.repo, "rev-parse", a.commit], capture_output=True, text=True, check=True).stdout.strip()
@@ -36,6 +42,57 @@ PROFILE = re.compile(r"\.(profdata|profraw)$|^work/", re.I)
 OWN = re.compile(r"^tools/(ps3tool[^/]*|keys/disc_keys\.example\.json)$", re.I)
 # every entry dated 26 hours ago (GitHub #21/#22: a ZIP's times have no time zone; a future time stalls the build)
 stamp = time.localtime(time.time() - 26 * 3600)[:6]
+
+LAUNCHER = "Install inFAMOUS 2"
+HOWTO = """inFAMOUS 2 (PC port) for Linux and the Steam Deck: how to install
+
+The same on every 64-bit Linux (SteamOS, Bazzite, Ubuntu, Fedora, Arch, ...): nothing to install, no password.
+Everything the build needs is downloaded into this folder (about 2 GB).
+
+1. Unpack this zip where you want the game (about 10 GB of free space; the Deck: Desktop Mode).
+2. Double-click "Install inFAMOUS 2" in this folder. (KDE / the Steam Deck: the "Install inFAMOUS 2.desktop" entry
+   works too.)
+   GNOME (Ubuntu, Fedora Workstation): if the file manager opens it as a file or says it cannot open it, right-click
+   it and choose "Run as a Program", or open a terminal in this folder and type:  bash tools/install_gui.sh
+3. Follow the windows: pick your game folder (the one holding PS3_GAME). The build takes 15-60 minutes.
+
+Then play with "Play inFAMOUS 2" in this folder (or from the application menu, or from Steam: Add to Steam).
+In a terminal, ./setup.sh does the same (./setup.sh --help).
+"""
+
+
+def build_launcher(src_text, work):
+    """the launcher's static binary (bytes) and how it was linked; compiled from the commit's own source"""
+    import shutil
+    cands = [a.llvm, os.environ.get("PORT_LLVM", ""), os.path.join(a.repo, "tools-cache", "llvm"),
+             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools-cache", "llvm")]
+    cc = next((os.path.join(c, "bin", "clang") for c in cands if c and os.path.isfile(os.path.join(c, "bin", "clang"))), None)
+    cc = cc or shutil.which("clang")
+    if not cc:
+        sys.exit("no clang to compile the launcher with: give --llvm <LLVM folder> (setup's tools-cache/llvm)")
+    src = os.path.join(work, "install_launcher.c")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write(src_text)
+    exe = os.path.join(work, "launcher")
+    flags = ["--no-default-config", "--target=x86_64-linux-gnu", "-Os", "-static", "-nostdlib", "-ffreestanding", "-fno-pic",
+             "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-unwind-tables", "-fcf-protection=none",
+             "-fno-ident", "-ffunction-sections", "-fdata-sections", "-Wall", "-Wextra",
+             "-Wl,--gc-sections", "-Wl,--build-id=none", "-Wl,-z,noexecstack", "-Wl,-z,norelro", "-Wl,-s"]
+    errs = []
+    for ld in ("lld", "bfd"):   # (an LLVM whose lld cannot start here: libxml2.so.2, see tools/setup.sh)
+        p = subprocess.run([cc] + flags + ["-fuse-ld=" + ld, "-o", exe, src], capture_output=True, text=True)
+        if p.returncode == 0 and os.path.isfile(exe):
+            data = open(exe, "rb").read()
+            # static: an ELF executable with no program interpreter and no dynamic section
+            phoff, = struct.unpack_from("<Q", data, 0x20)
+            phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
+            kinds = {struct.unpack_from("<I", data, phoff + i * phentsize)[0] for i in range(phnum)}
+            if data[:4] != b"\x7fELF" or struct.unpack_from("<H", data, 0x10)[0] != 2 or 2 in kinds or 3 in kinds:
+                sys.exit("the launcher came out dynamic or not an executable: " + exe)
+            return data, f"{os.path.basename(cc)} + {ld}"
+        errs.append(f"{ld}: {(p.stdout + p.stderr).strip()[-600:]}")
+    sys.exit("compiling the launcher failed:\n" + "\n".join(errs))
+
 
 files, bad = 0, []
 os.makedirs(a.out, exist_ok=True)
@@ -58,6 +115,24 @@ with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as t, zipfile.ZipFile(tmp, "w",
         z.writestr(zi, t.extractfile(m).read())
         names.append(m.name)
         files += 1
+    import tempfile
+    src_text = t.extractfile("tools/launcher/install_launcher.c").read().decode("utf-8")
+    with tempfile.TemporaryDirectory() as work:
+        launcher, how = build_launcher(src_text, work)
+    li = zipfile.ZipInfo(LAUNCHER, date_time=stamp)
+    li.compress_type = zipfile.ZIP_DEFLATED
+    li.create_system = 3
+    li.external_attr = 0o100755 << 16
+    z.writestr(li, launcher)
+    files += 1
+    import hashlib as _h
+    print(f"  {LAUNCHER}: {len(launcher)} bytes, static ({how}), sha256 {_h.sha256(launcher).hexdigest()}")
+    hi = zipfile.ZipInfo("How to install on Linux.txt", date_time=stamp)
+    hi.compress_type = zipfile.ZIP_DEFLATED
+    hi.create_system = 3
+    hi.external_attr = 0o100644 << 16
+    z.writestr(hi, HOWTO)
+    files += 1
     pv = zipfile.ZipInfo("port-version.txt", date_time=stamp)
     pv.create_system = 3
     pv.external_attr = 0o100644 << 16
@@ -70,7 +145,7 @@ if bad:
     sys.exit("game files or PGO profiles in the commit: nothing made")
 with zipfile.ZipFile(tmp) as z:
     top = {n.split("/")[0] for n in z.namelist()}
-    for need in ("setup.sh", "port-version.txt", "tools/setup.sh", "tools/play.sh"):
+    for need in ("setup.sh", "port-version.txt", "tools/setup.sh", "tools/play.sh", "tools/install_gui.sh", LAUNCHER):
         if need not in z.namelist():
             os.remove(tmp)
             sys.exit(f"{need} is not in the zip")
@@ -78,6 +153,9 @@ with zipfile.ZipFile(tmp) as z:
     if not mode & 0o100:
         os.remove(tmp)
         sys.exit("setup.sh is not executable in the zip (git update-index --chmod=+x setup.sh)")
+    if not (z.getinfo(LAUNCHER).external_attr >> 16) & 0o100:
+        os.remove(tmp)
+        sys.exit(LAUNCHER + " is not executable in the zip")
 os.replace(tmp, out)
 import hashlib
 h = hashlib.sha256(open(out, "rb").read()).hexdigest()

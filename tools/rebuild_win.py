@@ -23,7 +23,8 @@ Host: on Windows clang-cl + lld-link in the Visual Studio / portable MSVC enviro
 On Linux (step_compile_linux) clang/clang++ + lld with the same flags in GNU spelling
 (PORT_LIFT_OPT / PORT_SPU_ARCH then take GNU flags), the same PORT_PGO / PORT_LIFT_LTO;
 no vsenv, no resource compiler, no SDL2.dll. Linux-only inputs: PORT_SDL2_DIR (an SDL2
-CMake config folder; unset = the system's), PORT_GLSLANG_DIR (glslang's
+CMake config folder; unset = the system's), PORT_SDL2_RUNTIME (the libSDL2-2.0.so.0 copied beside
+the engine; tools/setup.sh's downloaded one), PORT_GLSLANG_DIR (glslang's
 lib/cmake/glslang; unset = deps/glslang-install-linux when present, else the system's).
 """
 import argparse
@@ -798,7 +799,8 @@ def engine_build_dir():
     return os.environ.get("PORT_ENGINE_BUILD") or os.path.join(PORT, "build")
 
 
-ENGINE_FILES = ("Infamous2Recomp.exe", "Infamous2Recomp.pdb", "SDL2.dll") if IS_WIN else ("Infamous2Recomp",)
+# (Linux: libSDL2-2.0.so.0 = the SDL2 setup downloaded, PORT_SDL2_RUNTIME, beside the engine: its RUNPATH is $ORIGIN)
+ENGINE_FILES = ("Infamous2Recomp.exe", "Infamous2Recomp.pdb", "SDL2.dll") if IS_WIN else ("Infamous2Recomp", "libSDL2-2.0.so.0")
 
 
 def step_compile():
@@ -1077,6 +1079,9 @@ def linux_configure_cmd(build, tools, flags, port=None, tk=None, python=None):
     gl = os.environ.get("PORT_GLSLANG_DIR") or os.path.join(DEPS, "glslang-install-linux", "lib", "cmake", "glslang")
     if os.path.isdir(gl):
         cmd.append("-Dglslang_DIR=" + gl)
+    # the libraries the engine links (SDL2: tools/setup.sh puts the one it downloaded beside the program) are looked
+    # for in the program's own folder first, so the folder can be moved
+    cmd.append("-DCMAKE_BUILD_RPATH=$ORIGIN")
     return cmd + ["-DPORT_LIFT_OPT=" + lift_opt, "-DPORT_SPU_ARCH=" + spu_arch,
                   "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=" + link_rel,
                   "-DCMAKE_C_FLAGS_RELEASE=" + c_rel, "-DCMAKE_CXX_FLAGS_RELEASE=" + cxx_rel]
@@ -1111,6 +1116,11 @@ def step_engine_linux():
             raise StepError(f"{cmd[1]} exited {p.returncode} (python -I tools/build_errors.py {logf})")
         if pgo.startswith("use:") and cmd[1] == "--build":
             pgo_mismatch_summary(logf, log0)
+    sdl = os.environ.get("PORT_SDL2_RUNTIME")   # tools/setup.sh: the SDL2 it downloaded (tools/buildenv.sh be_sdl2)
+    if sdl and os.path.isfile(sdl):
+        dst = os.path.join(build, "libSDL2-2.0.so.0")
+        if not (os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(sdl) and open(dst, "rb").read() == open(sdl, "rb").read()):
+            shutil.copy2(sdl, dst)
     print("  engine built:", os.path.join(build, "Infamous2Recomp"))
 
 

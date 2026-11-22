@@ -38,21 +38,23 @@
 #                PORT_PGO_KEEP_TRAIN=1 keeps the training build, PORT_PGO_TRAIN=<runs> picks the runs (tools/pgo_train.py:
 #                opening, save, street, plaza; default: see pgo_runs below), PORT_PGO_ENGINE=0 trains the module only.
 # Steps:
-#   1. check this PC and the game                 6. Vulkan headers, SDL2 headers, glslang -> deps/
-#   2. the build tools -> tools-cache/            7. translate and compile the game (15-60 min)
-#      (LLVM 22.1.8, and CMake / Ninja             -> work/port/build/Infamous2Recomp
-#      when the system has none)                   8. a desktop launcher (~/.local/share/applications)
+#   1. check this PC and the game; Python      6. Vulkan headers, SDL2, glslang -> deps/, tools-cache/sdl2
+#      -> tools-cache/python                    7. translate and compile the game (15-60 min)
+#   2. the build tools -> tools-cache/             -> work/port/build/Infamous2Recomp
+#      (LLVM 22.1.8, the sysroot, CMake, Ninja)  8. a desktop launcher (~/.local/share/applications)
 #      and the Python tools -> work/venv
 #   3. your game copied (or linked: --link-game) into game/disc, its update and the firmware files into game/
 #      (RPCS3's or Sony's)
 #   4. the 1.04 EBOOT and the firmware modules decrypted -> eboot/EBOOT_upd104.elf, work/fw
 #   5. (the Python tools: made in step 2)
-# Needs (distribution packages): a C/C++ toolchain's headers and libraries (Debian/Ubuntu:
-# build-essential; Fedora: gcc-c++; Arch: base-devel), python3 with venv, curl, tar, xz, unzip, the
-# Vulkan loader (libvulkan1 / vulkan-loader) with your GPU's driver, and SDL2 (libsdl2-2.0-0 / SDL2).
-# SteamOS (Steam Deck) has no C library headers and nothing can be installed there: step 2 downloads them into
-# tools-cache/sysroot-fix (tools/libc_headers.sh; GitHub #81), so stock SteamOS 3.5 and later needs nothing extra.
-# SteamOS 3.9 has no C++ headers and no GCC start files either: step 2 gets them from its own gcc package (61 MB).
+# The same on every x86-64 distribution (SteamOS, Bazzite, Ubuntu, Fedora, Arch, ...), with nothing to install and no
+# root: everything the build needs is downloaded into tools-cache/, pinned and SHA-256 checked (tools/buildenv.sh):
+# Python 3.14 (python-build-standalone), the C/C++ headers and libraries (a sysroot of Ubuntu 22.04's glibc 2.35 and
+# GCC 12 packages: clang --sysroot, libstdc++ and libgcc linked statically), LLVM, CMake, Ninja, SDL2 (Valve's Steam
+# Runtime build, put beside the game program), the Vulkan headers and glslang. This PC needs: a 64-bit x86 CPU with
+# AVX2, glibc 2.35 or newer, a Vulkan driver, about 20 GB of free space, curl and tar. When the sysroot cannot be had
+# or its compiler check fails here, setup builds the way it did before (the system's own headers and libraries; on
+# SteamOS its own glibc, linux-api-headers and gcc packages: tools/libc_headers.sh, GitHub #81).
 # Play with tools/play.sh (or the desktop launcher).
 set -eu   # (no pipefail: 'ldconfig -p | grep -q' would fail on grep's early exit)
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -71,7 +73,7 @@ while [ $# -gt 0 ]; do
         --no-pgo) pgo=0; rm -f "$root/work/setup-pgo" ;;
         --link-game) gamemode=link ;;
         --copy-game) gamemode=copy ;;
-        -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,58p' "$0"; exit 0 ;;
         *) echo "unknown option $1 (--help)"; exit 2 ;;
     esac
     shift
@@ -130,7 +132,9 @@ case "$root$disc" in
 esac
 cache="$root/tools-cache"; deps="$root/deps"; dl="$cache/dl"
 mkdir -p "$cache" "$deps" "$dl"
-. "$root/tools/libc_headers.sh"   # lh_*: the C library's headers where the system has none (SteamOS), the compiler self-test
+. "$root/tools/libc_headers.sh"   # lh_*: downloads with a SHA-256, the compiler self-test, the old way's SteamOS headers
+. "$root/tools/buildenv.sh"       # be_*: the build environment of every distribution (Python, the sysroot, SDL2)
+ldlist() { ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null || true; }
 
 # download <url> <file> <sha256 or ""> <what>: retried once, checked when a SHA-256 is given
 download() {
@@ -150,7 +154,7 @@ download() {
     fail "downloading $what failed ($url)"
 }
 sfo() {   # sfo <PARAM.SFO> <KEY>
-    python3 - "$1" "$2" <<'EOF'
+    "${PORT_PY:-python3}" -I - "$1" "$2" <<'EOF'
 import struct, sys
 b = open(sys.argv[1], "rb").read()
 assert b[:4] == b"\0PSF", "not a PARAM.SFO"
@@ -167,52 +171,30 @@ EOF
 # ------------------------------------------------------------------------------------------------
 step 1 "checking"
 miss=0
-ldlist() { ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null || true; }
-haslib() { ldlist | grep "$1 " >/dev/null; }
 ok() { printf '  %-5s %s: %s\n' "$1" "$2" "$3"; [ "$1" = MISS ] && miss=1; return 0; }
+# What this PC must have (everything else is downloaded into tools-cache/ in step 2, the same on every distribution):
+# a 64-bit x86 CPU with AVX2, the GNU C library 2.35 or newer (what the game is built for: tools/buildenv.sh), a
+# Vulkan driver, room on the disk, and curl + tar to download with.
 [ "$(uname -m)" = x86_64 ] && ok ok "64-bit x86 Linux" "$(uname -sr)" || ok MISS "64-bit x86 Linux" "$(uname -m): the port is built for x86-64 CPUs"
 fl=$(grep -m1 '^flags' /proc/cpuinfo || true)
 v3=1; for f in avx2 fma bmi2 movbe f16c; do echo "$fl" | grep -qw $f || v3=0; done
 [ $v3 = 1 ] && ok ok "CPU with AVX2 (x86-64-v3)" yes || ok MISS "CPU with AVX2 (x86-64-v3)" "the port is built for AVX2 CPUs (Intel 4th gen / AMD Ryzen or newer)"
+gv=$(lh_glibc)
+if [ -z "$gv" ]; then ok MISS "C library" "this system does not use glibc (the GNU C library), which the game is built for (systems on musl, such as Alpine, cannot run it)"
+elif printf '%s\n%s\n' "$BE_GLIBC_MIN" "$gv" | sort -V -C; then ok ok "C library" "glibc $gv (the game is built for $BE_GLIBC_MIN and newer)"
+else ok MISS "C library" "glibc $gv is older than $BE_GLIBC_MIN, the oldest the game is built for (Ubuntu 22.04, Debian 12, Fedora 36, SteamOS 3.5 and every later release have it)"; fi
 ram=$(awk '/MemTotal/{printf "%d", $2/1048576 + 0.5}' /proc/meminfo)
 [ "$ram" -ge 16 ] && ok ok Memory "$ram GB" || ok note Memory "$ram GB (16 GB or more recommended: the build is large; try --jobs 2)"
 free=$(df -P -BG "$root" | awk 'NR==2{gsub("G","",$4); print $4}')
-[ "$free" -ge 30 ] && ok ok "Free disk space" "$free GB" || ok note "Free disk space" "$free GB (the build needs about 20 GB while it runs, 6 GB after)"
-haslib libvulkan.so.1 && ok ok "Vulkan loader" found || ok MISS "Vulkan loader" "install it (Debian/Ubuntu: libvulkan1 mesa-vulkan-drivers; Fedora: vulkan-loader mesa-vulkan-drivers)"
-haslib libSDL2-2.0.so.0 && ok ok "SDL2" found || ok MISS "SDL2" "install it (Debian/Ubuntu: libsdl2-2.0-0; Fedora/Arch: SDL2 / sdl2)"
-py=$(command -v python3 || true)
-if [ -n "$py" ] && "$py" -c 'import sys, venv, ensurepip; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then ok ok Python "$("$py" -V)"
-else ok MISS Python "python3 3.10+ with venv (Debian/Ubuntu: python3-venv)"; fi
-gccdir=""
-for d in $(ls -d /usr/lib/gcc/x86_64-*linux-gnu/* /usr/lib/gcc/x86_64-*linux/* 2>/dev/null | sort -V -r); do
-    v=$(basename "$d"); for inc in /usr/include/c++/"$v" /usr/include/c++/"${v%%.*}"; do
-        [ -f "$inc/vector" ] || continue
-        # libstdc++ sits next to GCC's crt files on Debian/Ubuntu, in the distro's lib dir on others (Fedora's
-        # /usr/lib64, NixOS FHS environments): clang's --gcc-install-dir finds it in either place
-        for lib in "$d" /usr/lib64 /usr/lib /usr/lib/x86_64-linux-gnu; do
-            [ -f "$lib/libstdc++.so" -o -f "$lib/libstdc++.a" ] && { gccdir="$d"; break 3; }
-        done; done
-done
-# SteamOS 3.9 has no C++ headers and none of GCC's start files either (only libstdc++.so.6): step 2 gets them from
-# SteamOS's own gcc package into tools-cache/sysroot-gcc (tools/libc_headers.sh lh_gcc_*)
-grow=""; gfix=0
-if [ -z "$gccdir" ]; then grow=$(lh_gcc_pick "$(lh_glibc)"); [ -n "$grow" ] && gfix=1; fi
-if [ -n "$gccdir" ]; then ok ok "C++ headers and libraries" "$gccdir (tried for real with the compiler in step 2)"
-elif [ $gfix = 1 ]; then ok note "C++ headers and libraries" "not on this system (SteamOS $(echo "$grow" | awk '{print $2}') comes without them): downloaded into tools-cache/sysroot-gcc in step 2 (61 MB; nothing is installed on the system)"
-else ok MISS "C++ headers and libraries" "install them (Debian/Ubuntu: build-essential; Fedora: gcc-c++; Arch: base-devel)"; fi
-# The C library's own headers (GitHub #81): SteamOS has the C++ ones above but no <features.h>, <stdio.h>,
-# <pthread.h>, <linux/...>, and nothing can be installed there. For the glibc releases SteamOS uses, step 2 gets
-# them into tools-cache/sysroot-fix (tools/libc_headers.sh); any other system is told here, not at step 6.
-hmiss=$(lh_missing); hrow=""; hfix=0; hadvice=0
-if [ -n "$hmiss" ] && { [ -n "$gccdir" ] || [ $gfix = 1 ]; }; then
-    hlist="<${hmiss// />, <}>"; hrow=$(lh_pick "$(lh_glibc)")
-    if [ -n "$hrow" ]; then
-        hfix=1; ok note "C library headers" "not on this system ($hlist; SteamOS comes without them): downloaded into tools-cache/sysroot-fix in step 2 (12 MB; nothing is installed on the system)"
-    else
-        hadvice=1; ok MISS "C library headers" "not on this system ($hlist), and there is no set to download for its C library (glibc $(lh_glibc | grep . || echo unknown)): see \"What to do\" below"
-    fi
-fi
-for t in curl tar xz unzip; do command -v $t >/dev/null && ok ok $t found || ok MISS $t "install it"; done
+if [ "$free" -ge 30 ]; then ok ok "Free disk space" "$free GB"
+elif [ "$free" -ge 12 ]; then ok note "Free disk space" "$free GB (the build needs about 20 GB while it runs, 6 GB after)"
+else ok MISS "Free disk space" "$free GB: the build needs about 20 GB while it runs (6 GB after); make room on this drive, or put the port's folder on another one"; fi
+be_vulkan && ok ok "Vulkan driver" found \
+          || ok MISS "Vulkan driver" "none found (no libvulkan.so.1, or no driver in vulkan/icd.d). The game draws with Vulkan, which comes with the graphics driver (Mesa for AMD and Intel, NVIDIA's own driver); most desktops have it already"
+for t in curl tar gzip; do command -v $t >/dev/null && ok ok $t found || ok MISS $t "not on this system: setup downloads and unpacks its tools with it (every desktop Linux comes with it)"; done
+# Python for everything setup runs (tools-cache/python; the build's own packages go into work/venv in step 2)
+if be_python "$cache" "$dl"; then ok ok Python "$("$PORT_PY" -V 2>&1) (tools-cache/python)"
+else ok MISS Python "it could not be downloaded ($BE_WHY): check the internet connection and run setup again"; fi
 title=""
 if [ -z "$disc" ]; then ok MISS "Game disc folder" "--disc <the folder that holds PS3_GAME>"
 elif [ ! -f "$disc/PS3_GAME/PARAM.SFO" ]; then ok MISS "Game disc folder" "no PS3_GAME/PARAM.SFO in $disc"
@@ -297,8 +279,7 @@ for sub in engine/CMakeLists.txt base/infamous2-lle/CMakeLists.txt; do   # (one 
     [ -f "$root/$sub" ] && ok ok "${sub%%/*}" present || ok MISS "${sub%%/*}" "missing: download or git clone the port again"
 done
 if [ $miss != 0 ]; then
-    [ $hadvice = 1 ] && lh_advice "$root"
-    fail "fix the MISS items first"
+    fail "fix the MISS items above first"
 fi
 
 # ------------------------------------------------------------------------------------------------
@@ -309,27 +290,57 @@ if [ ! -f "$cache/llvm/.ready" ]; then
         df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384 "LLVM 22.1.8 (1.9 GB)"
     echo "  unpacking LLVM (the compiler, linker and profile tool only; a few minutes)"
     rm -rf "$cache/llvm" "$cache/$LLVM_TOP"
-    tar -xJf "$dl/$LLVM_TOP.tar.xz" -C "$cache" --wildcards "$LLVM_TOP/bin/clang*" "$LLVM_TOP/bin/lld" "$LLVM_TOP/bin/ld.lld" \
-        "$LLVM_TOP/bin/llvm-profdata" "$LLVM_TOP/bin/llvm-ar" "$LLVM_TOP/bin/llvm-ranlib" "$LLVM_TOP/bin/llvm-symbolizer" "$LLVM_TOP/lib/clang/*"
+    lparts=("$LLVM_TOP/bin/clang*" "$LLVM_TOP/bin/lld" "$LLVM_TOP/bin/ld.lld" "$LLVM_TOP/bin/llvm-profdata" "$LLVM_TOP/bin/llvm-ar" \
+            "$LLVM_TOP/bin/llvm-ranlib" "$LLVM_TOP/bin/llvm-symbolizer" "$LLVM_TOP/lib/clang/*")
+    if command -v xz >/dev/null; then tar -xJf "$dl/$LLVM_TOP.tar.xz" -C "$cache" --wildcards "${lparts[@]}"
+    else "$PORT_PY" -I "$root/tools/buildenv.py" untar "$dl/$LLVM_TOP.tar.xz" "$cache" "${lparts[@]}" || fail "unpacking LLVM failed"; fi
     mv "$cache/$LLVM_TOP" "$cache/llvm"
     touch "$cache/llvm/.ready"
 fi
-# clang picks the newest GCC folder; a system with a newer GCC runtime than its C++ headers (Ubuntu
-# 22.04 + gcc-12-base) then finds no <vector>: name the folder that has them.
-# Where the system has no C library headers (SteamOS, step 1): the downloaded ones, searched after every system
-# folder (so the C++ headers' #include_next finds them, and a system that has its own keeps using its own).
-# <CFGDIR> is the .cfg file's folder: the port's folder can be moved, and its name may hold spaces.
-if [ $hfix = 1 ]; then
-    lh_install "$cache" "$dl" "$hrow" || { lh_advice "$root"; fail "the C library headers this system lacks could not be downloaded (above). Check your internet connection and run setup again, or use the Distrobox way above"; }
+# The C/C++ headers and libraries the compiler builds against: tools-cache/sysroot (tools/buildenv.sh: Ubuntu 22.04's
+# glibc 2.35 and GCC 12, the same on every distribution; libstdc++ and libgcc linked statically). Only when that cannot be
+# downloaded, or its compiler check fails on this PC, the way before it: the system's own headers and libraries, and on
+# SteamOS (no headers in its image) its own glibc / linux-api-headers / gcc packages (tools/libc_headers.sh, GitHub #81).
+toolchain=""
+old_toolchain() {   # the way before tools/buildenv.sh: writes clang*.cfg; 1 = nothing to build with (why in BE_WHY)
+    local gccdir="" d v inc lib grow="" hmiss hrow=""
+    # clang picks the newest GCC folder; a system with a newer GCC runtime than its C++ headers (Ubuntu 22.04 +
+    # gcc-12-base) then finds no <vector>: name the folder that has them
+    for d in $(ls -d /usr/lib/gcc/x86_64-*linux-gnu/* /usr/lib/gcc/x86_64-*linux/* 2>/dev/null | sort -V -r); do
+        v=$(basename "$d"); for inc in /usr/include/c++/"$v" /usr/include/c++/"${v%%.*}"; do
+            [ -f "$inc/vector" ] || continue
+            # libstdc++ sits next to GCC's crt files on Debian/Ubuntu, in the distro's lib dir on others (Fedora's
+            # /usr/lib64, NixOS FHS environments): clang's --gcc-install-dir finds it in either place
+            for lib in "$d" /usr/lib64 /usr/lib /usr/lib/x86_64-linux-gnu; do
+                [ -f "$lib/libstdc++.so" ] || [ -f "$lib/libstdc++.a" ] && { gccdir="$d"; break 3; }
+            done; done
+    done
+    # SteamOS 3.9 has no C++ headers and none of GCC's start files either (only libstdc++.so.6): its own gcc package
+    if [ -z "$gccdir" ]; then
+        grow=$(lh_gcc_pick "$(lh_glibc)")
+        [ -n "$grow" ] || { BE_WHY="this system has no C++ headers of its own either"; return 1; }
+        lh_gcc_install "$cache" "$dl" "$grow" || { BE_WHY="SteamOS's own C++ headers could not be downloaded"; return 1; }
+        gccdir="<CFGDIR>/../../sysroot-gcc/lib/gcc/x86_64-pc-linux-gnu/$(echo "$grow" | awk '{print $5}')"
+    fi
+    # the C library's own headers: SteamOS has none (<features.h>, <stdio.h>, <linux/...>): its own glibc packages'
+    hmiss=$(lh_missing)
+    if [ -n "$hmiss" ]; then
+        hrow=$(lh_pick "$(lh_glibc)")
+        [ -n "$hrow" ] || { BE_WHY="this system has no C library headers of its own either (<${hmiss// />, <}>)"; return 1; }
+        lh_install "$cache" "$dl" "$hrow" || { BE_WHY="SteamOS's own C library headers could not be downloaded"; return 1; }
+    fi
+    for d in clang clang++; do
+        { echo "--gcc-install-dir=$gccdir"; if [ -n "$hrow" ]; then echo '-idirafter <CFGDIR>/../../sysroot-fix/include'; fi; } > "$cache/llvm/bin/$d.cfg"
+    done
+    echo "  compiler: this system's own C/C++ headers and libraries${grow:+ (SteamOS's gcc package)}${hrow:+ (+ SteamOS's C library headers)}"
+    return 0
+}
+if be_sysroot "$cache" "$dl"; then be_cfg "$cache"; toolchain=sysroot
+else
+    echo "  note: the build environment could not be made ($BE_WHY): trying this system's own headers and libraries instead"
+    old_toolchain || { lh_advice "$root"; fail "there is nothing to build with: $BE_WHY"; }
+    toolchain=system
 fi
-# SteamOS 3.9 (step 1): its own gcc package's C++ headers and start files, as clang's GCC installation
-if [ $gfix = 1 ]; then
-    lh_gcc_install "$cache" "$dl" "$grow" || { lh_advice "$root"; fail "the C++ headers this system lacks could not be downloaded (above). Check your internet connection and run setup again, or use the Distrobox way above"; }
-    gccdir="<CFGDIR>/../../sysroot-gcc/lib/gcc/x86_64-pc-linux-gnu/$(echo "$grow" | awk '{print $5}')"
-fi
-for d in clang clang++; do
-    { echo "--gcc-install-dir=$gccdir"; if [ $hfix = 1 ]; then echo '-idirafter <CFGDIR>/../../sysroot-fix/include'; fi; } > "$cache/llvm/bin/$d.cfg"
-done
 # The LLVM release's linker was built against libxml2.so.2 (used only to merge Windows manifests, never here).
 # Ubuntu 25.10 and later ship only libxml2.so.16, so the linker would not start (GitHub #24): it gets a small
 # stand-in libxml2.so.2 in its own lib folder (found through its RUNPATH, $ORIGIN/../lib), made here once,
@@ -380,40 +391,60 @@ fi
 "$cache/llvm/bin/clang" --version | sed -n '1s/^/  /p'
 # The compiler tried for real (GitHub #81: the check in step 1 only looks for folders): a small C and a small C++
 # program with the engine's headers and libraries, the build's flags and linker, built and started.
-if why=$(lh_selftest "$cache/llvm/bin/clang" "$cache/llvm/bin/clang++" "$cache/selftest"); then
-    echo "  compiler check: a C and a C++ program compile, link and run"
-else
-    echo "  compiler check: $why"
-    echo "  (the compiler's own words: $cache/selftest/log.txt)"
-    lh_advice "$root"
-    fail "this system cannot build C/C++ programs yet: $why"
-fi
-export PORT_LLVM="$cache/llvm"
-cmv=$(cmake --version 2>/dev/null | head -1 | awk '{print $3}' || true)
-if [ -n "$cmv" ] && printf '3.24\n%s\n' "$cmv" | sort -V -C; then export PORT_CMAKE="$(command -v cmake)"
-else
-    if [ ! -f "$cache/cmake/.ready" ]; then
-        download https://github.com/Kitware/CMake/releases/download/v3.31.3/cmake-3.31.3-linux-x86_64.tar.gz "$dl/cmake.tar.gz" \
-            442b93b3db0f6c6501a74add587acca5ea6b8c1526ccca7bc8d89fc592036971 "CMake 3.31.3"
-        rm -rf "$cache/cmake" && mkdir -p "$cache/cmake" && tar -xzf "$dl/cmake.tar.gz" -C "$cache/cmake" --strip-components 1
-        touch "$cache/cmake/.ready"
+selftest() {   # 0 = a C and a C++ program compile, link and run (and, with the sysroot, need no C++ library from here)
+    why=$(lh_selftest "$cache/llvm/bin/clang" "$cache/llvm/bin/clang++" "$cache/selftest") || return 1
+    if [ $toolchain = sysroot ]; then
+        why=$("$PORT_PY" -I "$root/tools/buildenv.py" elf "$cache/selftest/t_cpp" --max-glibc "$BE_GLIBC_MIN" \
+              --not-needed libstdc++.so.6,libgcc_s.so.1 | sed -n 's/^why: //p') || return 1
+        [ -z "$why" ] || return 1
     fi
-    export PORT_CMAKE="$cache/cmake/bin/cmake"
-fi
-if command -v ninja >/dev/null; then export PORT_NINJA="$(command -v ninja)"
-else
-    if [ ! -f "$cache/ninja/.ready" ]; then
-        download https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-linux.zip "$dl/ninja-linux.zip" \
-            b901ba96e486dce377f9a070ed4ef3f79deb45f4ffe2938f8e7ddc69cfb3df77 "Ninja 1.11.1"
-        rm -rf "$cache/ninja" && mkdir -p "$cache/ninja" && unzip -q "$dl/ninja-linux.zip" -d "$cache/ninja" && touch "$cache/ninja/.ready"
+    return 0
+}
+if selftest; then echo "  compiler check: a C and a C++ program compile, link and run ($toolchain)"
+elif [ $toolchain = sysroot ]; then
+    echo "  compiler check with tools-cache/sysroot: $why (the compiler's own words: $cache/selftest-sysroot.txt)"
+    cp -f "$cache/selftest/log.txt" "$cache/selftest-sysroot.txt" 2>/dev/null || true
+    echo "  trying this system's own headers and libraries instead"
+    old_toolchain || { lh_advice "$root"; fail "this system cannot build C/C++ programs: $BE_WHY"; }
+    toolchain=system
+    if selftest; then echo "  compiler check: a C and a C++ program compile, link and run ($toolchain)"
+    else
+        echo "  compiler check: $why (the compiler's own words: $cache/selftest/log.txt)"; lh_advice "$root"
+        fail "this system cannot build C/C++ programs: $why"
     fi
-    export PORT_NINJA="$cache/ninja/ninja"
+else
+    echo "  compiler check: $why (the compiler's own words: $cache/selftest/log.txt)"; lh_advice "$root"
+    fail "this system cannot build C/C++ programs: $why"
 fi
+# The compiler set the game is built with: when it changed (the first build with tools-cache/sysroot, or the way back),
+# what was compiled with the other one is compiled again (glslang in step 6, the engine in step 7; CMake's compiler
+# checks and Ninja's records only know the compiler's path, not its .cfg)
+tcid=$(cat "$cache/llvm/bin/clang.cfg" "$cache/llvm/bin/clang++.cfg" "$cache/sysroot/.ready" 2>/dev/null | cksum | cut -d' ' -f1)
+export PORT_LLVM="$cache/llvm" PORT_TOOLCHAIN="$toolchain"
+# CMake and Ninja: the port's own (always: the same versions on every system, whatever the system has)
+if [ ! -f "$cache/cmake/.ready" ]; then
+    download https://github.com/Kitware/CMake/releases/download/v3.31.3/cmake-3.31.3-linux-x86_64.tar.gz "$dl/cmake.tar.gz" \
+        442b93b3db0f6c6501a74add587acca5ea6b8c1526ccca7bc8d89fc592036971 "CMake 3.31.3"
+    rm -rf "$cache/cmake" && mkdir -p "$cache/cmake" && tar -xzf "$dl/cmake.tar.gz" -C "$cache/cmake" --strip-components 1
+    touch "$cache/cmake/.ready"
+fi
+export PORT_CMAKE="$cache/cmake/bin/cmake"
+if [ ! -f "$cache/ninja/.ready" ]; then
+    download https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-linux.zip "$dl/ninja-linux.zip" \
+        b901ba96e486dce377f9a070ed4ef3f79deb45f4ffe2938f8e7ddc69cfb3df77 "Ninja 1.11.1"
+    rm -rf "$cache/ninja" && mkdir -p "$cache/ninja"
+    if command -v unzip >/dev/null; then unzip -q "$dl/ninja-linux.zip" -d "$cache/ninja"
+    else "$PORT_PY" -I -m zipfile -e "$dl/ninja-linux.zip" "$cache/ninja"; fi
+    chmod +x "$cache/ninja/ninja" && touch "$cache/ninja/.ready"
+fi
+export PORT_NINJA="$cache/ninja/ninja"
 echo "  cmake $PORT_CMAKE, ninja $PORT_NINJA"
-# work/venv: the build's Python packages, and pycryptodome for tools/ps3tool.py (steps 3 and 4: much faster with it)
+# work/venv: the build's Python packages, and pycryptodome for tools/ps3tool.py (steps 3 and 4: much faster with it),
+# on the port's own Python (step 1); a venv made by an older setup with the system's python3 is made again
 venv="$root/work/venv"
-[ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import sys" 2>/dev/null || { rm -rf "$venv"; python3 -m venv "$venv"; }
-"$venv/bin/python" -m pip install --disable-pip-version-check -q -r "$root/engine/requirements.txt" || fail "pip install failed"
+if ! { [ -x "$venv/bin/python" ] && grep -qxF "home = $cache/python/bin" "$venv/pyvenv.cfg" 2>/dev/null && "$venv/bin/python" -c "import sys" 2>/dev/null; }; then
+    rm -rf "$venv"; "$PORT_PY" -m venv "$venv" || fail "making work/venv failed"
+fi
 echo "  Python tools: work/venv"
 
 # ------------------------------------------------------------------------------------------------
@@ -629,9 +660,18 @@ if [ ! -f "$deps/sdl2-inc/SDL2/SDL.h" ]; then
     rm -rf "$deps/sdl2-inc" && mkdir -p "$deps/sdl2-inc/SDL2"
     tar -xzf "$dl/SDL2-2.30.10.tar.gz" -C "$deps/sdl2-inc/SDL2" --strip-components 2 SDL2-2.30.10/include
 fi
-# SDL2 for CMake: the 2.30.10 headers (as the Windows build) over the system's libSDL2-2.0.so.0; the
-# few entry points newer than an older system library are looked up at run time.
-sdllib=$(ldlist | awk '/libSDL2-2.0.so.0 .*x86-64/{print $NF}' | head -1)
+# SDL2 for CMake: the 2.30.10 headers (as the Windows build) over Valve's SDL 2.32.10 library (tools/buildenv.sh be_sdl2),
+# which the build puts beside the game program (work/port/build/libSDL2-2.0.so.0, found through the program's RUNPATH
+# $ORIGIN): the game needs no SDL2 from the system. When Valve's package cannot be had (its repository keeps only the
+# newest build), the system's libSDL2-2.0.so.0 as before; the few entry points newer than an older library are looked
+# up at run time. (Another SDL2 for one session: SDL_DYNAMIC_API=/path/to/libSDL2-2.0.so.0 tools/play.sh)
+unset PORT_SDL2_RUNTIME
+if be_sdl2 "$cache" "$dl"; then sdllib="$PORT_SDL2_RUNTIME"
+else
+    sdllib=$(ldlist | awk '/libSDL2-2.0.so.0 .*x86-64/{print $NF}' | head -1)
+    [ -n "$sdllib" ] || fail "SDL2 (the game's window, sound and controllers) could not be downloaded: $BE_WHY. Check the internet connection and run setup again"
+    echo "  note: SDL2 could not be downloaded ($BE_WHY): the game uses this system's ($sdllib)"
+fi
 mkdir -p "$deps/sdl2-cmake"
 cat > "$deps/sdl2-cmake/sdl2-config.cmake" <<EOF
 set(SDL2_FOUND TRUE)
@@ -645,8 +685,9 @@ endif()
 EOF
 printf 'set(PACKAGE_VERSION "2.30.10")\nset(PACKAGE_VERSION_COMPATIBLE TRUE)\n' > "$deps/sdl2-cmake/sdl2-config-version.cmake"
 export PORT_SDL2_DIR="$deps/sdl2-cmake"
-if [ ! -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ]; then
-    rm -rf "$deps/glslang-build-linux"   # (a failed try leaves CMake's compiler checks cached)
+# (built again when the compiler set changed since: its static libraries were compiled against the other one's headers)
+if [ ! -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ] || [ "$(cat "$deps/glslang-install-linux/.toolchain" 2>/dev/null)" != "$tcid" ]; then
+    rm -rf "$deps/glslang-build-linux" "$deps/glslang-install-linux"   # (a failed try leaves CMake's compiler checks cached)
     tick_start "building glslang (a few minutes)"
     "$PORT_CMAKE" -S "$deps/glslang-src" -B "$deps/glslang-build-linux" -G Ninja -DCMAKE_MAKE_PROGRAM="$PORT_NINJA" \
         -DCMAKE_C_COMPILER="$PORT_LLVM/bin/clang" -DCMAKE_CXX_COMPILER="$PORT_LLVM/bin/clang++" -DCMAKE_BUILD_TYPE=Release \
@@ -657,6 +698,7 @@ if [ ! -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ]
         && "$PORT_CMAKE" --install "$deps/glslang-build-linux" >> "$deps/glslang-build.log" 2>&1 \
         || fail "building glslang failed (see $deps/glslang-build.log)"
     tick_stop
+    echo "$tcid" > "$deps/glslang-install-linux/.toolchain"
 fi
 # without glslang the build still succeeds, but the game draws nothing (no guest programs): stop here instead
 [ -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ] \
@@ -666,6 +708,14 @@ echo "  deps ready"
 # ------------------------------------------------------------------------------------------------
 export PORT_JOBS="$jobs" PORT_LIFT_JOBS="$jobs"
 exe="$root/work/port/build/Infamous2Recomp"
+# The engine is configured and compiled anew when the compiler set changed (step 2; the game module's objects stay:
+# it links nothing but itself)
+if [ "$(cat "$root/work/setup-toolchain" 2>/dev/null)" != "$tcid" ]; then
+    for b in "$root/work/port/build" "$root/work/port/build-train" "$root/work/port/build-train-eng"; do
+        [ -f "$b/CMakeCache.txt" ] && rm -rf "$b/CMakeCache.txt" "$b/CMakeFiles" "$b/build.ninja" "$b/.ninja_deps" "$b/.ninja_log" "$b/cmake_install.cmake"
+    done
+    mkdir -p "$root/work" && echo "$tcid" > "$root/work/setup-toolchain"
+fi
 buildfailed="the build failed: see work/logs/ (python3 -I tools/build_errors.py work/logs/compile.log)"
 if [ $pgo = 0 ]; then
     step 7 "translating and compiling the game (the long part: 15-60 minutes; each part says what it is and how far it is)"
@@ -805,6 +855,14 @@ else
 fi
 [ -x "$exe" ] || fail "no $exe after the build"
 [ -f "$root/work/port/build/libInfamous2Game.so" ] || fail "no work/port/build/libInfamous2Game.so after the build"
+if [ -n "${PORT_SDL2_RUNTIME:-}" ] && [ ! -f "$root/work/port/build/libSDL2-2.0.so.0" ]; then cp -f "$PORT_SDL2_RUNTIME" "$root/work/port/build/"; fi
+# what the game program needs at run time (with tools-cache/sysroot: glibc 2.35 or newer, SDL2 beside it, no C++ library)
+chk=(); [ "$toolchain" = sysroot ] && chk=(--max-glibc "$BE_GLIBC_MIN" --not-needed libstdc++.so.6,libgcc_s.so.1)
+if needs=$("$PORT_PY" -I "$root/tools/buildenv.py" elf "$exe" ${chk[@]+"${chk[@]}"} 2>&1); then
+    echo "  the game program needs: $(printf '%s\n' "$needs" | sed -n 's/^needs: //p') (glibc $(printf '%s\n' "$needs" | sed -n 's/^glibc: //p') or newer)"
+else
+    echo "  note: the game program was built, but $(printf '%s\n' "$needs" | sed -n 's/^why: //p'): it may not start on another PC (it does on this one)"
+fi
 # Built inside a container (Distrobox: the way for systems without build tools): the program uses the
 # container's libraries, so tools/play.sh says where to start it when it is started outside
 if [ -f /run/.containerenv ] || [ -f /.dockerenv ] || [ -n "${CONTAINER_ID:-}" ]; then echo "${CONTAINER_ID:-}" > "$root/work/built-in-container"

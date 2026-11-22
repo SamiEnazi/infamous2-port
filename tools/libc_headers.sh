@@ -13,6 +13,8 @@
 #
 # Test switches: LH_INC (the system's include folder, default /usr/include), LH_GLIBC (its glibc version).
 # (SteamOS 3.9: the C++ headers and GCC's start files the same way, lh_gcc_* below.)
+# Since the universal build environment (tools/buildenv.sh: a sysroot for every distribution) this is the fallback:
+# tools/setup.sh uses it only when the sysroot cannot be downloaded or its compiler check fails on this PC.
 
 LH_MIRROR="https://steamdeck-packages.steamos.cloud/archlinux-mirror"
 LH_ARCHIVE="https://archive.archlinux.org/packages"
@@ -83,7 +85,7 @@ lh_unpack() {
     local f="$1" d="$2"
     if command -v bsdtar >/dev/null 2>&1 && bsdtar -xf "$f" -C "$d" --strip-components 1 usr/include 2>/dev/null; then return 0; fi
     if tar --force-local --zstd -xf "$f" -C "$d" --strip-components=1 usr/include 2>/dev/null; then return 0; fi
-    python3 -I - "$f" "$d" 2>/dev/null <<'EOF'
+    "${PORT_PY:-python3}" -I - "$f" "$d" 2>/dev/null <<'EOF'
 import sys, tarfile
 f, d = sys.argv[1:3]
 try:
@@ -265,20 +267,12 @@ EOF
     return 0
 }
 
-# lh_advice <the port's folder>: what a player can do when this system cannot build C/C++ programs
+# lh_advice <the port's folder>: what a player can do when this system cannot build C/C++ programs (nothing is to be
+# installed: setup downloads its whole build environment, tools/buildenv.sh)
 lh_advice() {
     cat <<EOF
-  What to do:
-  - Ubuntu/Debian: sudo apt install build-essential      Fedora: sudo dnf install gcc-c++ glibc-devel
-    Arch: sudo pacman -S base-devel                      then run ./setup.sh again.
-  - SteamOS and other systems whose system folders are read-only: build and play inside a Distrobox
-    container (Distrobox comes with SteamOS 3.5 and later). In a terminal (on the Steam Deck: Desktop Mode, Konsole):
-        distrobox create --name inf2 --image ubuntu:24.04
-        distrobox enter inf2
-        sudo apt update && sudo apt install -y build-essential python3-venv curl xz-utils unzip libvulkan1 mesa-vulkan-drivers libsdl2-2.0-0
-        cd "$1" && ./setup.sh
-    The game is then built with the container's libraries: start it from the container as well:
-        distrobox enter inf2 -- "$1/setup.sh"
-    (as a Steam shortcut: target distrobox, launch options: enter inf2 -- "$1/setup.sh")
+  What to do: check the internet connection and run setup again (it goes on where it stopped). If it stops here
+  again, please open an issue on the port's GitHub page with the file $1/work/logs/setup.log
+  (and $1/tools-cache/selftest/log.txt, the compiler's own words).
 EOF
 }
