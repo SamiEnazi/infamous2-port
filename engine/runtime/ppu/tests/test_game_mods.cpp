@@ -51,6 +51,8 @@ extern "C" void ps3_host_restart(const char*) { g_restarts++; }
 
 #include "../ppu_fs_lang.h"
 #include "../ppu_fs_mods.h"
+/* the live mods' guest-memory hooks, which the game provides (unused here) */
+extern "C" { uint8_t* vm_base = nullptr; void (*g_vm_host_io_hook)(uint32_t, uint32_t, int) = nullptr; }
 #include "../../../libs/video/mod_preview.h"
 
 using namespace gmods;
@@ -661,6 +663,59 @@ static void test_real(const std::string& dl, const std::string& game)
     CHECK(check_alone(d, arcs).empty());
 }
 
+/* ---- merging: merge patches ("patch_for") and automatic packed-file merges ------ */
+static void seed_diff(const Mod& m, std::vector<int> changed)   /* what pf_diff would find against the game's file */
+{
+    PfDiff d;
+    d.ok = true; d.changed = changed;
+    const Part& f = m.files[0];
+    g_pf[sig_line("mod", f.path) + "target " + f.target + "\n"] = d;
+}
+
+static void test_merge()
+{
+    g.dir = join(W, "plan"); g.state_path = join(W, "merge_state.ini");
+    remove(g.state_path.c_str());
+    g.start.clear(); g.start_sig.clear(); g.use = true;
+    Mod a = mk("MA", {}, "i2.core.xpps"), b = mk("MB", {}, "i2.core.xpps"), p = mk("MP", {}, "i2.core.xpps");
+    p.patch_for = { "MA", "MB" };
+    Mod c1 = mk("MC1", {}, "zeke.xpps"), c2 = mk("MC2", {}, "zeke.xpps"), c3 = mk("MC3", {}, "zeke.xpps");
+    Mod t = mk("MT", { { "zeke.xpps", 0x40 } });
+    seed_diff(a, { 1, 2 }); seed_diff(b, { 2, 3 }); seed_diff(p, { 1, 2, 3 });
+    seed_diff(c1, { 5 }); seed_diff(c2, { 6 }); seed_diff(c3, { 6, 7 });
+    /* automatic: different packed files merge, the same one clashes, a texture patch always does */
+    CHECK(!mods_clash(c1, c2) && !mods_clash(c2, c1));
+    CHECK(mods_clash(c2, c3) && mods_clash(c3, c2));
+    CHECK(mods_clash(c1, t) && mods_clash(t, c1));
+    Xp x; x.target = "zeke.xpps"; x.index = 7; x.chunk = true; x.choff = 0; x.len = 4;
+    Mod xp7 = mk("MX", {}); xp7.xp.push_back(x); xp7.targets.insert("zeke.xpps");
+    CHECK(!mods_clash(c1, xp7) && mods_clash(c3, xp7));   /* a packed-file patch onto a file another mod replaces */
+    CHECK(mods_clash(a, b));
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.list = { a, b, c1, c2, p };
+        g.gen++;
+        plan_locked();
+        CHECK(g.plan.next[0] && g.plan.next[1] && g.plan.next[2] && g.plan.next[3] && g.plan.next[4]);   /* MP merges MA + MB */
+        std::vector<size_t> used = { 4, 0, 1 };
+        const std::map<size_t, std::set<std::string>> cv = patch_cover(g.list, used);
+        CHECK(cv.count(0) && cv.at(0).count("i2.core.xpps") && cv.count(1) && !cv.count(4));
+        g.list[1].on = false;   /* one of its mods off: the patch steps aside */
+        g.gen++;
+        plan_locked();
+        CHECK(g.plan.next[0] && !g.plan.next[1] && !g.plan.next[4]);
+        CHECK_HAS(g.plan.why[4], "a merge patch, used only while MA and MB are used");
+        g.list[1].on = true; g.list[4].on = false;   /* the patch off: they clash again */
+        g.gen++;
+        plan_locked();
+        CHECK(g.plan.next[0] && !g.plan.next[1]);
+        CHECK_HAS(g.plan.why[1], "same files as MA");
+        g.list.clear();
+        g.gen++;
+    }
+    g_pf.clear();
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: test_game_mods <work folder> [<downloads> [<game folder>] [<png> <jpg>]]\n"); return 2; }
@@ -673,6 +728,8 @@ int main(int argc, char** argv)
     fprintf(stderr, "+plan: %d ok, %d failed\n", g_pass, g_fail);
     test_state();
     fprintf(stderr, "+mods.ini: %d ok, %d failed\n", g_pass, g_fail);
+    test_merge();
+    fprintf(stderr, "+merge: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 6) test_images(slashes(argv[4]), slashes(argv[5]));
     fprintf(stderr, "+images: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 3) test_real(slashes(argv[2]), argc >= 4 ? slashes(argv[3]) : std::string());
