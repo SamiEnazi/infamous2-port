@@ -6269,7 +6269,19 @@ static int eng_gpu_light_blit(u32 location, u32 offset, u32 pitch, int dst_local
             if (!sf->handle || sf->location != location || sf->fmt != RSX_BE_FMT_R8G8B8A8) continue;
             const u32 row = pitch ? pitch : sf->w * 4u;
             if (offset < sf->offset || offset >= sf->offset + row) continue;
-            if (best == ENG_INVALID || sf->stamp > g.surfaces[best].stamp) best = i;
+            /* Issue #38 (black world / "black fog" until a restart): the newest
+             * target at this address is not always the normals. A smaller one
+             * the game also draws there (512x288 seen, 2026-11-22) won the stamp
+             * race; the light pass then ran on its pixels at its size, lit next
+             * to nothing, and everything out of direct sun went black. The light
+             * job's buffers hold a whole screen: take the largest target, the
+             * newest among equals. PS3RECOMP_ENG_GPU_LIGHT_NEWEST=1: the old rule. */
+            static int newest = -1;
+            if (newest < 0) newest = getenv("PS3RECOMP_ENG_GPU_LIGHT_NEWEST") ? 1 : 0;
+            if (best == ENG_INVALID) { best = i; continue; }
+            const eng_surface* bs = &g.surfaces[best];
+            const u64 a = (u64)sf->w * sf->h, ba = (u64)bs->w * bs->h;
+            if (newest ? sf->stamp > bs->stamp : (a > ba || (a == ba && sf->stamp > bs->stamp))) best = i;
         }
         if (best == ENG_INVALID) return 0;
         const u32 snap = g.be->color_snapshot(g.be->user, g.surfaces[best].handle);
