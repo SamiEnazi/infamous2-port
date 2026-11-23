@@ -451,6 +451,10 @@ static void page_graphics(Rows& R)
           s_ui.mesh_trim = i; apply_setting(V_MESH_TRIM, i == 1 ? "0" : "1"); apply_setting(V_EDGE_VP, i == 2 ? "0" : "1"); })
           .d("Skips triangles too small to see.").c(2).live(V_MESH_TRIM).var(V_EDGE_VP).off(slot < 0)
           .st(slot < 0 ? "Not in this build (no tools/spu_patches.txt in its lift)." : s_ui.mesh_trim == 2 ? "Leaves holes above 720p." : "", slot < 0 || s_ui.mesh_trim == 2); }
+    /* (deck) the far shadow cascade's small-object cut (job 210's view block, K.y; natives/spu/job210_native.c) */
+    mrow_choice(R, "shlod", "Far shadow detail", vs({ "Full", "Reduced" }), s_ui.shadow_lod, [](int i) {
+        s_ui.shadow_lod = i; apply_setting(V_SHADOW_LOD, i ? "20" : "1"); })
+        .d("Reduced: small far objects cast no distant shadow (graphics thread ~12% lighter).").c(0).live(V_SHADOW_LOD);
     mrow_choice(R, "dof", "Depth of field", vs({ "On", "Cutscenes", "Off" }), s_ui.dof, [](int i) { s_ui.dof = i; apply_setting(V_DOF, kDof[i]); })
         .d("The game's background blur.").c(1).live(V_DOF)
         .st(s_ui.dof == 1 && !s_census && !ps3_title_view_provided() ? "No game camera yet: off everywhere until you play." : "");

@@ -25,6 +25,7 @@
 #include "backends/imgui_impl_sdl2.h"
 
 #include "../../include/ps3emu/ps3_settings.h"
+#include "../../include/ps3emu/ps3_liveab.h"   /* (ft1) PS3_LIVEAB=PS3_OVERLAY_HUD=<a>|<b>: the HUD flipped in-run */
 #include "../../include/ps3emu/ps3_title_view.h"   /* (dofov) the Depth of field page: does the title tell gameplay from cutscenes */
 #include "../../include/ps3emu/ps3_lightfx.h"   /* [light] the Lighting page (vk_overlay_light.inc) */
 #include "../../include/ps3emu/ps3_game_mods.h" /* [mods] the Mods page: runtime/ppu/ppu_fs_mods.h */
@@ -163,6 +164,7 @@ enum {
     V_GAME_MODS,              /* [mods] */
     V_FOV,                    /* (dofov) the title's field of view (cheats.cpp), live */
     V_MSAA, V_ALPHA_AA,       /* [aa] read at start (rsx_vulkan_backend.c vk_msaa.inc, rsx_fp_apply_alpha_aa) */
+    V_SHADOW_LOD,             /* (deck) far shadow cascade detail (natives/spu/job210_native.c), live */
     V_N
 };
 static const char* const kVar[V_N] = {
@@ -179,6 +181,7 @@ static const char* const kVar[V_N] = {
     "PS3_GAME_MODS",                                  /* [mods] read once, at start */
     "PS3_FOV",                                        /* (dofov) percent of the game's field of view */
     "PS3RECOMP_MSAA", "PS3RECOMP_ALPHA_AA",           /* [aa] read once, at start */
+    "PS3RECOMP_SHADOW_LOD",                           /* (deck) 1 = the game's far shadows, 20 = reduced */
 };
 /* Plain arrays: filled during this file's dynamic initialisation, before
  * main (zero-initialised storage exists before any of it runs). */
@@ -1249,6 +1252,7 @@ struct Ui {
     int dof;                  /* (dofov) the game's depth of field: index in kDof (rsx_draw_engine.c ENG_DOF_BLEND_FP) */
     bool edge_blur;           /* the game's own edge blur (the same pass) */
     int fov;                  /* (dofov) PS3_FOV: percent of the game's field of view (kFovMin..kFovMax) */
+    int shadow_lod;           /* (deck) 0 = the game's far shadow detail, 1 = reduced (PS3RECOMP_SHADOW_LOD=20) */
     int mesh_trim;            /* [trim]/[edgevp] 0 = the game's culling at the render resolution,
                                * 1 = off (whole meshes; the default: tools/spu_patches.txt), 2 = the PS3's 720p culling */
     int aspect;               /* [wide] index in kAspect; -1 = another value (env / file) */
@@ -1288,6 +1292,7 @@ static void ui_load(void)
       int f = e && *e ? atoi(e) : 100;
       s_ui.fov = f < kFovMin ? kFovMin : f > kFovMax ? kFovMax : f; }
     { const char* e = getenv(kVar[V_EDGE_BLUR]); s_ui.edge_blur = !(e && !strcmp(e, "0")); }
+    { const char* e = getenv(kVar[V_SHADOW_LOD]); s_ui.shadow_lod = e && atof(e) > 1.0 ? 1 : 0; }   /* (deck) */
     { const int t = spu_patch_find("mesh_trim");   /* [trim] what the SPU code runs now */
       const bool culls = t < 0 || spu_patch_alt(t) == 0;
       const char* e = getenv(kVar[V_EDGE_VP]);       /* [edgevp] culling at the render resolution */
@@ -1539,7 +1544,9 @@ static void pads_refresh(double now)
     s_pads_t = now;
     /* cellPad's list of the controllers on its ports: asking SDL here takes
      * its joystick lock, which a controller being opened holds for as long
-     * as the open takes (this is the thread that presents). */
+     * as the open takes (this is the thread that presents). (It also keeps
+     * this thread out of sdl2-compat's unlocked joystick list: cellPad.c,
+     * cellPad_host_sdl_trylock.) */
     s_n_pads = cellPad_host_controller_names(s_pads, 4);
 }
 
@@ -2024,6 +2031,21 @@ static bool fb_for(uint32_t idx, VkImage image, VkExtent2D ext)
     return true;
 }
 
+/* (ft1) PS3_LIVEAB's HUD value, when it sets one (bench only); back to the HUD's own state when it ends. Called by the
+ * present (rsx_vulkan_backend.c vk_liveab_frame) every frame: the draw entry below only runs while the overlay is active. */
+extern "C" void vk_overlay_liveab_hud(void)
+{
+    if (!s_enabled) return;
+    static int s_own = -1;   /* the HUD's state before the in-run A/B first changed it */
+    const int lab = g_ps3_lab[PS3_LAB_HUD];
+    if (lab >= 0) {
+        if (s_own < 0) s_own = s_hud ? 1 : 0;
+        if ((lab != 0) != (s_hud != 0)) { set_hud(lab != 0); fprintf(stderr, "[overlay] HUD %s (PS3_LIVEAB)\n", lab ? "on" : "off"); }
+    } else if (s_own >= 0) {
+        if ((s_own != 0) != (s_hud != 0)) set_hud(s_own != 0);
+        s_own = -1;
+    }
+}
 extern "C" int vk_overlay_draw(VkCommandBuffer cmd, uint32_t index, VkImage image, VkExtent2D ext,
                                VkImageLayout layout, VkPipelineStageFlags stage, VkAccessFlags access)
 {

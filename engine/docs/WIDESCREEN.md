@@ -180,3 +180,45 @@ splats reach the sides of the wide picture, no vertical edge; the splats are 1.3
 16:9 overlay stretched across, as the 3D frame is) -- organic shapes, it does not read as stretched. The HUD
 (prompt text, reticle) stays where it was; the pause menu keeps its bars. 16:9 runs none of this (`set_hud` is
 not installed there).
+
+## Two frames in one present: PS3RECOMP_WIDE_NEXTFRAME (2026-11-22, agent wide; GitHub #47 / #105)
+
+The flicker of #47 (32:9) and #105 (21:9), also seen at 16:10 on the Deck: now and then one frame of gameplay showed
+the 3D picture squeezed into the 16:9 rectangle (letterboxed at 16:10, pillarboxed when wider), the HUD in place.
+v0.6.0's hysteresis for the bars verdict did not change it, because the bars verdict never flips in those frames
+(`[widebars]` logs no change). What happens:
+- inFAMOUS 2 flips through the `cellGcmSetFlipCommand` import, so its command stream has no flip word
+  (`GCM_FLIP_STATS=1`: 0 FIFO flips, ~30 import flips a second); the frame clock presents a pending flip between
+  drains. Now and then a drain runs on past the end of a frame into the next one: one present (`g.frames`) holds two
+  of the title's frames (caught on the Deck: 16,438 draws in one present, ~8,000 a frame).
+- The HUD logic counted frames by presents only, so the second frame's draws came after the first frame's composite
+  with `s_hud_after` still set. Its G-buffer and post passes are display-sized (1280x720 targets), so they were pinned
+  as the HUD: each pass squeezed again the pass before it (the frame caught at 16:10: 0.9^4 of the height, centred),
+  and the second frame's composite showed that picture. Its 3D vertex programs (world matrix in c[256..259], then
+  view-projection in c[260..263]) also went through the UI-quad check as "UI quads" (`[engine] aspect: vertex program
+  f8ca6f6e65e1c9aa ... 8e3a9796b3a5dbcb is a UI quad`): the same five programs in #47's v0.6.0 log, where 56 of 74
+  seconds pin 3D meshes after the composite. The decompiles are also that frame's hitch.
+- More often at a high frame rate (more frames, more chances for the drain to run into the next one); upstream v0.6.3
+  has the same logic (frames by presents); the Deck branch's short tail is refused after the composite, so it is not
+  involved.
+
+The rule (`rsx_draw_engine.c` `eng_hud_next_frame`, called from the HUD block; default on, `PS3RECOMP_WIDE_NEXTFRAME=0` =
+frames by presents only, as before): the HUD is drawn into the composite's own target (the display buffer). A
+display-sized draw after the composite into ANOTHER target is the next frame's, so it starts the next slice
+(`s_hud_after = 0`): it and the rest of that frame fill the wide picture, as its draws after the present do. A later
+draw into the composite's target in the same present takes the break back (the next frame cannot draw into the buffer
+still waiting to be shown; that would be this frame's HUD after an off-screen pass, pinned as before). Not seen in
+normal frames: 0 such draws in ~6,000 frames of street and standing play before the change. Menus, the pause menu,
+movies and loading screens (frames without a composite) are not touched and keep their bars; 16:9 does not run it
+(`set_hud` is not installed). `PS3RECOMP_WIDE_LOG=1` prints a `[widenext]` line for each present that held the next
+frame (how many of its draws were still pinned) and a 10 s count. A call of its own: `sink_end_body` and `eng_present`
+keep their PGO profile (same "changed since the profile" list as HEAD with mg6r).
+
+Checked on the Deck (16:10, Deck preset + `PS3RECOMP_ASPECT=16:10`, street route from zone2/gamedata3 and the spot-2
+save, real clock, window recorded with ffmpeg, work/bench/NOTES.md "2026-11-22 aspect flicker"): before, one squeezed
+frame in the installed hd6c's recording (with the five 3D programs taken for UI quads at that moment) and one in the
+new build's with `PS3RECOMP_WIDE_NEXTFRAME=0` (its `[widenext]` line at the same time: 3,133 draws of the second frame
+pinned); after (default), two presents that held two frames in two runs, 0 draws pinned, no squeezed frame, the picture
+wide. Pause menu and loading screen keep their bars; 16:9 unchanged (no wide line in the log, same picture). Merges are
+rare at the Deck's ~30 fps (about one every 1-2 minutes on the street route); neither a delay at the present nor a busy
+loop on the RSX core made them more frequent.

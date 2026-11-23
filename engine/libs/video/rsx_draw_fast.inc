@@ -119,7 +119,7 @@ static void fd_init(void)
 static inline int fd_takes(u32 n_draw)
 {
     return s_ic_hit && dc.vbuf && s_ic_cur && s_ic_cur->ibuf && s_ic_cur->n_draw == n_draw &&
-           g.be->bind_vs_constants_range && !g.vpc_full && (!g.be->set_hud || s_hud_n == 0) &&
+           g.be->bind_vs_constants_range && !g.vpc_full && (!g.be->set_hud || s_fd_hud_block == 0) &&
            __atomic_load_n(&s_fd_skipfp, __ATOMIC_RELAXED) <= 1;
 }
 

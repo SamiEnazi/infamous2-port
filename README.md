@@ -46,7 +46,67 @@ and builds it once. On the test PC the whole install took 12 to 15 minutes.
 
 ![Setup: pick your game, one progress bar, then Play](docs/setup.png)
 
-Linux and the Steam Deck: [see below](#linux-and-steam-deck). More detail on copies and keys: [FAQ](#faq).
+Linux and the Steam Deck: [the next section](#install-on-linux-and-steam-deck). More detail on copies and keys:
+[FAQ](#faq).
+
+## Install on Linux and Steam Deck
+
+It works the same on every 64-bit Linux (SteamOS, Bazzite, Ubuntu, Fedora, Arch, ...), with nothing to install
+first and no password: everything the build needs is downloaded into the port's own folder. Your PC needs a CPU with
+AVX2, a graphics driver with Vulkan (Mesa or NVIDIA's; desktops have it already) and a Linux from 2022 or later
+(glibc 2.35: Ubuntu 22.04, Debian 12, Fedora 36, SteamOS 3.5 and newer). On a Steam Deck, switch to Desktop Mode first.
+
+1. Download **`inFAMOUS2-port-v…-Linux-x64.zip`** from the [latest release](../../releases/latest) and unpack it
+   where the game should live, for example `~/Games/inFAMOUS2` (on a Deck: the internal storage, with about 10 GB
+   free).
+2. Double-click the program **Install inFAMOUS 2** in that folder. If the desktop asks whether to run it, choose
+   Execute / Run.
+   **GNOME** (Ubuntu, Fedora Workstation): if the file manager does not start it, right-click it and choose
+   **Run as a Program**, or open a terminal in the folder and type `bash tools/install_gui.sh`. Without zenity or
+   kdialog the installer asks its questions in a terminal window.
+3. The first window says what the install does, with two boxes, both ticked: **Optimise for this PC** (see below)
+   and **Add to Steam** (shown when Steam is installed). With Add to Steam you can change the name the game gets in
+   your Steam library. Press **Install**.
+4. **Your game folder.** The one in RPCS3's game list is offered (EmuDeck: `Emulation/roms/ps3/…`, also on the SD
+   card); press **Use it**, or **Choose another** and pick the folder that holds `PS3_GAME`.
+5. **How to use it:**
+   - **Use the game from its folder** (the default): nothing is copied, which saves about 14 GB. The game only reads
+     that folder and never changes it, so it has to be there whenever you play: keep the SD card in. If it is
+     missing, Play says so; put the card back in and start again.
+   - **Copy the game into this folder**: about 14 GB more and a few minutes longer. Afterwards the port needs nothing
+     outside its folder, the SD card can go, and the folder can be moved anywhere.
+6. Wait while it builds. A window shows each step and the minutes so far. On a Steam Deck the whole install takes
+   about 25 minutes, or about 40 with Optimise (copying the game adds about 4). With Optimise, a game window opens
+   in the middle and plays by itself for about 7 minutes, with the sound off: don't touch it or close it.
+7. With Add to Steam: Steam has to be closed for a moment, because it rewrites its list of games when it exits.
+   The installer asks to close it (or waits until you have), adds the shortcut, and tells you to start Steam again.
+8. Press **Play now**. Later, double-click the program **Play inFAMOUS 2** in the same folder (no Steam needed),
+   start **inFAMOUS 2 (PC port)** from the application menu, or, with Add to Steam, start it from your Steam library,
+   also in Game Mode. Before the game is built, Play inFAMOUS 2 starts the installer.
+
+**Add to Steam** adds one non-Steam game that starts this folder's `tools/play.sh`, with artwork made from your
+game's own icon and background (`PS3_GAME/ICON0.PNG`, `PIC1.PNG`). It only ever adds an entry: your other shortcuts
+are not changed, a name that is already taken gets another one (you are asked), and Steam's list is copied to
+`shortcuts.vdf.bak-<time>` first. If you move the port's folder, add it again (installer menu: Add to Steam).
+
+**Optimise for this PC** (PGO): the game is compiled once with counters, plays a new game by itself, and is compiled
+again with what it learned on your PC. The new game is the same for every copy and every region: the title, the
+opening, and the tutorial on the pier played the way it asks (look around, run to the gate, blast it open, on toward
+the disturbance). On Linux both the game code and the engine are optimised (on Windows only the game code: the engine
+comes prebuilt). On a Steam Deck that made a busy street about 9 % and a plaza about 7 % faster. If any part of
+it fails, you get the normal build. The profile stays on your PC.
+
+**DLC** is found by itself when it is installed in RPCS3. Without RPCS3, put the DLC's unlock files (`*.edat`)
+into the `dlc` folder in the port's folder: they are picked up at the next start.
+
+Double-click **Install inFAMOUS 2** again at any time to play, rebuild (after an update, or to repair it), optimise,
+or add it to Steam. Your saves and settings stay.
+
+**For the best performance on a Steam Deck, set the GPU clock to 1100 MHz:** in Game Mode, open Quick Access (…)
+→ Performance → Advanced view → Manual GPU clock control → 1100 MHz, ideally with "Use per-game profile" on for this
+game. The Deck's CPU and GPU share one 15 W budget. Above about 1100 MHz the GPU takes power the CPU needs, and the
+game gets slower and less steady: on a busy street, 1400 MHz was 5-7 % slower than 1100 and 1600 MHz about 10 %
+slower. 1000-1200 MHz were about the same.
 
 ## What's new in v0.6.3
 
@@ -277,9 +337,12 @@ Ubuntu 22.04 with a Radeon RX 550 (RADV), and a player's Steam Deck ([#24](../..
 The port builds and runs natively on Linux, with no Wine or Proton. There is no Setup.exe on Linux: `./setup.sh`
 does the same job, and needs no RPCS3 either.
 
-Download `inFAMOUS2-port-v…-Linux-x64.zip` from the [latest release](../../releases/latest), unpack it and run
-`./setup.sh`. The first time it asks for your game folder, gets the update and firmware from Sony's servers,
-copies the game into the port's folder, builds it, then starts it. After that, `./setup.sh` just plays. Or from git:
+**The easy way:** the installer, see [Install on Linux and Steam Deck](#install-on-linux-and-steam-deck).
+
+**In a terminal:** unpack the zip and run `./setup.sh` (`./setup.sh --pgo` = Optimise for this PC). The first time it
+asks for your game folder, gets the update and firmware from Sony's servers, copies the game into the port's folder
+(`--link-game`: uses it where it is instead, no copy), builds it, then starts it. After that, `./setup.sh` just plays.
+Or from git:
 
 ```
 git clone https://github.com/SamiEnazi/infamous2-port
@@ -287,19 +350,21 @@ cd infamous2-port
 ./setup.sh                      # or: ./setup.sh --disc <your game folder>
 ```
 
-- `tools/setup.sh` lists what it needs from your distribution (a C/C++ toolchain, python3 with venv, the Vulkan
-  loader, SDL2). Unlike Windows, it downloads its build tools (LLVM 22.1.8, CMake / Ninja when the system has none)
-  and builds the engine itself: there are no prebuilt Linux tools yet.
+- **Nothing to install, on any distribution:** `tools/setup.sh` downloads its whole build environment into the
+  port's `tools-cache/` (each file pinned to a version and SHA-256 checked; about 2 GB, nothing outside the folder):
+  LLVM 22.1.8, CMake, Ninja, a portable Python 3.14, the C/C++ headers and libraries (a sysroot made of Ubuntu
+  22.04's glibc 2.35 and GCC 12 packages, so the game builds the same everywhere and runs on any glibc 2.35 or newer,
+  with the C++ library linked in), SDL2 (Valve's Steam Runtime build, put beside the game) and the Vulkan headers.
+  It checks only what cannot be downloaded: an x86-64 CPU with AVX2, glibc 2.35 or newer, a Vulkan driver and free
+  space. Unlike Windows, it builds the engine itself: there are no prebuilt Linux tools yet.
 - **Fedora, openSUSE** and other `lib64` distributions work since v0.6.0 ([#64](../../pull/64)).
 - **NixOS:** build and play inside the FHS environment in [`tools/nixos/fhs-env.nix`](tools/nixos/fhs-env.nix)
   (the commands are at the top of that file). Tested by its author on NixOS 26.05 with a Radeon 780M.
-- **Steam Deck (SteamOS 3.5 and later):** `./setup.sh` in Desktop Mode, nothing to install first (new on 18 Nov,
-  not confirmed on a Deck yet: please report how it goes in [#81](../../issues/81)). SteamOS comes
-  without the C library's headers and its system folders are read-only, so setup downloads them (12 MB, from Valve's
-  package mirror, SHA-256 checked) into the port's own `tools-cache/` ([#81](../../issues/81)). The other way still
-  works: a player built it inside an Ubuntu Distrobox container and plays it in Game Mode
-  ([#24](../../issues/24)); a game built in a container is started from that container too
-  (`distrobox enter <name> -- <port folder>/setup.sh`).
+- **Steam Deck (SteamOS 3.5 and later):** the installer or `./setup.sh` in Desktop Mode, nothing to install first,
+  the same as on any other distribution. If the build environment cannot be downloaded or does not work, setup falls
+  back to the way before it: SteamOS's own glibc, linux-api-headers and gcc packages (from Valve's package mirror,
+  SHA-256 checked; [#81](../../issues/81)). A game built inside a Distrobox container is started from that container
+  too (`distrobox enter <name> -- <port folder>/setup.sh`, [#24](../../issues/24)).
 - **v0.6.0 on Linux was built and run by us on Ubuntu 22.04 with a Radeon RX 550 (RADV)**: it installs, starts and
   plays there (slowly: that card is the limit). No Linux frame rate is claimed. Please [report](../../issues) how it runs on
   your distribution and GPU.

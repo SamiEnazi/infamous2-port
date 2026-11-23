@@ -45,6 +45,7 @@
 #include "../../include/ps3emu/ps3_settings.h"  /* the PC menu's live settings (PS3RECOMP_DOF, ...) */
 #include "../../include/ps3emu/ps3_lightfx.h"   /* the menu's Lighting page (PS3RECOMP_SOFT_SHADOWS, ...) */
 #include "../../include/ps3emu/ps3_title_view.h" /* (dofov) PS3RECOMP_DOF=play: the title says gameplay or cutscene */
+#include "../../include/ps3emu/ps3_liveab.h"    /* (r8) PS3RECOMP_ENG_R8 flips live with PS3_LIVEAB */
 
 /* Knobs PS3_TOGGLE_FILE can change while the game runs (their watchers only
  * store; the RSX thread reads). */
@@ -3911,6 +3912,86 @@ static const eng_vp_memo* eng_vp_current(void)
     return m;
 }
 
+/* (r8) PS3RECOMP_ENG_R8: the texture / program draw cuts, a bit mask (default 0 = none; live through PS3_LIVEAB).
+ * Bit 1 is the backend's (rsx_vulkan_backend.c, R5: descriptor sets kept across frames); bit 2 the structural memo
+ * below. PS3RECOMP_ENG_R8_VERIFY=1: every structural-memo hit is also analysed the whole way and compared ([r8-verify]
+ * lines; the whole way's result is the one used). */
+static int eng_r8(void)
+{
+    const int lab = g_ps3_lab[PS3_LAB_R8];
+    if (lab >= 0) return lab;
+    static int env = -1;
+    if (__builtin_expect(env < 0, 0)) { const char* e = getenv("PS3RECOMP_ENG_R8"); env = e ? (int)strtol(e, NULL, 0) : 0; }
+    return env;
+}
+/* (r8) bit 2, the fragment program's STRUCTURAL memo. The game uploads ~170 fragment programs a frame on the street
+ * whose bytes the content memo (PROG_CMEMO) has not seen -- the same programs with other inline constants -- and each
+ * paid the whole analysis: the structural hash a byte at a time and four more microcode walks (texture mask, sampled
+ * units, gamma and sign-expansion candidates), ~2 % of the RSX thread. Those five results depend on the instruction
+ * blocks alone when the program has no branch instruction (DWORD2 bit 31): every walk then splits the program into
+ * the same instruction blocks and inline-constant payloads (a payload follows each instruction with a constant
+ * source; rsx_fp_program_size's rule, which the unit walks also follow without a branch), and the structural hash
+ * hashes the instruction blocks and the two counts only. So one walk copies the instruction blocks out; a table entry
+ * with the same blocks (compared in full), size and counts hands over the five results. The constants are still
+ * collected from the program's own bytes, as before. A program with a branch is analysed the whole way. */
+#define ENG_FPS_SIZE 1024u
+typedef struct {
+    u64 h; u32 size, ni, np;               /* size 0: empty */
+    u8* ib; u32 icap;                      /* the instruction blocks (ni x 16 bytes) */
+    u64 structural; u32 tex_mask, sampled_units, gamma_cand, expand_cand;
+} eng_fps_entry;
+static eng_fps_entry s_fps[ENG_FPS_SIZE];
+static u8 s_fps_buf[ENG_FP_MAX_BYTES];
+static u64 s_fpsn[5];                      /* hits, misses (filled), branch programs, verify checks, verify differences */
+static int s_r8_verify = -1;
+/* The entry for `uc`'s (size bytes) instruction blocks: *hit = 1 when it holds them, else it is the slot to fill
+ * (NULL: a program with a branch, or one the walk does not end where the size says). */
+static eng_fps_entry* eng_fps_find(const u8* uc, u32 size, int* hit)
+{
+    *hit = 0;
+    u32 off = 0, ni = 0, np = 0, end = 0;
+    while (off + 16u <= size) {
+        const u32 w0 = rsx_fp_read_word(uc + off), w1 = rsx_fp_read_word(uc + off + 4),
+                  w2 = rsx_fp_read_word(uc + off + 8), w3 = rsx_fp_read_word(uc + off + 12);
+        if (w2 >> 31) { s_fpsn[2]++; return NULL; }
+        memcpy(s_fps_buf + (size_t)ni * 16u, uc + off, 16);
+        ni++;
+        off += 16u;
+        if (((w1 & 3u) == 2u || (w2 & 3u) == 2u || (w3 & 3u) == 2u) && off + 16u <= size) { off += 16u; np++; }
+        if (w0 & 1u) { end = 1; break; }
+    }
+    if (!end || off != size) return NULL;
+    const u64 h = eng_khash(s_fps_buf, ni * 16u, 0x3C6EF372FE94F82Bull ^ size);
+    eng_fps_entry* e = &s_fps[(u32)(h >> 40) & (ENG_FPS_SIZE - 1u)];
+    if (e->size == size && e->h == h && e->ni == ni && e->np == np && e->ib && !memcmp(e->ib, s_fps_buf, (size_t)ni * 16u)) {
+        *hit = 1;
+        return e;
+    }
+    if (!e->ib || e->icap < ni * 16u) {
+        u8* b = (u8*)realloc(e->ib, (size_t)ni * 16u);
+        if (!b) return NULL;
+        e->ib = b; e->icap = ni * 16u;
+    }
+    e->size = 0;                            /* filled by the caller after the analysis */
+    e->h = h; e->ni = ni; e->np = np;
+    memcpy(e->ib, s_fps_buf, (size_t)ni * 16u);
+    return e;
+}
+static void eng_fps_report(void)
+{
+    static u32 last = ~0u;
+    if (g.frames / 600u == last) return;
+    static int on = -1;
+    if (on < 0) { const char* l = getenv("PS3RECOMP_LIMITS"); on = (l && *l && *l != '0') || getenv("PS3RECOMP_ENG_PROG_STATS"); }
+    if (on && last != ~0u)
+        fprintf(stderr, "[r8-fp] frames %u..%u: structural memo hits %llu, misses %llu, programs with a branch %llu;"
+                        " verify %llu checked, %llu differ\n", last * 600u, g.frames,
+                (unsigned long long)s_fpsn[0], (unsigned long long)s_fpsn[1], (unsigned long long)s_fpsn[2],
+                (unsigned long long)s_fpsn[3], (unsigned long long)s_fpsn[4]);
+    last = g.frames / 600u;
+    memset(s_fpsn, 0, sizeof s_fpsn);
+}
+
 /* The bound fragment program's memo entry, or NULL when there is none (no
  * program, unmapped, or no end flag within ENG_FP_MAX_BYTES). */
 static const eng_fp_memo* eng_fp_current(void)
@@ -4027,7 +4108,16 @@ static const eng_fp_memo* eng_fp_current(void)
             return m;
         }
     }
-    m->structural = rsx_fp_structural_hash(uc, size, 1469598103934665603ull);
+    /* (r8) PS3RECOMP_ENG_R8 bit 2: the five structure-only results from the structural memo */
+    eng_fps_entry* fse = NULL;
+    int fs_hit = 0;
+    if (eng_r8() & 2) {
+        eng_fps_report();
+        fse = eng_fps_find(uc, size, &fs_hit);
+        if (__builtin_expect(s_r8_verify < 0, 0)) { const char* v = getenv("PS3RECOMP_ENG_R8_VERIFY"); s_r8_verify = v && *v == '1'; }
+    }
+    const int fs_take = fs_hit && !s_r8_verify;
+    m->structural = fs_take ? fse->structural : rsx_fp_structural_hash(uc, size, 1469598103934665603ull);
     m->constants.count = 0;
     /* (rsx-vtx) PS3RECOMP_ENG_FPK_LEAN (default 1; 0 = clear the whole 32 KB
      * block first, as before): a memo miss (new or re-uploaded program, ~170
@@ -4039,11 +4129,35 @@ static const eng_fp_memo* eng_fp_current(void)
     m->constants_ok = (fpk_lean ? rsx_fp_collect_constants_lean(uc, size, &m->constants)
                        : ce     ? eng_fp_collect_lean(uc, size, &m->constants)
                                 : rsx_fp_collect_constants(uc, size, &m->constants)) >= 0;
+    if (fs_take) {
+        s_fpsn[0]++;
+        m->tex_mask = fse->tex_mask; m->sampled_units = fse->sampled_units;
+        m->gamma_cand = fse->gamma_cand; m->expand_cand = fse->expand_cand;
+    } else {
     m->tex_mask = rsx_fp_texture_mask(uc, size);
     static const u8 all[RSX_DSP_NUM_TEXTURES] = { 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1 };
     m->sampled_units = rsx_fp_texture_units(uc, size);
     m->gamma_cand = rsx_fp_texture_gamma_units(uc, size, all);
     m->expand_cand = rsx_fp_texture_expand_units(uc, size, all);
+    if (fs_hit) {                           /* (r8) VERIFY: what the memo would have handed over */
+        s_fpsn[3]++;
+        if (fse->structural != m->structural || fse->tex_mask != m->tex_mask || fse->sampled_units != m->sampled_units ||
+            fse->gamma_cand != m->gamma_cand || fse->expand_cand != m->expand_cand) {
+            static u32 nd;
+            s_fpsn[4]++;
+            if (nd++ < 32u)
+                fprintf(stderr, "[r8-verify] fp structural memo #%u: loc %u off 0x%08X size %u: hash %016llx/%016llx"
+                                " tex %X/%X units %X/%X gamma %X/%X expand %X/%X\n", nd, loc, off, size,
+                        (unsigned long long)fse->structural, (unsigned long long)m->structural, fse->tex_mask, m->tex_mask,
+                        fse->sampled_units, m->sampled_units, fse->gamma_cand, m->gamma_cand, fse->expand_cand, m->expand_cand);
+        }
+    } else if (fse) {                       /* (r8) remembered for the next program with these blocks */
+        s_fpsn[1]++;
+        fse->structural = m->structural; fse->tex_mask = m->tex_mask; fse->sampled_units = m->sampled_units;
+        fse->gamma_cand = m->gamma_cand; fse->expand_cand = m->expand_cand;
+        fse->size = size;
+    }
+    }
     if (ce) {                               /* remembered for the next upload of these bytes */
         const u32 nk = m->constants.count;
         u8* cb = ce->bytes;
@@ -5112,8 +5226,10 @@ static int eng_prefetch_on(void)
         if ((PREV) && (PREV) != (E)) (PREV)->next = me_; \
         (PREV) = (E); \
         if ((E)->next) { \
+            /* (deck) every line: the index entries grew to 320 B (the pair memo), whose \
+             * middle lines (pair.sig / vkey / vidx) the probe reads too */ \
             const char* p_ = (const char*)&(TABLE)[(u16)((E)->next - 1u)]; \
-            __builtin_prefetch(p_, 0, 3); \
+            for (u32 o_ = 0; o_ < (u32)sizeof *(E); o_ += 64u) __builtin_prefetch(p_ + o_, 0, 3); \
             __builtin_prefetch(p_ + sizeof *(E) - 1u, 0, 3); \
         } \
     } } while (0)
@@ -7187,12 +7303,181 @@ static u32 s_hud_frame = ~0u, s_hud_slice, s_hud_seen;
 static int s_ov_mode = 1;
 static u32 s_ov_cnt;
 static unsigned long long s_ov_t0;
+/* (deck) PS3RECOMP_ENG_FASTDRAW_HUD (default 1; 0 = as before): the short tail (rsx_draw_fast.inc) in a wide
+ * picture with PS3_ASPECT_HUD_AFTER as well, for the 3D draws before the frame's composite. fd_takes refused
+ * every draw while a composite program was set (s_hud_n), because the short tail sends no HUD flag; so with any
+ * aspect but 16:9 (the player's 16:10) no draw took it (0.0% of 7,450 draws a frame at the plaza, against ~77%
+ * at 16:9). Before the composite of a 3D frame the HUD block's flag depends only on the draw's target (display
+ * size or not) and on s_hud_after / s_ov_mode / s_hud_frame, none of which a draw with all of the previous
+ * draw's state (DL_STATE: the same programs, so not the composite either, the same targets) changes: its flag
+ * is the previous draw's, which the backend holds. Refused as before: a frame whose first draw has not been
+ * through the tail (s_hud_frame), after the composite (also refused by sink_end_body with s_wide_box), and
+ * frames judged overlay-only (s_ov_mode). s_fd_hud_block is what fd_takes reads (nonzero: refused), kept by
+ * eng_fd_hud_note wherever those inputs change (the HUD block, the frame's end); a call of its own, so the
+ * callers' control flow and PGO profile stay as they were. PS3RECOMP_ENG_FASTDRAW_VERIFY checks it as any
+ * short-tail draw (its fdv_set_hud catches a flag the short tail left out). */
+static int s_fd_hud_block = -1;
+static __attribute__((noinline)) void eng_fd_hud_note(void)
+{
+    static int on = -1;
+    if (__builtin_expect(on < 0, 0)) { const char* e = getenv("PS3RECOMP_ENG_FASTDRAW_HUD"); on = !(e && e[0] == '0'); }
+    s_fd_hud_block = s_hud_n != 0 && (!on || s_hud_n < 0 || s_hud_after || s_ov_mode || s_hud_frame != g.frames);
+}
+/* (GitHub #47 / #105, agent wide) PS3RECOMP_WIDE_NEXTFRAME (default 1; 0 = as before): the title's next frame can start
+ * before the present that ends this one. inFAMOUS 2 flips through the cellGcmSetFlipCommand import (no flip word in
+ * its command stream: GCM_FLIP_STATS shows 0 FIFO flips), and the frame clock presents a pending flip between drains;
+ * now and then a drain runs on past the frame's end into the next frame (seen on the Deck: one present holding two
+ * frames, 16,438 draws against ~8,000), so one present (g.frames) holds the head of the next frame or all of it. Those
+ * draws came after this frame's composite (s_hud_after still set) and are display-sized (the 1280x720 G-buffer and
+ * post targets), so they were pinned as the HUD: every pass of the next frame's picture was squeezed into the 16:9
+ * rectangle again, reading the pass before (0.9^4 of the height at 16:10 in the frame caught, centred), and its
+ * composite showed that for one frame -- the "flicker" of #47 / #105, more often at a high frame rate. (Its 3D vertex
+ * programs, world matrix then view-projection, also went through eng_wide_ui_vp as "UI quads": the frame's hitch.)
+ * The HUD is drawn into the composite's own target (the display buffer); a display-sized draw
+ * after the composite into ANOTHER target is the next frame's, so it starts the next slice here (s_hud_after = 0: it
+ * and the rest of that frame fill the wide picture, as its draws after the present do). A later draw into the composite's
+ * target in the same present takes the break back (the next frame cannot draw into the buffer still waiting to be shown,
+ * so that is this frame's HUD after an off-screen pass: pinned as before). Called for every draw of the
+ * HUD block (after the composite the short tail is refused, so none is missed); a call of its own, so sink_end_body's
+ * control flow and PGO profile stay as they were. PS3RECOMP_WIDE_LOG=1 lists each such frame ([widenext]). */
+static u32 s_hc_loc = ~0u, s_hc_off = ~0u, s_hc_draw;    /* the slice's composite: its target, its draw */
+static u32 s_wn_n, s_wn_draw, s_wn_off, s_wn_hud;        /* WIDE_LOG: next-frame draws seen, the first one's, HUD after it */
+static u32 s_wn_back;                                    /* breaks taken back (a draw into the composite's target after one) */
+static int s_wn_broke;                                   /* this present's frame was broken by eng_hud_next_frame */
+static u32 s_p3_n;                                       /* WIDE_LOG: those draws pinned all the same (NEXTFRAME=0, or taken back) */
+static u64 s_wn_fp;
+static int eng_wide_log(void)
+{
+    static int wl = -1;
+    if (__builtin_expect(wl < 0, 0)) { const char* e = getenv("PS3RECOMP_WIDE_LOG"); wl = e && *e == '1'; }
+    return wl;
+}
+static __attribute__((noinline)) void eng_hud_next_frame(u32 target, u64 fp)
+{
+    static int on = -1;
+    if (__builtin_expect(on < 0, 0)) { const char* e = getenv("PS3RECOMP_WIDE_NEXTFRAME"); on = !(e && e[0] == '0'); }
+    const eng_surface* s = &g.surfaces[target];
+    int composite = 0;   /* as the caller decides them (its own values are not passed: its profile) */
+    for (int k = 0; k < s_hud_n; k++) if (fp && fp == s_hud_fp[k]) composite = 1;
+    const int display = s->w == g.width && s->h == g.height;
+    if (composite) { s_hc_loc = s->location; s_hc_off = s->offset; s_hc_draw = g.guest_draws; s_wn_broke = 0; return; }
+    if (!display) return;
+    const int other = s->offset != s_hc_off || s->location != s_hc_loc;
+    if (!other) {
+        if (s_wn_n && s_hud_after) s_wn_hud++;
+        /* the composite's target again after a break: still its frame's HUD (the next frame cannot draw into the
+         * buffer still waiting to be shown), so the break was not the next frame -- pinned again */
+        if (s_wn_broke && !s_hud_after) { s_hud_after = 1; s_wn_broke = 0; s_wn_back++; }
+    } else if (s_hud_after) {
+        if (!s_wn_n++) { s_wn_draw = g.guest_draws; s_wn_off = s->offset; s_wn_fp = fp; }
+        if (on) { s_hud_slice++; s_hud_after = 0; s_wn_broke = 1; }   /* the next frame: fills, as after the present */
+    }
+    /* WIDE_LOG's count of the bug: a display draw after the composite into another target that is still pinned as
+     * the HUD (the caller then decides hud = s_hud_after) -- a pass of a picture squeezed into the 16:9 rectangle */
+    if (other && s_hud_after) s_p3_n++;
+}
+/* Before the present (the bars block, eng_present): WIDE_LOG's line for a frame that held the head of the next one, and
+ * the counts once every 10 s. A call of its own (eng_present's profile). */
+static __attribute__((noinline)) void eng_hud_next_frame_log(void)
+{
+    static u32 frames, hits, sq; static unsigned long long t0;
+    frames++;
+    if (s_p3_n) sq++;
+    if (s_wn_n) {
+        hits++;
+        if (eng_wide_log()) {
+            static u32 n;
+            if (n++ < 300u)
+                fprintf(stderr, "[widenext] frame %u: the next frame began before this present: display draws into other targets "
+                                "after the composite, the first at draw %u into 0x%08X (fp %016llx); %u of them pinned as the HUD%s; "
+                                "the last composite at draw %u into 0x%08X, %u draws into it after the first; %u draws%s\n",
+                        g.frames, s_wn_draw, s_wn_off, (unsigned long long)s_wn_fp, s_p3_n,
+                        s_p3_n ? " (a squeezed picture)" : " (none: they filled)", s_hc_draw, s_hc_off, s_wn_hud, g.guest_draws,
+                        s_wn_back ? " (break taken back)" : "");
+        }
+    }
+    s_wn_n = s_wn_hud = s_wn_back = s_p3_n = 0; s_wn_broke = 0;
+    extern unsigned long long ps3_ms_now(void);
+    const unsigned long long now = ps3_ms_now();
+    if (!t0) t0 = now;
+    if (now - t0 >= 10000ull) {
+        if (eng_wide_log()) fprintf(stderr, "[widenext] 10 s: %u frame(s) of %u held the head of the next one, %u of them with "
+                                            "its draws pinned as the HUD\n", hits, frames, sq);
+        frames = hits = sq = 0; t0 = now;
+    }
+}
 
 #include "rsx_draw_delta.inc"   /* (rnd1) PS3RECOMP_ENG_DELTA */
 #include "rsx_draw_fast.inc"    /* (fastdraw) PS3RECOMP_ENG_FASTDRAW */
 
+/* (deck) PS3RECOMP_ENG_PASSSTATS=<frames>: draws per frame by pass (depth buffer, colour targets, size, colour
+ * write mask), the top ones printed every <frames> frames. Which passes the draw count comes from (shadow
+ * cascades are depth-only: colour mask 0). */
+typedef struct { u64 key; u32 zoff, coff, w, h, ct, cmask, vx, vy, vw, vh; u64 n; } eng_pass_ent;
+static eng_pass_ent s_pass[256];
+static int s_pass_every = -1;
+static u32 s_pass_f0;
+static const u32* s_pass_runs; static u32 s_pass_nruns;
+static void eng_pass_note(const rsx_dsp_surface* sf, const rsx_be_render_state* rs, const rsx_dsp_viewport* vp)
+{
+    if (__builtin_expect(s_pass_every < 0, 0)) {
+        const char* e = getenv("PS3RECOMP_ENG_PASSSTATS"); s_pass_every = e ? atoi(e) : 0;
+        if (s_pass_every < 0) s_pass_every = 0;
+        s_pass_f0 = g.frames;
+    }
+    if (!s_pass_every) return;
+    const u32 cmask = (rs->color_mask ? 1u : 0u) | (rs->color_mask_mrt ? 2u : 0u);
+    /* depth-only passes: split by viewport too (shadow cascades share one atlas) */
+    const u32 vx = cmask ? 0u : vp->x, vy = cmask ? 0u : vp->y, vw = cmask ? 0u : vp->w, vh = cmask ? 0u : vp->h;
+    u64 key = ((u64)sf->zeta_offset << 32 ^ (u64)sf->color_offset[0] ^ (u64)sf->clip_w << 16 ^ (u64)sf->clip_h << 48 ^
+               (u64)sf->color_target << 8 ^ cmask);
+    key = (key ^ ((u64)vx << 20 | (u64)vy << 36 | (u64)vw << 4 | (u64)vh << 52) * 0x9E3779B97F4A7C15ull) | 1u;
+    /* runs: consecutive draws of one pass; the depth-only runs of the last frame are printed */
+    { static u64 run_key; static u32 run_n, run_frame, run_cm; static u32 runs[64], nruns, last_runs[64], last_nruns, runs_frame;
+      if (key != run_key || g.frames != run_frame) {
+          if (run_key && !run_cm && nruns < 64u) runs[nruns++] = run_n;
+          if (g.frames != runs_frame) { memcpy(last_runs, runs, sizeof runs); last_nruns = nruns; nruns = 0; runs_frame = g.frames; }
+          run_key = key; run_n = 0; run_frame = g.frames; run_cm = cmask;
+      }
+      run_n++;
+      s_pass_runs = last_runs; s_pass_nruns = last_nruns; }
+    u32 i = (u32)(key ^ key >> 29) & 255u;
+    for (u32 k = 0; k < 256u; k++, i = (i + 1u) & 255u) {
+        eng_pass_ent* e = &s_pass[i];
+        if (e->key == key) { e->n++; break; }
+        if (!e->key) { e->key = key; e->zoff = sf->zeta_offset; e->coff = sf->color_offset[0]; e->w = sf->clip_w; e->h = sf->clip_h;
+                       e->ct = sf->color_target; e->cmask = cmask; e->vx = vx; e->vy = vy; e->vw = vw; e->vh = vh; e->n = 1; break; }
+    }
+    const u32 nf = g.frames - s_pass_f0;
+    if (nf >= (u32)s_pass_every) {
+        eng_pass_ent* top[12] = { 0 };
+        u64 tot = 0, depth_only = 0;
+        for (u32 k = 0; k < 256u; k++) {
+            eng_pass_ent* e = &s_pass[k];
+            if (!e->key) continue;
+            tot += e->n; if (!e->cmask) depth_only += e->n;
+            for (int t = 0; t < 12; t++) if (!top[t] || e->n > top[t]->n) { for (int u = 11; u > t; u--) top[u] = top[u - 1]; top[t] = e; break; }
+        }
+        fprintf(stderr, "[passstats] %u frames: %.0f draws/frame, %.0f depth-only (colour mask 0);", nf, (double)tot / nf, (double)depth_only / nf);
+        for (int t = 0; t < 12 && top[t]; t++)
+            fprintf(stderr, " [%.0f %ux%u z%08X c%08X ct%u m%u vp %u,%u %ux%u]", (double)top[t]->n / nf, top[t]->w, top[t]->h, top[t]->zoff, top[t]->coff,
+                    top[t]->ct, top[t]->cmask, top[t]->vx, top[t]->vy, top[t]->vw, top[t]->vh);
+        fprintf(stderr, "; depth-only runs last frame (%u):", s_pass_nruns);
+        for (u32 r = 0; r < s_pass_nruns; r++) fprintf(stderr, " %u", s_pass_runs[r]);
+        fputc('\n', stderr);
+        memset(s_pass, 0, sizeof s_pass);
+        s_pass_f0 = g.frames;
+    }
+}
 static void sink_end_body(void* user, const rsx_dispatch* r)
 {
+    if (__builtin_expect(s_pass_every != 0, 0) && g.ready) {   /* (deck) PS3RECOMP_ENG_PASSSTATS: every draw, fast paths too */
+        rsx_dsp_surface psf; rsx_be_render_state prs; rsx_dsp_viewport pvp;
+        rsx_dsp_get_surface(&g.rsx, &psf);
+        rsx_dsp_get_viewport(&g.rsx, &pvp);
+        rsx_draw_engine_decode_render_state(&g.rsx, &prs);
+        eng_pass_note(&psf, &prs, &pvp);
+    }
     (void)user; (void)r;
     if (!g.ready) return;
     if (++s_draw_serial == 0) s_draw_serial = 1;
@@ -8097,6 +8382,7 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
             int composite = 0;
             for (int k = 0; k < s_hud_n; k++) if (fk && fk == s_hud_fp[k]) composite = 1;
             display = g.surfaces[target].w == g.width && g.surfaces[target].h == g.height;
+            eng_hud_next_frame(target, fk);   /* (#47) a draw of the next frame before this one's present */
             if (composite) { s_hud_after = 1; s_hud_seen = s_hud_slice; s_hud_comp_vp = vk; s_ov_mode = 0; s_ov_cnt = 0; }
             else if (display) hud = s_hud_after || s_ov_mode;
             /* (dofov) PS3RECOMP_WIDE_FILL (default 1): a draw after the composite that covers the whole guest
@@ -8169,6 +8455,7 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
               } }
         }
         g.be->set_hud(g.be->user, hud ? 1 : (s_hud_n && display ? 2 : 0), g.surfaces[target].w);
+        eng_fd_hud_note();   /* (deck) PS3RECOMP_ENG_FASTDRAW_HUD: the short tail's HUD verdict */
     }
     /* PS3RECOMP_FX_RES: the same picture over the scaled target's pixels. */
     const float fxk = tkq > 4u ? (float)tkq * 0.25f : 1.0f;
@@ -8254,9 +8541,30 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
     if (dl) dl_end();   /* (rnd1) completed: its parts are the next draw's to take */
 }
 
+/* (sz1, bench only) PS3_DBG_DRAW_DELAY_NS=<ns>: a delay per guest draw on the RSX thread (a causal test of the graphics
+ * thread's per-draw cost, R2's size); PS3_DBG_DRAW_DELAY_KIND=spin (default mwait: MONITORX/MWAITX, no power).
+ * PS3_LIVEAB's PS3_DBG_DRAW_DELAY_NS overrides; every delay counts in g_ps3_liveab_ev. Off: this call, a load, a compare. */
+#include "../../include/ps3emu/ps3_dbgdelay.h"
+#include "../../include/ps3emu/ps3_liveab.h"
+static __attribute__((noinline)) void eng_dbg_draw_delay(void)
+{
+    static int ns = -1, spin;
+    int v = ns;
+    if (__builtin_expect(v < 0, 0)) {
+        const char* e = getenv("PS3_DBG_DRAW_DELAY_NS"); ns = v = e ? atoi(e) : 0;
+        const char* k = getenv("PS3_DBG_DRAW_DELAY_KIND"); spin = k && !strcmp(k, "spin");
+        if (v > 0) fprintf(stderr, "[dbg] PS3_DBG_DRAW_DELAY_NS=%d (%s) per draw\n", v, spin ? "spin" : "mwait");
+    }
+    const int lab = g_ps3_lab[PS3_LAB_DRAW_DELAY];
+    if (lab >= 0) v = lab;
+    if (__builtin_expect(v <= 0, 1)) return;
+    __atomic_add_fetch(&g_ps3_liveab_ev, 1, __ATOMIC_RELAXED);
+    ps3_dbg_wait_ns((uint64_t)v, spin);
+}
 /* (rnd1) PS3RECOMP_ENG_DELTA's counters: the time a draw takes on this thread. */
 static void sink_end(void* user, const rsx_dispatch* r)
 {
+    eng_dbg_draw_delay();   /* (sz1) bench only, default off (a call, no branch here: sink_end keeps its PGO profile) */
     /* (track C) PS3_RSX_DIGEST: the draw's state + packets as the engine starts it;
      * =check: against the split walker's hash of the same draw (g_rsx_tc_ref) */
     if (__builtin_expect(s_tc_dg != 0, 0) && g.ready) {
@@ -8537,6 +8845,7 @@ static void eng_present(u32 buffer_id)
                   if (++s_ov_cnt >= ENW_FRAMES && now - s_ov_t0 >= ENW_MS) s_ov_mode = 1;
               }
           } }
+        eng_hud_next_frame_log();   /* (#47) WIDE_LOG */
         const int bars = !s_hud_after && s_ov_mode;
         { static int wl = -1; static int last = -1;   /* PS3RECOMP_WIDE_LOG=1: a change of the bars verdict (GitHub #47) */
           if (wl < 0) { const char* e = getenv("PS3RECOMP_WIDE_LOG"); wl = e && *e == '1'; }
@@ -8687,6 +8996,7 @@ presented:;
               done = 1; FILE* f = fopen(mark, "w"); if (f) fclose(f);
               fprintf(stderr, "[rsx engine] world mark: frame %u, %u draws -> %s\n", g.frames, g.guest_draws, mark); } } }
     g.frames++;
+    eng_fd_hud_note();   /* (deck) PS3RECOMP_ENG_FASTDRAW_HUD: a new frame (and the overlay verdict above) */
     rsx_tc_frame();   /* (track C) the digest's frame line, the counters */
     if (__atomic_load_n(&s_fx_dof_mode, __ATOMIC_RELAXED) == 2) eng_fx_dof_frame();   /* (dofov) =play */
     if (rsx_wt_mode()) rsx_wt_frame(g.frames);

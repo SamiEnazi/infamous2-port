@@ -254,6 +254,8 @@ void ps3_host_place_self_once(int role)
 {
     if (!t_placed) ps3_host_place_self(role);
 }
+int ps3_host_place_rsx_sibling(void) { return 0; }   /* (deck) Linux rsxcore only */
+int ps3_host_place_main_live(int mode) { (void)mode; return 0; }
 
 #else  /* !_WIN32 */
 #include <stdlib.h>
@@ -263,12 +265,18 @@ void ps3_host_place_self_once(int role)
 #endif
 static int bud_logical(void)
 {
+    /* the process's CPU budget as it started: cached, so a thread that PS3_CPU_PLACE confined to fewer
+     * CPUs (the RSX thread: one) still sizes its decisions for the whole budget */
+    static int s_n;
+    int c = __atomic_load_n(&s_n, __ATOMIC_RELAXED);
+    if (c > 0) return c;
 #ifdef __linux__
     cpu_set_t set;
-    if (sched_getaffinity(0, sizeof set, &set) == 0) { const int n = CPU_COUNT(&set); if (n > 0) return n; }
+    if (sched_getaffinity(0, sizeof set, &set) == 0) { const int n = CPU_COUNT(&set); if (n > 0) c = n; }
 #endif
-    const long n = sysconf(_SC_NPROCESSORS_ONLN);
-    return n > 0 ? (int)n : 1;
+    if (c <= 0) { const long n = sysconf(_SC_NPROCESSORS_ONLN); c = n > 0 ? (int)n : 1; }
+    __atomic_store_n(&s_n, c, __ATOMIC_RELAXED);
+    return c;
 }
 int ps3_host_cpus(void)  { return bud_logical(); }
 int ps3_host_cores(void) { const int n = bud_logical(); return n > 1 ? n / 2 : 1; }   /* SMT assumed */
@@ -280,6 +288,235 @@ int ps3_host_core_scarce(void)
     e = getenv("PS3_CORE_SCARCE_BELOW"); if (e && atoi(e) > 0) below = atoi(e);
     return ps3_host_cores() < below;
 }
+#ifdef __linux__
+#include <dirent.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/syscall.h>
+/* PS3_CPU_PLACE=rsxcore (Linux): the RSX thread runs alone on the first hardware thread of the last core
+ * (its sibling stays idle); every other thread of the process runs on the other cores. Measured on the
+ * Steam Deck (4 cores / 8 threads, 7 busy game threads; 2026-11-16, city street, external taskset): 30.5 ->
+ * 33.0 fps, 34.6 with the job 210 native. A helper thread re-applies the split once a second, because the
+ * threads created later (driver, Vulkan workers) inherit their creator's CPU set. Other values: off. */
+static pthread_once_t s_pl_once = PTHREAD_ONCE_INIT;
+static int s_pl_mode;                       /* 1 = rsxcore */
+static cpu_set_t s_rsx_set, s_rsx2_set, s_core_set;
+static pid_t s_rsx_tid, s_rsx2_tid;     /* the RSX thread; with PS3RECOMP_RSX_SPLIT, its exec thread (the core's other CPU) */
+/* (main1, ft1) PS3_CPU_PLACE_MAIN=core|cpu (with rsxcore; default off; bench only): the guest's main PPU thread pinned
+ * to the first CPU of the next core down: `core` keeps that core's other CPU free of everything else (the main thread
+ * runs without an SMT neighbour; the rest get the remaining cores), `cpu` gives that other CPU to the rest (only the
+ * main thread's own CPU is taken out). Measured on the street (mt2, 2026-11-19): -1 to -2 % (`cpu`), -3.6 % (`core`).
+ * The sets of all three modes are made at start, so PS3_LIVEAB can switch the mode while the game runs
+ * (ps3_host_place_main_live). Off: s_rest_m[0] is the rest set as before, nothing else changes. */
+static volatile int s_main_mode;            /* 0 off, 1 core, 2 cpu: the one in force */
+static int s_main_ok[3];                    /* that mode's sets exist */
+static cpu_set_t s_rest_m[3], s_main_set, s_main_core_m[3];
+static pid_t s_main_tid;                    /* the thread placed as PS3_PLACE_MAIN (the process thread) */
+static const cpu_set_t* pl_rest(void) { return &s_rest_m[__atomic_load_n(&s_main_mode, __ATOMIC_ACQUIRE)]; }
+static _Thread_local int t_placed;
+
+static int pl_siblings(int cpu, cpu_set_t* out)
+{
+    char path[96], buf[128];
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu);
+    FILE* f = fopen(path, "r");
+    if (!f) return 0;
+    const int ok = fgets(buf, sizeof buf, f) != NULL;
+    fclose(f);
+    if (!ok) return 0;
+    CPU_ZERO(out);
+    for (char* p = buf; *p && *p != '\n';) {           /* "6-7" or "6,7" or "6" */
+        char* q; const long a = strtol(p, &q, 10); if (q == p) break;
+        long b = a; p = q;
+        if (*p == '-') { b = strtol(p + 1, &q, 10); p = q; }
+        for (long c = a; c <= b && c < CPU_SETSIZE; c++) CPU_SET((int)c, out);
+        if (*p == ',') p++;
+    }
+    return CPU_COUNT(out) > 0;
+}
+
+static void pl_init(void)
+{
+    (void)bud_logical();                            /* cache the whole budget before anything is confined */
+    const char* e = getenv("PS3_CPU_PLACE");
+    /* (deck) rsxcpu: the RSX thread alone on its CPU, but the core's other hardware thread is shared by the
+     * rest (rsxcore leaves it idle) -- for scenes bound by the SPU / main threads, not the RSX thread */
+    const int cpu_only = e && strcmp(e, "rsxcpu") == 0;
+    if (!e || (strcmp(e, "rsxcore") != 0 && !cpu_only)) return;
+    cpu_set_t all;
+    if (sched_getaffinity(0, sizeof all, &all) != 0) return;
+    int last = -1;
+    for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &all)) last = c;
+    if (last < 0) return;
+    if (!pl_siblings(last, &s_core_set)) { CPU_ZERO(&s_core_set); CPU_SET(last, &s_core_set); }
+    int first = -1;
+    for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &s_core_set) && CPU_ISSET(c, &all)) { first = c; break; }
+    if (first < 0) return;
+    CPU_ZERO(&s_rsx_set); CPU_SET(first, &s_rsx_set);
+    s_rsx2_set = s_core_set; CPU_CLR(first, &s_rsx2_set);
+    if (!CPU_COUNT(&s_rsx2_set)) s_rsx2_set = s_rsx_set;          /* no SMT sibling: both share the one CPU */
+    s_rest_m[0] = all;
+    for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &s_core_set)) CPU_CLR(c, &s_rest_m[0]);
+    if (cpu_only) {           /* only the RSX thread's own CPU is taken out; the sweeper keeps others off it */
+        s_rest_m[0] = all; CPU_CLR(first, &s_rest_m[0]);
+        s_core_set = s_rsx_set;
+    }
+    if (CPU_COUNT(&s_rest_m[0]) < 4) {
+        fprintf(stderr, "[place] PS3_CPU_PLACE=rsxcore: only %d CPUs would be left for the rest, off\n", CPU_COUNT(&s_rest_m[0]));
+        return;
+    }
+    s_main_ok[0] = 1;
+    {   /* (main1, ft1) PS3_CPU_PLACE_MAIN: the sets of modes 1 (core) and 2 (cpu) */
+        int mlast = -1;
+        for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &s_rest_m[0])) mlast = c;
+        cpu_set_t mcore;
+        if (mlast >= 0 && pl_siblings(mlast, &mcore)) {
+            int mfirst = -1;
+            for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &mcore) && CPU_ISSET(c, &s_rest_m[0])) { mfirst = c; break; }
+            for (int m = 1; m <= 2 && mfirst >= 0; m++) {
+                cpu_set_t rest2 = s_rest_m[0];
+                if (m == 1) { for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &mcore)) CPU_CLR(c, &rest2); }
+                else CPU_CLR(mfirst, &rest2);
+                if (CPU_COUNT(&rest2) < 3) continue;
+                s_rest_m[m] = rest2;
+                if (m == 1) s_main_core_m[1] = mcore; else { CPU_ZERO(&s_main_core_m[2]); CPU_SET(mfirst, &s_main_core_m[2]); }
+                s_main_ok[m] = 1;
+            }
+            CPU_ZERO(&s_main_set); if (mfirst >= 0) CPU_SET(mfirst, &s_main_set);
+        }
+        const char* me = getenv("PS3_CPU_PLACE_MAIN");
+        const int mm = me && !strcmp(me, "core") ? 1 : me && !strcmp(me, "cpu") ? 2 : 0;
+        if (mm && s_main_ok[mm]) {
+            int mc = -1;
+            for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &s_main_set)) { mc = c; break; }
+            fprintf(stderr, "[place] PS3_CPU_PLACE_MAIN=%s: the main thread alone on CPU %d (%s), the rest on %d CPUs\n",
+                    me, mc, mm == 1 ? "its core's other CPU idle" : "its core's other CPU shared", CPU_COUNT(&s_rest_m[mm]));
+            __atomic_store_n(&s_main_mode, mm, __ATOMIC_RELEASE);
+        }
+    }
+    s_pl_mode = 1;
+    fprintf(stderr, "[place] PS3_CPU_PLACE=%s: the RSX thread alone on CPU %d (kept clear: CPUs", cpu_only ? "rsxcpu" : "rsxcore", first);
+    for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &s_core_set)) fprintf(stderr, " %d", c);
+    fprintf(stderr, "), every other thread on the other %d CPUs\n", CPU_COUNT(pl_rest()));
+}
+
+static void* pl_sweeper(void* arg)
+{
+    (void)arg;
+    sched_setaffinity(0, sizeof(cpu_set_t), pl_rest());
+    for (;;) {
+        sleep(1);
+        DIR* d = opendir("/proc/self/task");
+        if (!d) continue;
+        const pid_t rsx = __atomic_load_n(&s_rsx_tid, __ATOMIC_ACQUIRE), rsx2 = __atomic_load_n(&s_rsx2_tid, __ATOMIC_ACQUIRE);
+        struct dirent* de;
+        while ((de = readdir(d)) != NULL) {
+            const pid_t tid = (pid_t)atoi(de->d_name);
+            if (tid <= 0 || tid == rsx || tid == rsx2) continue;
+            const int mm = __atomic_load_n(&s_main_mode, __ATOMIC_ACQUIRE);   /* (main1, ft1) PS3_CPU_PLACE_MAIN */
+            if (mm && tid == __atomic_load_n(&s_main_tid, __ATOMIC_ACQUIRE)) continue;
+            cpu_set_t cur, x, y;
+            if (sched_getaffinity(tid, sizeof cur, &cur) != 0) continue;
+            CPU_AND(&x, &cur, &s_core_set);
+            CPU_AND(&y, &cur, &s_main_core_m[mm]);
+            if (CPU_COUNT(&x) || (mm && CPU_COUNT(&y))) sched_setaffinity(tid, sizeof s_rest_m[mm], &s_rest_m[mm]);
+        }
+        closedir(d);
+    }
+    return NULL;
+}
+
+void ps3_host_place_self(int role)
+{
+    pthread_once(&s_pl_once, pl_init);
+    /* (deck) a name per role for profilers and work/bench/budget.py (the first placement only). Never the
+     * process's own thread: its name is the process name tools look the game up by (pgrep -x). */
+    if (!t_placed && (role == PS3_PLACE_MAIN || role == PS3_PLACE_RSX || role == PS3_PLACE_SPU) &&
+        (pid_t)syscall(SYS_gettid) != getpid()) {
+        static int s_spu_n;
+        char nm[16];
+        if (role == PS3_PLACE_SPU) snprintf(nm, sizeof nm, "ps3-spu%d", __atomic_fetch_add(&s_spu_n, 1, __ATOMIC_RELAXED));
+        else snprintf(nm, sizeof nm, "%s", role == PS3_PLACE_MAIN ? "ps3-main" : "ps3-rsx");
+        pthread_setname_np(pthread_self(), nm);
+    }
+    t_placed = 1;
+    if (!s_pl_mode) return;
+    if (role == PS3_PLACE_RSX) {
+        pid_t none = 0;
+        const pid_t me = (pid_t)syscall(SYS_gettid);
+        if (__atomic_compare_exchange_n(&s_rsx_tid, &none, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            sched_setaffinity(0, sizeof s_rsx_set, &s_rsx_set);
+            pthread_t t;
+            if (pthread_create(&t, NULL, pl_sweeper, NULL) == 0) pthread_detach(t);
+            fprintf(stderr, "[place] RSX thread %d placed alone\n", (int)me);
+            return;
+        }
+        none = 0;
+        if (__atomic_compare_exchange_n(&s_rsx2_tid, &none, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            sched_setaffinity(0, sizeof s_rsx2_set, &s_rsx2_set);
+            fprintf(stderr, "[place] second RSX-role thread %d (the split's exec thread) on the RSX core's other CPU\n", (int)me);
+            return;
+        }
+    }
+    if (role == PS3_PLACE_MAIN) {   /* (main1, ft1) PS3_CPU_PLACE_MAIN: the main thread is remembered in every mode */
+        pid_t none = 0;
+        const pid_t me = (pid_t)syscall(SYS_gettid);
+        if (__atomic_compare_exchange_n(&s_main_tid, &none, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) &&
+            __atomic_load_n(&s_main_mode, __ATOMIC_ACQUIRE)) {
+            sched_setaffinity(0, sizeof s_main_set, &s_main_set);
+            fprintf(stderr, "[place] main thread %d placed alone\n", (int)me);
+            return;
+        }
+    }
+    sched_setaffinity(0, sizeof(cpu_set_t), pl_rest());   /* every other role, and a second RSX-role thread */
+}
+void ps3_host_place_self_once(int role) { if (!t_placed) ps3_host_place_self(role); }
+/* (ft1) PS3_LIVEAB: PS3_CPU_PLACE_MAIN's mode while the game runs. The main thread goes to its CPU (or back to the
+ * rest's set); every other thread that has the old mode's rest set, or a CPU the new mode keeps for the main thread,
+ * gets the new rest set (threads placed elsewhere -- the RSX core -- keep theirs); the sweeper keeps it so. */
+int ps3_host_place_main_live(int mode)
+{
+    pthread_once(&s_pl_once, pl_init);
+    if (!s_pl_mode || mode < 0 || mode > 2 || !s_main_ok[mode]) return __atomic_load_n(&s_main_mode, __ATOMIC_ACQUIRE);
+    const int old = __atomic_exchange_n(&s_main_mode, mode, __ATOMIC_ACQ_REL);
+    if (old == mode) return mode;
+    const pid_t mt = __atomic_load_n(&s_main_tid, __ATOMIC_ACQUIRE);
+    const pid_t rsx = __atomic_load_n(&s_rsx_tid, __ATOMIC_ACQUIRE), rsx2 = __atomic_load_n(&s_rsx2_tid, __ATOMIC_ACQUIRE);
+    if (mt) sched_setaffinity(mt, sizeof s_main_set, mode ? &s_main_set : &s_rest_m[0]);
+    DIR* d = opendir("/proc/self/task");
+    if (d) {
+        struct dirent* de;
+        while ((de = readdir(d)) != NULL) {
+            const pid_t tid = (pid_t)atoi(de->d_name);
+            if (tid <= 0 || tid == mt || tid == rsx || tid == rsx2) continue;
+            cpu_set_t cur, y;
+            if (sched_getaffinity(tid, sizeof cur, &cur) != 0) continue;
+            CPU_AND(&y, &cur, &s_main_core_m[mode]);
+            if (CPU_EQUAL(&cur, &s_rest_m[old]) || (mode && CPU_COUNT(&y))) sched_setaffinity(tid, sizeof s_rest_m[mode], &s_rest_m[mode]);
+        }
+        closedir(d);
+    }
+    return mode;
+}
+/* (deck) the calling thread on the RSX core's other hardware thread (rsxcore mode only), kept there by the
+ * sweeper; 0 = not placed (another thread holds that slot, or rsxcore is off). */
+int ps3_host_place_rsx_sibling(void)
+{
+    pthread_once(&s_pl_once, pl_init);
+    t_placed = 1;
+    if (!s_pl_mode) return 0;
+    pid_t none = 0;
+    const pid_t me = (pid_t)syscall(SYS_gettid);
+    if (!__atomic_compare_exchange_n(&s_rsx2_tid, &none, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 0;
+    sched_setaffinity(0, sizeof s_rsx2_set, &s_rsx2_set);
+    fprintf(stderr, "[place] thread %d on the RSX core's other CPU\n", (int)me);
+    return 1;
+}
+#else
 void ps3_host_place_self(int role) { (void)role; }
 void ps3_host_place_self_once(int role) { (void)role; }
+int ps3_host_place_rsx_sibling(void) { return 0; }
+int ps3_host_place_main_live(int mode) { (void)mode; return 0; }
+#endif
 #endif

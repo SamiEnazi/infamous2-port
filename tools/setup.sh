@@ -2,7 +2,8 @@
 # Linux Setup (tools/setup_build.ps1's counterpart): from your own copy of inFAMOUS 2 to a native
 # Linux build, in this folder only (nothing is installed system-wide, no root needed).
 #   tools/setup.sh --disc <folder holding PS3_GAME> [--rpcs3 <RPCS3's folder>] [--rpcs3-bin <rpcs3 AppImage>]
-#                  [--no-rpcs3] [--eboot <decrypted EBOOT.elf>] [--jobs N] [--no-desktop]
+#                  [--no-rpcs3] [--eboot <decrypted EBOOT.elf>] [--jobs N] [--no-desktop] [--pgo | --no-pgo]
+#                  [--link-game | --copy-game]
 # RPCS3 is not needed: the game's update (1.01 + 1.03 + 1.04, 236 MB) and the PS3 system software (197 MB, of
 # which three firmware modules are kept) come from Sony's own servers (tools/sony_files.py), unpacked and
 # decrypted with tools/ps3tool.py (downloaded from the port's GitHub when a zip came without it).
@@ -15,24 +16,49 @@
 #   --no-rpcs3   do not look for RPCS3 at all
 #   --eboot      an already decrypted 1.04 EBOOT.elf instead
 #   --jobs       compile jobs (default: half the CPU threads, at most 8: each lifted file is large)
+#   --link-game  use your game folder where it is (game/disc is a link to it): no copy, 15 GB less on this disk; the
+#                folder (and the SD card or drive it is on) has to be there whenever you play. Nothing is ever written
+#                into it (the game's update, its HDD data, saves and settings are in this folder either way).
+#   --copy-game  copy your game folder into game/disc (the default): from then on the port needs nothing outside its
+#                folder. The choice is remembered (work/setup-game); switching to --link-game deletes the copy only
+#                when every file in it is also in your game folder with the same size.
+#   --pgo        "Optimise for this PC" (Setup.exe's checkbox; tools/setup_build.ps1 -Pgo): profile-guided
+#                optimisation trained on this PC, 10 steps instead of 8 (steps 1-6 as below):
+#                 7. translate the game, then compile a training build (instrumented: PORT_PGO=gen) -> work/port/build-train
+#                 8. train it (engine + module): a new game plays by itself in a window for about 7 minutes, sound off (tools/pgo_train.py)
+#                 9. compile the game with what it learned (PORT_PGO=use:<profile>)   10. the desktop launcher
+#                PGO never makes setup fail: when the training build, the training or the optimised compile fails, the
+#                game is compiled the normal way and the line "  pgo: not used: <why>" says why. The profile stays in
+#                work/pgo-setup (never published); an update compiles with it and trains again only when hot code
+#                changed. The choice is remembered (work/setup-pgo: ./setup.sh passes --pgo again); --no-pgo forgets it.
+#                On Linux the engine is compiled here too, so the training build instruments both the engine and the
+#                game module (PORT_ENGINE_PGO=gen; Windows trains the module only: its engine comes prebuilt), and step 9
+#                compiles both with their profiles (work/pgo-setup/setup-<time>.profdata + engine-<time>.profdata).
+#                Tests: PORT_PGO_TEST=fail:llvm|fail:trainbuild|fail:enginetrain|fail:compile|stale|stopafter:<s>,
+#                PORT_PGO_KEEP_TRAIN=1 keeps the training build, PORT_PGO_TRAIN=<runs> picks the runs (tools/pgo_train.py:
+#                opening, save, street, plaza; default: see pgo_runs below), PORT_PGO_ENGINE=0 trains the module only.
 # Steps:
-#   1. check this PC and the game                 6. Vulkan headers, SDL2 headers, glslang -> deps/
-#   2. the build tools -> tools-cache/            7. translate and compile the game (15-60 min)
-#      (LLVM 22.1.8, and CMake / Ninja             -> work/port/build/Infamous2Recomp
-#      when the system has none)                   8. a desktop launcher (~/.local/share/applications)
+#   1. check this PC and the game; Python      6. Vulkan headers, SDL2, glslang -> deps/, tools-cache/sdl2
+#      -> tools-cache/python                    7. translate and compile the game (15-60 min)
+#   2. the build tools -> tools-cache/             -> work/port/build/Infamous2Recomp
+#      (LLVM 22.1.8, the sysroot, CMake, Ninja)  8. a desktop launcher (~/.local/share/applications)
 #      and the Python tools -> work/venv
-#   3. your game linked into game/, its update and the firmware files into game/ (RPCS3's or Sony's)
+#   3. your game copied (or linked: --link-game) into game/disc, its update and the firmware files into game/
+#      (RPCS3's or Sony's)
 #   4. the 1.04 EBOOT and the firmware modules decrypted -> eboot/EBOOT_upd104.elf, work/fw
 #   5. (the Python tools: made in step 2)
-# Needs (distribution packages): a C/C++ toolchain's headers and libraries (Debian/Ubuntu:
-# build-essential; Fedora: gcc-c++; Arch: base-devel), python3 with venv, curl, tar, xz, unzip, the
-# Vulkan loader (libvulkan1 / vulkan-loader) with your GPU's driver, and SDL2 (libsdl2-2.0-0 / SDL2).
-# SteamOS (Steam Deck) has no C library headers and nothing can be installed there: step 2 downloads them into
-# tools-cache/sysroot-fix (tools/libc_headers.sh; GitHub #81), so stock SteamOS 3.5 and later needs nothing extra.
+# The same on every x86-64 distribution (SteamOS, Bazzite, Ubuntu, Fedora, Arch, ...), with nothing to install and no
+# root: everything the build needs is downloaded into tools-cache/, pinned and SHA-256 checked (tools/buildenv.sh):
+# Python 3.14 (python-build-standalone), the C/C++ headers and libraries (a sysroot of Ubuntu 22.04's glibc 2.35 and
+# GCC 12 packages: clang --sysroot, libstdc++ and libgcc linked statically), LLVM, CMake, Ninja, SDL2 (Valve's Steam
+# Runtime build, put beside the game program), the Vulkan headers and glslang. This PC needs: a 64-bit x86 CPU with
+# AVX2, glibc 2.35 or newer, a Vulkan driver, about 20 GB of free space, curl and tar. When the sysroot cannot be had
+# or its compiler check fails here, setup builds the way it did before (the system's own headers and libraries; on
+# SteamOS its own glibc, linux-api-headers and gcc packages: tools/libc_headers.sh, GitHub #81).
 # Play with tools/play.sh (or the desktop launcher).
 set -eu   # (no pipefail: 'ldconfig -p | grep -q' would fail on grep's early exit)
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-disc=""; rpcs3=""; rpcs3bin=""; eboot=""; desktop=1; norpcs3=0
+disc=""; rpcs3=""; rpcs3bin=""; eboot=""; desktop=1; norpcs3=0; pgo=0; gamemode=""
 jobs=$(( $(nproc) / 2 )); [ $jobs -gt 8 ] && jobs=8; [ $jobs -lt 1 ] && jobs=1
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -43,7 +69,11 @@ while [ $# -gt 0 ]; do
         --jobs) jobs="$2"; shift ;;
         --no-desktop) desktop=0 ;;
         --no-rpcs3) norpcs3=1 ;;
-        -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+        --pgo) pgo=1 ;;
+        --no-pgo) pgo=0; rm -f "$root/work/setup-pgo" ;;
+        --link-game) gamemode=link ;;
+        --copy-game) gamemode=copy ;;
+        -h|--help) sed -n '2,58p' "$0"; exit 0 ;;
         *) echo "unknown option $1 (--help)"; exit 2 ;;
     esac
     shift
@@ -87,7 +117,8 @@ vfs_dir() {
     printf '%s' "${first%/}"
 }
 t0=$(date +%s)
-step() { echo "== [$1/8] $2   ($(( ($(date +%s) - t0) / 60 )) min so far)"; }
+nsteps=8; [ $pgo = 1 ] && nsteps=10
+step() { echo "== [$1/$nsteps] $2   ($(( ($(date +%s) - t0) / 60 )) min so far)"; }
 # Something that moves while a long, silent command runs: a line every 5 seconds until tick_stop
 tick_pid=""
 tick_start() { ( s=0; while sleep 5; do s=$((s+5)); echo "  progress: $1, $((s/60)):$(printf '%02d' $((s%60))) so far"; done ) & tick_pid=$!; }
@@ -101,7 +132,9 @@ case "$root$disc" in
 esac
 cache="$root/tools-cache"; deps="$root/deps"; dl="$cache/dl"
 mkdir -p "$cache" "$deps" "$dl"
-. "$root/tools/libc_headers.sh"   # lh_*: the C library's headers where the system has none (SteamOS), the compiler self-test
+. "$root/tools/libc_headers.sh"   # lh_*: downloads with a SHA-256, the compiler self-test, the old way's SteamOS headers
+. "$root/tools/buildenv.sh"       # be_*: the build environment of every distribution (Python, the sysroot, SDL2)
+ldlist() { ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null || true; }
 
 # download <url> <file> <sha256 or ""> <what>: retried once, checked when a SHA-256 is given
 download() {
@@ -121,7 +154,7 @@ download() {
     fail "downloading $what failed ($url)"
 }
 sfo() {   # sfo <PARAM.SFO> <KEY>
-    python3 - "$1" "$2" <<'EOF'
+    "${PORT_PY:-python3}" -I - "$1" "$2" <<'EOF'
 import struct, sys
 b = open(sys.argv[1], "rb").read()
 assert b[:4] == b"\0PSF", "not a PARAM.SFO"
@@ -138,46 +171,30 @@ EOF
 # ------------------------------------------------------------------------------------------------
 step 1 "checking"
 miss=0
-ldlist() { ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null || true; }
-haslib() { ldlist | grep "$1 " >/dev/null; }
 ok() { printf '  %-5s %s: %s\n' "$1" "$2" "$3"; [ "$1" = MISS ] && miss=1; return 0; }
+# What this PC must have (everything else is downloaded into tools-cache/ in step 2, the same on every distribution):
+# a 64-bit x86 CPU with AVX2, the GNU C library 2.35 or newer (what the game is built for: tools/buildenv.sh), a
+# Vulkan driver, room on the disk, and curl + tar to download with.
 [ "$(uname -m)" = x86_64 ] && ok ok "64-bit x86 Linux" "$(uname -sr)" || ok MISS "64-bit x86 Linux" "$(uname -m): the port is built for x86-64 CPUs"
 fl=$(grep -m1 '^flags' /proc/cpuinfo || true)
 v3=1; for f in avx2 fma bmi2 movbe f16c; do echo "$fl" | grep -qw $f || v3=0; done
 [ $v3 = 1 ] && ok ok "CPU with AVX2 (x86-64-v3)" yes || ok MISS "CPU with AVX2 (x86-64-v3)" "the port is built for AVX2 CPUs (Intel 4th gen / AMD Ryzen or newer)"
+gv=$(lh_glibc)
+if [ -z "$gv" ]; then ok MISS "C library" "this system does not use glibc (the GNU C library), which the game is built for (systems on musl, such as Alpine, cannot run it)"
+elif printf '%s\n%s\n' "$BE_GLIBC_MIN" "$gv" | sort -V -C; then ok ok "C library" "glibc $gv (the game is built for $BE_GLIBC_MIN and newer)"
+else ok MISS "C library" "glibc $gv is older than $BE_GLIBC_MIN, the oldest the game is built for (Ubuntu 22.04, Debian 12, Fedora 36, SteamOS 3.5 and every later release have it)"; fi
 ram=$(awk '/MemTotal/{printf "%d", $2/1048576 + 0.5}' /proc/meminfo)
 [ "$ram" -ge 16 ] && ok ok Memory "$ram GB" || ok note Memory "$ram GB (16 GB or more recommended: the build is large; try --jobs 2)"
 free=$(df -P -BG "$root" | awk 'NR==2{gsub("G","",$4); print $4}')
-[ "$free" -ge 30 ] && ok ok "Free disk space" "$free GB" || ok note "Free disk space" "$free GB (the build needs about 20 GB while it runs, 6 GB after)"
-haslib libvulkan.so.1 && ok ok "Vulkan loader" found || ok MISS "Vulkan loader" "install it (Debian/Ubuntu: libvulkan1 mesa-vulkan-drivers; Fedora: vulkan-loader mesa-vulkan-drivers)"
-haslib libSDL2-2.0.so.0 && ok ok "SDL2" found || ok MISS "SDL2" "install it (Debian/Ubuntu: libsdl2-2.0-0; Fedora/Arch: SDL2 / sdl2)"
-py=$(command -v python3 || true)
-if [ -n "$py" ] && "$py" -c 'import sys, venv, ensurepip; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then ok ok Python "$("$py" -V)"
-else ok MISS Python "python3 3.10+ with venv (Debian/Ubuntu: python3-venv)"; fi
-gccdir=""
-for d in $(ls -d /usr/lib/gcc/x86_64-*linux-gnu/* /usr/lib/gcc/x86_64-*linux/* 2>/dev/null | sort -V -r); do
-    v=$(basename "$d"); for inc in /usr/include/c++/"$v" /usr/include/c++/"${v%%.*}"; do
-        [ -f "$inc/vector" ] || continue
-        # libstdc++ sits next to GCC's crt files on Debian/Ubuntu, in the distro's lib dir on others (Fedora's
-        # /usr/lib64, NixOS FHS environments): clang's --gcc-install-dir finds it in either place
-        for lib in "$d" /usr/lib64 /usr/lib /usr/lib/x86_64-linux-gnu; do
-            [ -f "$lib/libstdc++.so" -o -f "$lib/libstdc++.a" ] && { gccdir="$d"; break 3; }
-        done; done
-done
-[ -n "$gccdir" ] && ok ok "C++ headers and libraries" "$gccdir (tried for real with the compiler in step 2)" || ok MISS "C++ headers and libraries" "install them (Debian/Ubuntu: build-essential; Fedora: gcc-c++; Arch: base-devel)"
-# The C library's own headers (GitHub #81): SteamOS has the C++ ones above but no <features.h>, <stdio.h>,
-# <pthread.h>, <linux/...>, and nothing can be installed there. For the glibc releases SteamOS uses, step 2 gets
-# them into tools-cache/sysroot-fix (tools/libc_headers.sh); any other system is told here, not at step 6.
-hmiss=$(lh_missing); hrow=""; hfix=0; hadvice=0
-if [ -n "$hmiss" ] && [ -n "$gccdir" ]; then
-    hlist="<${hmiss// />, <}>"; hrow=$(lh_pick "$(lh_glibc)")
-    if [ -n "$hrow" ]; then
-        hfix=1; ok note "C library headers" "not on this system ($hlist; SteamOS comes without them): downloaded into tools-cache/sysroot-fix in step 2 (12 MB; nothing is installed on the system)"
-    else
-        hadvice=1; ok MISS "C library headers" "not on this system ($hlist), and there is no set to download for its C library (glibc $(lh_glibc | grep . || echo unknown)): see \"What to do\" below"
-    fi
-fi
-for t in curl tar xz unzip; do command -v $t >/dev/null && ok ok $t found || ok MISS $t "install it"; done
+if [ "$free" -ge 30 ]; then ok ok "Free disk space" "$free GB"
+elif [ "$free" -ge 12 ]; then ok note "Free disk space" "$free GB (the build needs about 20 GB while it runs, 6 GB after)"
+else ok MISS "Free disk space" "$free GB: the build needs about 20 GB while it runs (6 GB after); make room on this drive, or put the port's folder on another one"; fi
+be_vulkan && ok ok "Vulkan driver" found \
+          || ok MISS "Vulkan driver" "none found (no libvulkan.so.1, or no driver in vulkan/icd.d). The game draws with Vulkan, which comes with the graphics driver (Mesa for AMD and Intel, NVIDIA's own driver); most desktops have it already"
+for t in curl tar gzip; do command -v $t >/dev/null && ok ok $t found || ok MISS $t "not on this system: setup downloads and unpacks its tools with it (every desktop Linux comes with it)"; done
+# Python for everything setup runs (tools-cache/python; the build's own packages go into work/venv in step 2)
+if be_python "$cache" "$dl"; then ok ok Python "$("$PORT_PY" -V 2>&1) (tools-cache/python)"
+else ok MISS Python "it could not be downloaded ($BE_WHY): check the internet connection and run setup again"; fi
 title=""
 if [ -z "$disc" ]; then ok MISS "Game disc folder" "--disc <the folder that holds PS3_GAME>"
 elif [ ! -f "$disc/PS3_GAME/PARAM.SFO" ]; then ok MISS "Game disc folder" "no PS3_GAME/PARAM.SFO in $disc"
@@ -262,8 +279,7 @@ for sub in engine/CMakeLists.txt base/infamous2-lle/CMakeLists.txt; do   # (one 
     [ -f "$root/$sub" ] && ok ok "${sub%%/*}" present || ok MISS "${sub%%/*}" "missing: download or git clone the port again"
 done
 if [ $miss != 0 ]; then
-    [ $hadvice = 1 ] && lh_advice "$root"
-    fail "fix the MISS items first"
+    fail "fix the MISS items above first"
 fi
 
 # ------------------------------------------------------------------------------------------------
@@ -274,22 +290,57 @@ if [ ! -f "$cache/llvm/.ready" ]; then
         df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384 "LLVM 22.1.8 (1.9 GB)"
     echo "  unpacking LLVM (the compiler, linker and profile tool only; a few minutes)"
     rm -rf "$cache/llvm" "$cache/$LLVM_TOP"
-    tar -xJf "$dl/$LLVM_TOP.tar.xz" -C "$cache" --wildcards "$LLVM_TOP/bin/clang*" "$LLVM_TOP/bin/lld" "$LLVM_TOP/bin/ld.lld" \
-        "$LLVM_TOP/bin/llvm-profdata" "$LLVM_TOP/bin/llvm-ar" "$LLVM_TOP/bin/llvm-ranlib" "$LLVM_TOP/bin/llvm-symbolizer" "$LLVM_TOP/lib/clang/*"
+    lparts=("$LLVM_TOP/bin/clang*" "$LLVM_TOP/bin/lld" "$LLVM_TOP/bin/ld.lld" "$LLVM_TOP/bin/llvm-profdata" "$LLVM_TOP/bin/llvm-ar" \
+            "$LLVM_TOP/bin/llvm-ranlib" "$LLVM_TOP/bin/llvm-symbolizer" "$LLVM_TOP/lib/clang/*")
+    if command -v xz >/dev/null; then tar -xJf "$dl/$LLVM_TOP.tar.xz" -C "$cache" --wildcards "${lparts[@]}"
+    else "$PORT_PY" -I "$root/tools/buildenv.py" untar "$dl/$LLVM_TOP.tar.xz" "$cache" "${lparts[@]}" || fail "unpacking LLVM failed"; fi
     mv "$cache/$LLVM_TOP" "$cache/llvm"
     touch "$cache/llvm/.ready"
 fi
-# clang picks the newest GCC folder; a system with a newer GCC runtime than its C++ headers (Ubuntu
-# 22.04 + gcc-12-base) then finds no <vector>: name the folder that has them.
-# Where the system has no C library headers (SteamOS, step 1): the downloaded ones, searched after every system
-# folder (so the C++ headers' #include_next finds them, and a system that has its own keeps using its own).
-# <CFGDIR> is the .cfg file's folder: the port's folder can be moved, and its name may hold spaces.
-if [ $hfix = 1 ]; then
-    lh_install "$cache" "$dl" "$hrow" || { lh_advice "$root"; fail "the C library headers this system lacks could not be downloaded (above). Check your internet connection and run setup again, or use the Distrobox way above"; }
+# The C/C++ headers and libraries the compiler builds against: tools-cache/sysroot (tools/buildenv.sh: Ubuntu 22.04's
+# glibc 2.35 and GCC 12, the same on every distribution; libstdc++ and libgcc linked statically). Only when that cannot be
+# downloaded, or its compiler check fails on this PC, the way before it: the system's own headers and libraries, and on
+# SteamOS (no headers in its image) its own glibc / linux-api-headers / gcc packages (tools/libc_headers.sh, GitHub #81).
+toolchain=""
+old_toolchain() {   # the way before tools/buildenv.sh: writes clang*.cfg; 1 = nothing to build with (why in BE_WHY)
+    local gccdir="" d v inc lib grow="" hmiss hrow=""
+    # clang picks the newest GCC folder; a system with a newer GCC runtime than its C++ headers (Ubuntu 22.04 +
+    # gcc-12-base) then finds no <vector>: name the folder that has them
+    for d in $(ls -d /usr/lib/gcc/x86_64-*linux-gnu/* /usr/lib/gcc/x86_64-*linux/* 2>/dev/null | sort -V -r); do
+        v=$(basename "$d"); for inc in /usr/include/c++/"$v" /usr/include/c++/"${v%%.*}"; do
+            [ -f "$inc/vector" ] || continue
+            # libstdc++ sits next to GCC's crt files on Debian/Ubuntu, in the distro's lib dir on others (Fedora's
+            # /usr/lib64, NixOS FHS environments): clang's --gcc-install-dir finds it in either place
+            for lib in "$d" /usr/lib64 /usr/lib /usr/lib/x86_64-linux-gnu; do
+                [ -f "$lib/libstdc++.so" ] || [ -f "$lib/libstdc++.a" ] && { gccdir="$d"; break 3; }
+            done; done
+    done
+    # SteamOS 3.9 has no C++ headers and none of GCC's start files either (only libstdc++.so.6): its own gcc package
+    if [ -z "$gccdir" ]; then
+        grow=$(lh_gcc_pick "$(lh_glibc)")
+        [ -n "$grow" ] || { BE_WHY="this system has no C++ headers of its own either"; return 1; }
+        lh_gcc_install "$cache" "$dl" "$grow" || { BE_WHY="SteamOS's own C++ headers could not be downloaded"; return 1; }
+        gccdir="<CFGDIR>/../../sysroot-gcc/lib/gcc/x86_64-pc-linux-gnu/$(echo "$grow" | awk '{print $5}')"
+    fi
+    # the C library's own headers: SteamOS has none (<features.h>, <stdio.h>, <linux/...>): its own glibc packages'
+    hmiss=$(lh_missing)
+    if [ -n "$hmiss" ]; then
+        hrow=$(lh_pick "$(lh_glibc)")
+        [ -n "$hrow" ] || { BE_WHY="this system has no C library headers of its own either (<${hmiss// />, <}>)"; return 1; }
+        lh_install "$cache" "$dl" "$hrow" || { BE_WHY="SteamOS's own C library headers could not be downloaded"; return 1; }
+    fi
+    for d in clang clang++; do
+        { echo "--gcc-install-dir=$gccdir"; if [ -n "$hrow" ]; then echo '-idirafter <CFGDIR>/../../sysroot-fix/include'; fi; } > "$cache/llvm/bin/$d.cfg"
+    done
+    echo "  compiler: this system's own C/C++ headers and libraries${grow:+ (SteamOS's gcc package)}${hrow:+ (+ SteamOS's C library headers)}"
+    return 0
+}
+if be_sysroot "$cache" "$dl"; then be_cfg "$cache"; toolchain=sysroot
+else
+    echo "  note: the build environment could not be made ($BE_WHY): trying this system's own headers and libraries instead"
+    old_toolchain || { lh_advice "$root"; fail "there is nothing to build with: $BE_WHY"; }
+    toolchain=system
 fi
-for d in clang clang++; do
-    { echo "--gcc-install-dir=$gccdir"; if [ $hfix = 1 ]; then echo '-idirafter <CFGDIR>/../../sysroot-fix/include'; fi; } > "$cache/llvm/bin/$d.cfg"
-done
 # The LLVM release's linker was built against libxml2.so.2 (used only to merge Windows manifests, never here).
 # Ubuntu 25.10 and later ship only libxml2.so.16, so the linker would not start (GitHub #24): it gets a small
 # stand-in libxml2.so.2 in its own lib folder (found through its RUNPATH, $ORIGIN/../lib), made here once,
@@ -340,60 +391,114 @@ fi
 "$cache/llvm/bin/clang" --version | sed -n '1s/^/  /p'
 # The compiler tried for real (GitHub #81: the check in step 1 only looks for folders): a small C and a small C++
 # program with the engine's headers and libraries, the build's flags and linker, built and started.
-if why=$(lh_selftest "$cache/llvm/bin/clang" "$cache/llvm/bin/clang++" "$cache/selftest"); then
-    echo "  compiler check: a C and a C++ program compile, link and run"
-else
-    echo "  compiler check: $why"
-    echo "  (the compiler's own words: $cache/selftest/log.txt)"
-    lh_advice "$root"
-    fail "this system cannot build C/C++ programs yet: $why"
-fi
-export PORT_LLVM="$cache/llvm"
-cmv=$(cmake --version 2>/dev/null | head -1 | awk '{print $3}' || true)
-if [ -n "$cmv" ] && printf '3.24\n%s\n' "$cmv" | sort -V -C; then export PORT_CMAKE="$(command -v cmake)"
-else
-    if [ ! -f "$cache/cmake/.ready" ]; then
-        download https://github.com/Kitware/CMake/releases/download/v3.31.3/cmake-3.31.3-linux-x86_64.tar.gz "$dl/cmake.tar.gz" \
-            442b93b3db0f6c6501a74add587acca5ea6b8c1526ccca7bc8d89fc592036971 "CMake 3.31.3"
-        rm -rf "$cache/cmake" && mkdir -p "$cache/cmake" && tar -xzf "$dl/cmake.tar.gz" -C "$cache/cmake" --strip-components 1
-        touch "$cache/cmake/.ready"
+selftest() {   # 0 = a C and a C++ program compile, link and run (and, with the sysroot, need no C++ library from here)
+    why=$(lh_selftest "$cache/llvm/bin/clang" "$cache/llvm/bin/clang++" "$cache/selftest") || return 1
+    if [ $toolchain = sysroot ]; then
+        why=$("$PORT_PY" -I "$root/tools/buildenv.py" elf "$cache/selftest/t_cpp" --max-glibc "$BE_GLIBC_MIN" \
+              --not-needed libstdc++.so.6,libgcc_s.so.1 | sed -n 's/^why: //p') || return 1
+        [ -z "$why" ] || return 1
     fi
-    export PORT_CMAKE="$cache/cmake/bin/cmake"
-fi
-if command -v ninja >/dev/null; then export PORT_NINJA="$(command -v ninja)"
-else
-    if [ ! -f "$cache/ninja/.ready" ]; then
-        download https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-linux.zip "$dl/ninja-linux.zip" \
-            b901ba96e486dce377f9a070ed4ef3f79deb45f4ffe2938f8e7ddc69cfb3df77 "Ninja 1.11.1"
-        rm -rf "$cache/ninja" && mkdir -p "$cache/ninja" && unzip -q "$dl/ninja-linux.zip" -d "$cache/ninja" && touch "$cache/ninja/.ready"
+    return 0
+}
+if selftest; then echo "  compiler check: a C and a C++ program compile, link and run ($toolchain)"
+elif [ $toolchain = sysroot ]; then
+    echo "  compiler check with tools-cache/sysroot: $why (the compiler's own words: $cache/selftest-sysroot.txt)"
+    cp -f "$cache/selftest/log.txt" "$cache/selftest-sysroot.txt" 2>/dev/null || true
+    echo "  trying this system's own headers and libraries instead"
+    old_toolchain || { lh_advice "$root"; fail "this system cannot build C/C++ programs: $BE_WHY"; }
+    toolchain=system
+    if selftest; then echo "  compiler check: a C and a C++ program compile, link and run ($toolchain)"
+    else
+        echo "  compiler check: $why (the compiler's own words: $cache/selftest/log.txt)"; lh_advice "$root"
+        fail "this system cannot build C/C++ programs: $why"
     fi
-    export PORT_NINJA="$cache/ninja/ninja"
+else
+    echo "  compiler check: $why (the compiler's own words: $cache/selftest/log.txt)"; lh_advice "$root"
+    fail "this system cannot build C/C++ programs: $why"
 fi
+# The compiler set the game is built with: when it changed (the first build with tools-cache/sysroot, or the way back),
+# what was compiled with the other one is compiled again (glslang in step 6, the engine in step 7; CMake's compiler
+# checks and Ninja's records only know the compiler's path, not its .cfg)
+tcid=$(cat "$cache/llvm/bin/clang.cfg" "$cache/llvm/bin/clang++.cfg" "$cache/sysroot/.ready" 2>/dev/null | cksum | cut -d' ' -f1)
+export PORT_LLVM="$cache/llvm" PORT_TOOLCHAIN="$toolchain"
+# CMake and Ninja: the port's own (always: the same versions on every system, whatever the system has)
+if [ ! -f "$cache/cmake/.ready" ]; then
+    download https://github.com/Kitware/CMake/releases/download/v3.31.3/cmake-3.31.3-linux-x86_64.tar.gz "$dl/cmake.tar.gz" \
+        442b93b3db0f6c6501a74add587acca5ea6b8c1526ccca7bc8d89fc592036971 "CMake 3.31.3"
+    rm -rf "$cache/cmake" && mkdir -p "$cache/cmake" && tar -xzf "$dl/cmake.tar.gz" -C "$cache/cmake" --strip-components 1
+    touch "$cache/cmake/.ready"
+fi
+export PORT_CMAKE="$cache/cmake/bin/cmake"
+if [ ! -f "$cache/ninja/.ready" ]; then
+    download https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-linux.zip "$dl/ninja-linux.zip" \
+        b901ba96e486dce377f9a070ed4ef3f79deb45f4ffe2938f8e7ddc69cfb3df77 "Ninja 1.11.1"
+    rm -rf "$cache/ninja" && mkdir -p "$cache/ninja"
+    if command -v unzip >/dev/null; then unzip -q "$dl/ninja-linux.zip" -d "$cache/ninja"
+    else "$PORT_PY" -I -m zipfile -e "$dl/ninja-linux.zip" "$cache/ninja"; fi
+    chmod +x "$cache/ninja/ninja" && touch "$cache/ninja/.ready"
+fi
+export PORT_NINJA="$cache/ninja/ninja"
 echo "  cmake $PORT_CMAKE, ninja $PORT_NINJA"
-# work/venv: the build's Python packages, and pycryptodome for tools/ps3tool.py (steps 3 and 4: much faster with it)
+# work/venv: the build's Python packages, and pycryptodome for tools/ps3tool.py (steps 3 and 4: much faster with it),
+# on the port's own Python (step 1); a venv made by an older setup with the system's python3 is made again
 venv="$root/work/venv"
-[ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import sys" 2>/dev/null || { rm -rf "$venv"; python3 -m venv "$venv"; }
-"$venv/bin/python" -m pip install --disable-pip-version-check -q -r "$root/engine/requirements.txt" || fail "pip install failed"
+if ! { [ -x "$venv/bin/python" ] && grep -qxF "home = $cache/python/bin" "$venv/pyvenv.cfg" 2>/dev/null && "$venv/bin/python" -c "import sys" 2>/dev/null; }; then
+    rm -rf "$venv"; "$PORT_PY" -m venv "$venv" || fail "making work/venv failed"
+fi
 echo "  Python tools: work/venv"
 
 # ------------------------------------------------------------------------------------------------
-step 3 "your game: the disc folder linked; the game's update and the PS3 firmware files (from RPCS3 when it has them, else from Sony's servers)"
+step 3 "your game (used where it is, or copied into game/disc); the game's update and the PS3 firmware files (from RPCS3 when it has them, else from Sony's servers)"
 game="$root/game"
 mkdir -p "$game/dev_hdd0/game" "$game/gamedata"
-# (v0.6.0) the game's files are copied INTO the port's folder, so the folder can be moved or copied anywhere and
-# still plays; an older setup's link (game/disc -> your folder) is replaced by the copy. Your folder is not changed.
+# How your game folder is used (work/setup-game remembers it; --link-game / --copy-game change it):
+#  copy (the default, v0.6.0): its files are copied INTO the port's folder, so the folder can be moved or copied anywhere
+#       and still plays; an older setup's link (game/disc -> your folder) is replaced by the copy.
+#  link: game/disc is a link to your folder (as before v0.6.0, GitHub #13): nothing is copied (15 GB less), and the folder
+#       has to be there to play. The game only reads it: what it writes (its HDD data, saves) and setup's files (the
+#       update, the firmware, the decrypted EBOOT) are in this folder in both ways. tools/play.sh finds a moved folder.
+# Your folder is never changed.
+[ -z "$gamemode" ] && gamemode="$(cat "$root/work/setup-game" 2>/dev/null || true)"
+case "$gamemode" in link|copy) ;; *) gamemode=copy ;; esac
+mkdir -p "$root/work"
+listing() { (cd "$1" && find . \( -type f -o -type l \) -printf '%P\n' 2>/dev/null | sort); }
 if [ "$(readlink -f "$disc")" = "$(readlink -f "$game/disc" 2>/dev/null)" ] && [ ! -L "$game/disc" ]; then
     echo "  your game: in game/disc"
+elif [ "$gamemode" = link ]; then
+    if [ -L "$game/disc" ] && [ "$(readlink -f "$game/disc")" = "$disc" ]; then :
+    else
+        if [ -d "$game/disc" ] && [ ! -L "$game/disc" ]; then
+            # the copy an earlier setup made: deleted only when it is the same game (the same PARAM.SFO) and every file in
+            # it is in your folder too (an interrupted copy counts as a copy); anything else in game/disc stays, setup stops
+            extra=$(comm -23 <(listing "$game/disc") <(listing "$disc") | head -n 1)
+            what=""
+            if ! cmp -s "$game/disc/PS3_GAME/PARAM.SFO" "$disc/PS3_GAME/PARAM.SFO"; then what="another game (its PARAM.SFO differs from $disc)"
+            elif [ -n "$extra" ]; then what="files your game folder ($disc) does not have (e.g. $extra)"; fi
+            if [ -n "$what" ]; then
+                fail "game/disc holds $what, so it is not just a copy of your game folder: move game/disc out of the port's folder (or delete it yourself), or keep using it with --copy-game"
+            fi
+            gone=$(du -sb "$game/disc" 2>/dev/null | cut -f1); gone=${gone:-0}
+            rm -rf "$game/disc" || fail "deleting the old copy in game/disc failed"
+            echo "  the copy of your game in game/disc is deleted ($(( gone / 1073741824 )) GB freed): it is used from its own folder now"
+        fi
+        rm -f "$game/disc"
+        ln -s "$disc" "$game/disc" || fail "linking your game folder into game/disc failed"
+    fi
+    echo "  your game: used where it is ($disc; game/disc links to it, nothing is copied)"
+    case "$disc" in
+        /run/media/*|/media/*|/mnt/*) echo "  note: it is on a removable or separate drive: keep it in (and mounted) whenever you play" ;;
+    esac
 else
     need=$(du -sb "$disc" 2>/dev/null | cut -f1); need=${need:-0}
     have=$(df -P -B1 "$root" | awk 'NR==2{print $4}')
-    [ "$have" -gt $(( need + 3221225472 )) ] || fail "not enough free space to copy your game into the port's folder: it needs $(( need / 1073741824 + 1 )) GB and about 3 GB more"
+    [ "$have" -gt $(( need + 3221225472 )) ] || fail "not enough free space to copy your game into the port's folder: it needs $(( need / 1073741824 + 1 )) GB and about 3 GB more (or use it where it is, without a copy: --link-game)"
     [ -L "$game/disc" ] && rm -f "$game/disc"
     echo "  copying your game into the port's folder ($(( need / 1073741824 )) GB): from then on the port needs nothing outside its folder"
     mkdir -p "$game/disc"
     cp -a --no-preserve=ownership "$disc/." "$game/disc/" || fail "copying your game into game/disc failed"
     echo "  your game: game/disc (a copy of $disc)"
 fi
+echo "$gamemode" > "$root/work/setup-game"
 copy_tree() {   # copy_tree <src> <dst> <what>
     echo "  copying $3"; mkdir -p "$2"; cp -a --no-preserve=ownership "$1/." "$2/"
 }
@@ -555,9 +660,18 @@ if [ ! -f "$deps/sdl2-inc/SDL2/SDL.h" ]; then
     rm -rf "$deps/sdl2-inc" && mkdir -p "$deps/sdl2-inc/SDL2"
     tar -xzf "$dl/SDL2-2.30.10.tar.gz" -C "$deps/sdl2-inc/SDL2" --strip-components 2 SDL2-2.30.10/include
 fi
-# SDL2 for CMake: the 2.30.10 headers (as the Windows build) over the system's libSDL2-2.0.so.0; the
-# few entry points newer than an older system library are looked up at run time.
-sdllib=$(ldlist | awk '/libSDL2-2.0.so.0 .*x86-64/{print $NF}' | head -1)
+# SDL2 for CMake: the 2.30.10 headers (as the Windows build) over Valve's SDL 2.32.10 library (tools/buildenv.sh be_sdl2),
+# which the build puts beside the game program (work/port/build/libSDL2-2.0.so.0, found through the program's RUNPATH
+# $ORIGIN): the game needs no SDL2 from the system. When Valve's package cannot be had (its repository keeps only the
+# newest build), the system's libSDL2-2.0.so.0 as before; the few entry points newer than an older library are looked
+# up at run time. (Another SDL2 for one session: SDL_DYNAMIC_API=/path/to/libSDL2-2.0.so.0 tools/play.sh)
+unset PORT_SDL2_RUNTIME
+if be_sdl2 "$cache" "$dl"; then sdllib="$PORT_SDL2_RUNTIME"
+else
+    sdllib=$(ldlist | awk '/libSDL2-2.0.so.0 .*x86-64/{print $NF}' | head -1)
+    [ -n "$sdllib" ] || fail "SDL2 (the game's window, sound and controllers) could not be downloaded: $BE_WHY. Check the internet connection and run setup again"
+    echo "  note: SDL2 could not be downloaded ($BE_WHY): the game uses this system's ($sdllib)"
+fi
 mkdir -p "$deps/sdl2-cmake"
 cat > "$deps/sdl2-cmake/sdl2-config.cmake" <<EOF
 set(SDL2_FOUND TRUE)
@@ -571,8 +685,9 @@ endif()
 EOF
 printf 'set(PACKAGE_VERSION "2.30.10")\nset(PACKAGE_VERSION_COMPATIBLE TRUE)\n' > "$deps/sdl2-cmake/sdl2-config-version.cmake"
 export PORT_SDL2_DIR="$deps/sdl2-cmake"
-if [ ! -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ]; then
-    rm -rf "$deps/glslang-build-linux"   # (a failed try leaves CMake's compiler checks cached)
+# (built again when the compiler set changed since: its static libraries were compiled against the other one's headers)
+if [ ! -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ] || [ "$(cat "$deps/glslang-install-linux/.toolchain" 2>/dev/null)" != "$tcid" ]; then
+    rm -rf "$deps/glslang-build-linux" "$deps/glslang-install-linux"   # (a failed try leaves CMake's compiler checks cached)
     tick_start "building glslang (a few minutes)"
     "$PORT_CMAKE" -S "$deps/glslang-src" -B "$deps/glslang-build-linux" -G Ninja -DCMAKE_MAKE_PROGRAM="$PORT_NINJA" \
         -DCMAKE_C_COMPILER="$PORT_LLVM/bin/clang" -DCMAKE_CXX_COMPILER="$PORT_LLVM/bin/clang++" -DCMAKE_BUILD_TYPE=Release \
@@ -583,6 +698,7 @@ if [ ! -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ]
         && "$PORT_CMAKE" --install "$deps/glslang-build-linux" >> "$deps/glslang-build.log" 2>&1 \
         || fail "building glslang failed (see $deps/glslang-build.log)"
     tick_stop
+    echo "$tcid" > "$deps/glslang-install-linux/.toolchain"
 fi
 # without glslang the build still succeeds, but the game draws nothing (no guest programs): stop here instead
 [ -f "$deps/glslang-install-linux/lib/cmake/glslang/glslang-config.cmake" ] \
@@ -590,18 +706,170 @@ fi
 echo "  deps ready"
 
 # ------------------------------------------------------------------------------------------------
-step 7 "translating and compiling the game (the long part: 15-60 minutes; each part says what it is and how far it is)"
 export PORT_JOBS="$jobs" PORT_LIFT_JOBS="$jobs"
-"$venv/bin/python" -I "$root/tools/rebuild.py" || fail "the build failed: see work/logs/ (python3 -I tools/build_errors.py work/logs/compile.log)"
 exe="$root/work/port/build/Infamous2Recomp"
+# The engine is configured and compiled anew when the compiler set changed (step 2; the game module's objects stay:
+# it links nothing but itself)
+if [ "$(cat "$root/work/setup-toolchain" 2>/dev/null)" != "$tcid" ]; then
+    for b in "$root/work/port/build" "$root/work/port/build-train" "$root/work/port/build-train-eng"; do
+        [ -f "$b/CMakeCache.txt" ] && rm -rf "$b/CMakeCache.txt" "$b/CMakeFiles" "$b/build.ninja" "$b/.ninja_deps" "$b/.ninja_log" "$b/cmake_install.cmake"
+    done
+    mkdir -p "$root/work" && echo "$tcid" > "$root/work/setup-toolchain"
+fi
+buildfailed="the build failed: see work/logs/ (python3 -I tools/build_errors.py work/logs/compile.log)"
+if [ $pgo = 0 ]; then
+    step 7 "translating and compiling the game (the long part: 15-60 minutes; each part says what it is and how far it is)"
+    "$venv/bin/python" -I "$root/tools/rebuild.py" || fail "$buildfailed"
+else
+    # --pgo: tools/setup_build.ps1 -Pgo's steps 8-10, the same rules. On Linux the ENGINE is trained too (it is compiled
+    # here anyway; Windows' comes prebuilt with the release, so Windows trains the game module only). rb <module PGO>
+    # <module dir> <engine PGO> <engine dir> <rebuild.py arguments>: tools/rebuild.py with PORT_PGO / PORT_BUILD /
+    # PORT_ENGINE_PGO / PORT_ENGINE_BUILD set for this one call ("" = unset); its lines go on and into $rbout
+    rbout="$root/work/logs/setup-rebuild.out"
+    rb() {
+        local mode="$1" dir="$2" emode="$3" edir="$4"; shift 4
+        ( if [ -n "$mode" ]; then export PORT_PGO="$mode"; else unset PORT_PGO; fi
+          if [ -n "$dir" ]; then export PORT_BUILD="$dir"; else unset PORT_BUILD; fi
+          if [ -n "$emode" ]; then export PORT_ENGINE_PGO="$emode"; else unset PORT_ENGINE_PGO; fi
+          if [ -n "$edir" ]; then export PORT_ENGINE_BUILD="$edir"; else unset PORT_ENGINE_BUILD; fi
+          exec "$venv/bin/python" -I "$root/tools/rebuild.py" "$@" ) 2>&1 | tee "$rbout"
+        return "${PIPESTATUS[0]}"
+    }
+    unset PORT_PGO PORT_BUILD PORT_ENGINE_PGO PORT_ENGINE_BUILD
+    llvmprof="$cache/llvm/bin/llvm-profdata"
+    profile_ok() { "$llvmprof" show "$1" >/dev/null 2>&1; }   # this LLVM reads it
+    train="$root/work/port/build-train"; traine="$root/work/port/build-train-eng"
+    pgodir="$root/work/pgo-setup"
+    test="${PORT_PGO_TEST:-}"
+    # The training runs (tools/pgo_train.py): PORT_PGO_TRAIN, else tools/pgo_scenes/runs.txt's first line (a release that
+    # ships training saves there can name its runs, e.g. "opening,street,plaza"), else the new game only: the same
+    # training for every player and every region
+    pgo_runs="opening"
+    if [ -f "$root/tools/pgo_scenes/runs.txt" ]; then
+        r="$(head -n 1 "$root/tools/pgo_scenes/runs.txt" | tr -d ' \r')"; [ -n "$r" ] && pgo_runs="$r"
+    fi
+    eng=1; [ "${PORT_PGO_ENGINE:-1}" = 0 ] && eng=0
+    why=""; used=""; pd=""; pde=""; fallback=0; ewhy=""
+    [ $eng = 0 ] && ewhy="PORT_PGO_ENGINE=0"
+    [ "$test" = fail:llvm ] && llvmprof=""
+    [ -n "$llvmprof" ] && [ -x "$llvmprof" ] || { llvmprof=""; why="the port's LLVM has no llvm-profdata"; }
+    # the last training's profiles: work/pgo-setup/setup-<time>.profdata (the game module) and engine-<time>.profdata
+    kept=""; kepte=""
+    if [ -n "$llvmprof" ]; then
+        kept="$(ls -1 "$pgodir"/setup-*.profdata 2>/dev/null | sort | tail -n 1)"
+        if [ -n "$kept" ] && ! profile_ok "$kept"; then
+            echo "  the last training's profile ($(basename "$kept")) cannot be read by this LLVM: training again"
+            rm -f "$kept"; kept=""
+        fi
+        if [ -n "$kept" ] && [ $eng = 1 ]; then
+            kepte="$pgodir/engine-${kept##*/setup-}"
+            if [ ! -f "$kepte" ] || ! profile_ok "$kepte"; then kepte=""; fi
+        fi
+    fi
+    if [ -n "$kept" ]; then step 7 "translating the game, then compiling it with what the last training on this PC learned (15-60 minutes)"
+    elif [ -n "$why" ]; then step 7 "translating and compiling the game (the long part: 15-60 minutes)"
+    else step 7 "translating the game, then compiling a training build (the long part: 15-60 minutes)"; fi
+    "$venv/bin/python" -I "$root/tools/rebuild.py" --only inputs,port,firmware,ppu,spu,jobs || fail "$buildfailed"
+    if [ -n "$kept" ]; then
+        if rb "use:$kept" "" "${kepte:+use:$kepte}" "" --only compile && [ -f "$root/work/port/build/libInfamous2Game.so" ]; then
+            fallback=1
+            if grep -qE 'PGO WARNING|-- retrain when these are hot' "$rbout" || [ "$test" = stale ]; then
+                echo "  hot code changed since the last training: training again (the game just built stays if that does not work)"
+            elif [ $eng = 1 ] && [ -z "$kepte" ]; then
+                echo "  the last training has no engine profile: training again, the engine too (the game just built stays if that does not work)"
+            else used="the training of $(date -r "$kept" +%F) still fits this version"; fi
+        else echo "  compiling with the last training failed: training again"; fi
+    fi
+    if [ -z "$used" ] && [ -z "$why" ]; then
+        rm -f "$train/libInfamous2Game.so" "$train/Infamous2Recomp"   # never train an older one
+        echo "  compile log: work/logs/module-build-train.log"
+        tbuilt=0
+        if [ $eng = 1 ]; then   # the engine (work/port/build-train-eng) and the game module, both instrumented
+            if rb gen "$train" gen "$traine" --only compile && [ -f "$train/libInfamous2Game.so" ] && [ -x "$train/Infamous2Recomp" ] \
+               && [ "$test" != fail:enginetrain ] && [ "$test" != fail:trainbuild ]; then tbuilt=1
+            else
+                eng=0; ewhy="its training build did not compile (work/logs/compile-build-train-eng.log)"
+                echo "  the engine's training build did not compile: training the game module only"
+                rm -f "$train/Infamous2Recomp"
+            fi
+        fi
+        if [ $tbuilt = 0 ]; then
+            if ! rb gen "$train" "" "" --only compile || [ ! -f "$train/libInfamous2Game.so" ] || [ ! -x "$train/Infamous2Recomp" ] || [ "$test" = fail:trainbuild ]; then
+                why="the training build did not compile (work/logs/module-build-train.log)"
+            fi
+        fi
+    fi
+    if [ -n "$used" ]; then step 8 "training: not needed ($used)"
+    elif [ -n "$why" ]; then step 8 "training: skipped"
+    else step 8 "training the build on your PC (the game plays by itself in a window: please don't touch it)"; fi
+    if [ -z "$used" ] && [ -z "$why" ]; then
+        mkdir -p "$pgodir"
+        # a new name every time: a profile at the same path whose content changed would not rebuild anything
+        stamp="$(date +%Y%m%d-%H%M%S)"; pd="$pgodir/setup-$stamp.profdata"; pde=""
+        targs=()
+        if [ $eng = 1 ]; then pde="$pgodir/engine-$stamp.profdata"; targs=(--engine-profdata "$pde"); fi
+        stopafter=0; case "$test" in stopafter:*) stopafter="${test#stopafter:}" ;; esac
+        "$venv/bin/python" -I "$root/tools/pgo_train.py" --exe "$train/Infamous2Recomp" --profdata "$pd" ${targs[@]+"${targs[@]}"} \
+            --llvm-profdata "$llvmprof" --runs "${PORT_PGO_TRAIN:-$pgo_runs}" --stop-after "$stopafter" 2>&1 | tee "$root/work/logs/pgo-train.log"
+        if [ "${PIPESTATUS[0]}" != 0 ] || [ ! -f "$pd" ]; then
+            w="$(sed -n 's/^ *why: *//p' "$root/work/logs/pgo-train.log" | tail -n 1)"
+            why="the training run gave nothing usable: ${w:-see the lines above}"
+            rm -f "$pd" "$pde"; pd=""; pde=""
+        elif [ -n "$pde" ] && [ ! -f "$pde" ]; then
+            w="$(sed -n 's/^ *engine: not used: *//p' "$root/work/logs/pgo-train.log" | tail -n 1)"
+            ewhy="${w:-its counters were not usable}"; pde=""
+        fi
+    elif [ -z "$used" ]; then echo "  skipped: $why"; fi
+    [ "${PORT_PGO_KEEP_TRAIN:-}" = 1 ] || rm -rf "$train" "$traine"   # the training build is never the game
+    if [ -n "$used" ]; then step 9 "compiling the game, optimised for this PC: done in step 7"
+    else
+        if [ -n "$pd" ]; then step 9 "compiling the game, optimised for this PC"; else step 9 "compiling the game"; fi
+        built=0
+        if [ -n "$pd" ]; then
+            echo "  compile log: work/logs/module.log"
+            if rb "use:$pd" "" "${pde:+use:$pde}" "" --only compile && [ "$test" != fail:compile ]; then built=1; used="trained on this PC now"
+            else why="the optimised compile failed (work/logs/module.log, work/logs/compile.log)"; fi
+        fi
+        if [ $built = 0 ]; then
+            if [ $fallback = 1 ] && [ -z "$pd" ]; then used="the last training, partly out of date: $why"; pde="$kepte"
+            else
+                echo "  note: Optimise for this PC did not work this time ($why): compiling the game the normal way"
+                echo "  compile log: work/logs/module.log"
+                pde=""
+                rb "" "" "" "" --only compile || fail "$buildfailed"
+            fi
+        fi
+    fi
+    if [ -n "$used" ]; then
+        [ -n "$kepte" ] && [ -z "$pde" ] && [ "$used" != "trained on this PC now" ] && pde="$kepte"
+        echo "  pgo: used ($used)"
+        if [ -n "$pde" ]; then echo "  pgo: the engine is optimised too"
+        else echo "  pgo: the engine is compiled the normal way${ewhy:+ (its training: $ewhy)}"; fi
+        if [ -n "$pd" ]; then for f in "$pgodir"/setup-*.profdata "$pgodir"/engine-*.profdata; do
+            [ "$f" = "$pd" ] || [ "$f" = "$pde" ] || rm -f "$f"; done; fi
+        if [ "$used" = "trained on this PC now" ]; then echo "used (trained on this PC on $(date +%F))"; else echo "used ($used)"; fi > "$root/work/setup-pgo"
+    else
+        echo "  pgo: not used: $why"
+        echo "not used: $why" > "$root/work/setup-pgo"
+    fi
+fi
 [ -x "$exe" ] || fail "no $exe after the build"
+[ -f "$root/work/port/build/libInfamous2Game.so" ] || fail "no work/port/build/libInfamous2Game.so after the build"
+if [ -n "${PORT_SDL2_RUNTIME:-}" ] && [ ! -f "$root/work/port/build/libSDL2-2.0.so.0" ]; then cp -f "$PORT_SDL2_RUNTIME" "$root/work/port/build/"; fi
+# what the game program needs at run time (with tools-cache/sysroot: glibc 2.35 or newer, SDL2 beside it, no C++ library)
+chk=(); [ "$toolchain" = sysroot ] && chk=(--max-glibc "$BE_GLIBC_MIN" --not-needed libstdc++.so.6,libgcc_s.so.1)
+if needs=$("$PORT_PY" -I "$root/tools/buildenv.py" elf "$exe" ${chk[@]+"${chk[@]}"} 2>&1); then
+    echo "  the game program needs: $(printf '%s\n' "$needs" | sed -n 's/^needs: //p') (glibc $(printf '%s\n' "$needs" | sed -n 's/^glibc: //p') or newer)"
+else
+    echo "  note: the game program was built, but $(printf '%s\n' "$needs" | sed -n 's/^why: //p'): it may not start on another PC (it does on this one)"
+fi
 # Built inside a container (Distrobox: the way for systems without build tools): the program uses the
 # container's libraries, so tools/play.sh says where to start it when it is started outside
 if [ -f /run/.containerenv ] || [ -f /.dockerenv ] || [ -n "${CONTAINER_ID:-}" ]; then echo "${CONTAINER_ID:-}" > "$root/work/built-in-container"
 else rm -f "$root/work/built-in-container"; fi
 
 # ------------------------------------------------------------------------------------------------
-step 8 "desktop launcher"
+step $nsteps "desktop launcher"
 if [ $desktop = 1 ]; then
     apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"; mkdir -p "$apps"
     icon="$root/work/icon/icon0.png"; mkdir -p "$root/work/icon"; cp -f "$disc/PS3_GAME/ICON0.PNG" "$icon" 2>/dev/null || icon=""
@@ -619,3 +887,4 @@ EOF
     echo "  $apps/infamous2-port.desktop"
 else echo "  skipped (--no-desktop)"; fi
 echo "== done in $(( ($(date +%s) - t0) / 60 )) min: play with tools/play.sh (or the desktop launcher). RPCS3 is not needed (the game's update and firmware files are in game/)."
+if [ -L "$game/disc" ]; then echo "  your game is used from $(readlink "$game/disc"): it has to be there whenever you play"; fi

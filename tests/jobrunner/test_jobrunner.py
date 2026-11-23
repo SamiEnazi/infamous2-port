@@ -36,6 +36,17 @@ CASES = [
     ("reinit_poll", {"PS3_NATIVE_JOBS_NODETECT": "1"}, PASS, None, "repair: a polled test, checks off"),
     ("reinit_same", {"PS3_NATIVE_JOBS_NODETECT": "1", "PS3_NATIVE_JOBS_HEAL": "0"}, HANG, None,
      "checks off and repair off = the old hang (the switches work)"),
+    # (deck, s1) PS3_NATIVE_JOBS_PRIO: two managers kicked by two threads (main = guest thread 1, and another one)
+    ("prio", {}, PASS, None, "two managers, two threads, one FIFO"),
+    ("prio", {"PS3_NATIVE_JOBS_PRIO": "1"}, PASS, None, "PRIO 1 (the second thread's jobs are short: one class)"),
+    ("prio", {"PS3_NATIVE_JOBS_PRIO": "1", "PS3_NATIVE_JOBS_PRIO_LONG_US": "0"}, PASS, None, "two classes: the main thread's first"),
+    ("prio", {"PS3_NATIVE_JOBS_PRIO": "1", "PS3_NATIVE_JOBS_PRIO_LONG_US": "0", "PS3_NATIVE_JOBS_PRIO_AGE_US": "0"}, PASS, None,
+     "the same, no age limit"),
+    ("prio", {"PS3_NATIVE_JOBS_PRIO": "1", "PS3_NATIVE_JOBS_PRIO_LONG_US": "0", "PS3_NATIVE_JOBS_PRIO_AGE_US": "20"}, PASS, None,
+     "the same, the age limit at work"),
+    ("prio", {"PS3_NATIVE_JOBS_PRIO": "1", "PS3_NATIVE_JOBS_PRIO_LONG_US": "0", "PS3_NATIVE_JOBS_STICKY": "0"}, PASS, None,
+     "the same, no sticky pick"),
+    ("prio", {"PS3_NATIVE_JOBS_PRIO": "4", "PS3_NATIVE_JOBS_PRIO_LONG_US": "0"}, PASS, None, "the same + the awaited manager first"),
 ]
 NAMES = {PASS: "pass", FAIL: "FAIL", HANG: "HANG"}
 

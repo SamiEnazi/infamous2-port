@@ -620,11 +620,28 @@ static int e13FC0(spu_context* ctx) { return a218_entry(ctx, K_13FC0); }
 static int e1D8E8(spu_context* ctx) { return a218_entry(ctx, K_1D8E8); }
 static int e1DAC0(spu_context* ctx) { return a218_entry(ctx, K_1DAC0); }
 
+/* (deck-merge) J218_PICK: whose native takes 0x16320 (blend), 0x17780 (pose -> 3x4) and 0x18B80 (palette), both
+ * rewrites have one (this file and natives/spu/{job218_native.c,native_218.c}); spu_native_entry runs the FIRST
+ * registered native of an address and never a second one, so each address is registered by one file only.
+ * Three letters in that order, o = ours (job218_native.c), t = upstream's (native_218.c), e.g. J218_PICK=ott;
+ * "ours" / "theirs" = all three. Default J218_PICK_DEFAULT. The other functions are one file's only (ours 0x179C0,
+ * 0x5814, 0x18EC0; upstream's 0x13FC0, 0x1D8E8, 0x1DAC0) and always registered. */
+#define J218_PICK_DEFAULT "ttt"
+static int j218_pick_theirs(int k)
+{
+    const char* e = getenv("J218_PICK");
+    if (!e || !*e) e = J218_PICK_DEFAULT;
+    if (!strcmp(e, "ours")) return 0;
+    if (!strcmp(e, "theirs")) return 1;
+    const char* d = J218_PICK_DEFAULT;
+    const char c = (int)strlen(e) > k ? e[k] : d[k];
+    return c == 't' || c == 'T';
+}
 __attribute__((constructor)) static void a218_register(void)
 {
-    spu_native_register(ANIM_IMAGE, 0x16320u, e16320);
-    spu_native_register(ANIM_IMAGE, 0x17780u, e17780);
-    spu_native_register(ANIM_IMAGE, 0x18B80u, e18B80);
+    if (j218_pick_theirs(0)) spu_native_register(ANIM_IMAGE, 0x16320u, e16320);
+    if (j218_pick_theirs(1)) spu_native_register(ANIM_IMAGE, 0x17780u, e17780);
+    if (j218_pick_theirs(2)) spu_native_register(ANIM_IMAGE, 0x18B80u, e18B80);
     spu_native_register(ANIM_IMAGE, 0x13FC0u, e13FC0);
     spu_native_register(ANIM_IMAGE, 0x1D8E8u, e1D8E8);
     spu_native_register(ANIM_IMAGE, 0x1DAC0u, e1DAC0);

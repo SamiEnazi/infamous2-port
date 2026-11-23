@@ -57,7 +57,36 @@ static const char kVkPassVS[] =
  * truncation's, the 8-bit steps of a soft light falloff become fine noise.
  * A pixel with no light stays exactly 0. The scale byte (alpha) is never
  * dithered, so a pixel's colour ratios stay the job's. */
-#define VK_LIGHT_GLSL(QDEF) \
+#define VK_LIGHT_GLSL(QDEF) VK_LIGHT_GLSL_X(QDEF, "", VK_LIGHT_LOOP_ALL, "", "    }\n")
+/* (gpu2) PS3RECOMP_VK_LIGHT_CULL (default 1): the light pass walks, per 16x16 tile, only the lights whose
+ * sphere can reach the tile. Two small passes run first: kVkLightBoxFS, one fragment per 4x4 pixels, rebuilds
+ * their positions exactly as the light pass does (same depth texels, same formula) and writes their box (two
+ * RGBA32F targets: min.xyz + "has a lit pixel", max.xyz + "has a non-finite position"); kVkLightTileFS, four
+ * fragments per tile (a (4 tx) x ty RG32UI target: texel 4t+i holds lights 64i..64i+63 of tile t, one bit
+ * each), joins the tile's 16 boxes, widens the box by 1e-5 x (its largest coordinate + 1) -- far more than the
+ * few ulps by which two compilations of the formula can differ -- and drops a light only when outer > inner
+ * and the box's squared distance to
+ * the light is over outer^2 x 1.001: then every pixel of the tile has d = length(Lv) > outer, att = 0, w = 0,
+ * and the original loop's own `if (w <= 0.0) continue` skips that light there too. A tile with a non-finite
+ * position keeps every light. kVkLightCullFS then visits the set bits in ascending order with the original
+ * loop body (plus an exact per-pixel early-out, VK_LIGHT_CULL, for the same condition at the pixel): the
+ * lights that reach the accumulation, their order and their arithmetic are the original's, so the outputs
+ * are the same bytes (PS3RECOMP_VK_LIGHT_CULL=2 compares them with the original pass every 60th pass).
+ * Over 256 lights, or 0 = the original shader. */
+#define VK_LIGHT_CULL " if (L.oacbn.x > L.col_inner.w && dot(Lv, Lv) > L.oacbn.x * L.oacbn.x * 1.001) continue;"
+#define VK_LIGHT_LOOP_ALL \
+"    for (int k = 0; k < n; k++) {\n" \
+"        GLight L = p.l[k];\n"
+#define VK_LIGHT_LOOP_TILES \
+"    ivec2 tl = ivec2(px) >> 4;\n" \
+"    uvec2 m0 = texelFetch(mt, ivec2(tl.x * 4, tl.y), 0).xy, m1 = texelFetch(mt, ivec2(tl.x * 4 + 1, tl.y), 0).xy;\n" \
+"    uvec2 m2 = texelFetch(mt, ivec2(tl.x * 4 + 2, tl.y), 0).xy, m3 = texelFetch(mt, ivec2(tl.x * 4 + 3, tl.y), 0).xy;\n" \
+"    uint mw[8] = uint[8](m0.x, m0.y, m1.x, m1.y, m2.x, m2.y, m3.x, m3.y);\n" \
+"    for (int wi = 0; wi < 8; wi++) { uint bits = mw[wi]; while (bits != 0u) {\n" \
+"        int k = wi * 32 + findLSB(bits); bits &= bits - 1u;\n" \
+"        if (k >= n) break;\n" \
+"        GLight L = p.l[k];\n"
+#define VK_LIGHT_GLSL_X(QDEF, DECL, LOOP, CULL, LOOP_END) \
 "#version 450\n" \
 QDEF \
 "float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }\n" \
@@ -65,6 +94,7 @@ QDEF \
 "layout(std140, set = 0, binding = 0) uniform GLParams { vec4 m[4]; vec4 misc; GLight l[512]; } p;\n" \
 "layout(set = 0, binding = 1) uniform sampler2D nt;\n" \
 "layout(set = 0, binding = 2) uniform sampler2D zt;\n" \
+DECL \
 "layout(location = 0) out vec4 o_diff;\n" \
 "layout(location = 1) out vec4 o_spec;\n" \
 "void main() {\n" \
@@ -82,9 +112,8 @@ QDEF \
 "    vec3 V = -normalize(P);\n" \
 "    vec3 acc = vec3(0.0); float sp = 0.0;\n" \
 "    int n = min(int(p.misc.y), 512);\n" \
-"    for (int k = 0; k < n; k++) {\n" \
-"        GLight L = p.l[k];\n" \
-"        vec3 Lv = L.pos_type.xyz - P; float d = length(Lv); vec3 l = Lv / d;\n" \
+LOOP \
+"        vec3 Lv = L.pos_type.xyz - P;" CULL " float d = length(Lv); vec3 l = Lv / d;\n" \
 "        float ndl = max(dot(N, l), 0.0);\n" \
 "        float att = clamp((L.oacbn.x - d) / (L.oacbn.x - L.col_inner.w), 0.0, 1.0); att *= att;\n" \
 "        if (L.pos_type.w > 1.5) {\n" \
@@ -97,7 +126,7 @@ QDEF \
 "        float ndh = max(dot(N, normalize(l + V)), 0.0);\n" \
 "        acc += w * C;\n" \
 "        sp += w * length(C) * (1.0 + 25.0 / 27.0 * s) * pow(1.0 + s * (1.0 - ndh), -8.0);\n" \
-"    }\n" \
+LOOP_END \
 "    const float K = 0.35355339 * 255.0;\n" \
 "    vec3 q = sqrt(acc);\n" \
 "    float a = min(255.0, floor(max(1.0, max(q.r, max(q.g, q.b))) * K));\n" \
@@ -107,6 +136,85 @@ QDEF \
 "}\n"
 static const char kVkLightFS[] = VK_LIGHT_GLSL("#define LQ(x, n) floor(x)\n");
 static const char kVkLightDitherFS[] = VK_LIGHT_GLSL("#define LQ(x, n) max(floor((x) + (n) - 0.5), 0.0)\n");
+#define VK_LIGHT_TILE_DECL "layout(set = 0, binding = 3) uniform usampler2D mt;\n"
+static const char kVkLightCullFS[] = VK_LIGHT_GLSL_X("#define LQ(x, n) floor(x)\n", VK_LIGHT_TILE_DECL,
+                                                    VK_LIGHT_LOOP_TILES, VK_LIGHT_CULL, "    } }\n");
+static const char kVkLightDitherCullFS[] = VK_LIGHT_GLSL_X("#define LQ(x, n) max(floor((x) + (n) - 0.5), 0.0)\n",
+                                                          VK_LIGHT_TILE_DECL, VK_LIGHT_LOOP_TILES, VK_LIGHT_CULL, "    } }\n");
+/* (gpu2) the light boxes (see VK_LIGHT_GLSL above): binding 0 the light block, binding 2 the light pass's depth */
+static const char kVkLightBoxFS[] =
+"#version 450\n"
+"struct GLight { vec4 pos_type; vec4 col_inner; vec4 oacbn; vec4 dir; };\n"
+"layout(std140, set = 0, binding = 0) uniform GLParams { vec4 m[4]; vec4 misc; GLight l[512]; } p;\n"
+"layout(set = 0, binding = 2) uniform sampler2D zt;\n"
+"layout(location = 0) out vec4 o_min;\n"
+"layout(location = 1) out vec4 o_max;\n"
+"void main() {\n"
+"    ivec2 t0 = ivec2(gl_FragCoord.xy) * 4;\n"
+"    ivec2 lim = ivec2(p.misc.zw);\n"
+"    vec3 mn = vec3(3.0e38), mx = vec3(-3.0e38);\n"
+"    float anyp = 0.0, bad = 0.0;\n"
+"    for (int y = 0; y < 4; y++) {\n"
+"        for (int x = 0; x < 4; x++) {\n"
+"            uvec2 px = uvec2(t0 + ivec2(x, y));\n"
+"            if (int(px.x) >= lim.x || int(px.y) >= lim.y) continue;\n"
+"            uint z24 = uint(clamp(texelFetch(zt, ivec2(px), 0).x, 0.0, 1.0) * 16777215.0);\n"
+"            if (z24 >= 0xFFFFFFu) continue;\n"
+"            float zf = float(z24) / 16777216.0;\n"
+"            float u = float(px.x) / p.misc.z, v = float(px.y) / p.misc.w;\n"
+"            vec4 h = u * p.m[0] + v * p.m[1] + zf * p.m[2] + p.m[3];\n"
+"            vec3 P = h.xyz / h.w;\n"
+"            if (any(isnan(P)) || any(isinf(P))) bad = 1.0;\n"
+"            mn = min(mn, P); mx = max(mx, P); anyp = 1.0;\n"
+"        }\n"
+"    }\n"
+"    o_min = vec4(mn, anyp); o_max = vec4(mx, bad);\n"
+"}\n";
+/* (gpu2) the light tiles: binding 0 the light block, bindings 1 / 2 the boxes' min / max */
+static const char kVkLightTileFS[] =
+"#version 450\n"
+"struct GLight { vec4 pos_type; vec4 col_inner; vec4 oacbn; vec4 dir; };\n"
+"layout(std140, set = 0, binding = 0) uniform GLParams { vec4 m[4]; vec4 misc; GLight l[512]; } p;\n"
+"layout(set = 0, binding = 1) uniform sampler2D bmin;\n"
+"layout(set = 0, binding = 2) uniform sampler2D bmax;\n"
+"layout(location = 0) out uvec2 o;\n"
+"void main() {\n"
+"    ivec2 q = ivec2(gl_FragCoord.xy);\n"
+"    int part = q.x & 3;\n"
+"    ivec2 b0 = ivec2(q.x >> 2, q.y) * 4;\n"
+"    ivec2 bl = textureSize(bmin, 0);\n"
+"    vec3 mn = vec3(3.0e38), mx = vec3(-3.0e38);\n"
+"    bool anyp = false, bad = false;\n"
+"    for (int y = 0; y < 4; y++) {\n"
+"        for (int x = 0; x < 4; x++) {\n"
+"            ivec2 b = b0 + ivec2(x, y);\n"
+"            if (b.x >= bl.x || b.y >= bl.y) continue;\n"
+"            vec4 a = texelFetch(bmin, b, 0), c = texelFetch(bmax, b, 0);\n"
+"            if (a.w < 0.5) continue;\n"
+"            if (c.w > 0.5) bad = true;\n"
+"            mn = min(mn, a.xyz); mx = max(mx, c.xyz); anyp = true;\n"
+"        }\n"
+"    }\n"
+"    uvec2 r = uvec2(0u);\n"
+"    int n = min(int(p.misc.y), 512);\n"
+"    if (anyp) {\n"
+"        vec3 am = max(abs(mn), abs(mx));\n"
+"        float e = 1.0e-5 * (max(am.x, max(am.y, am.z)) + 1.0);\n"
+"        mn -= vec3(e); mx += vec3(e);\n"
+"        for (int j = 0; j < 64; j++) {\n"
+"            int k = part * 64 + j;\n"
+"            if (k >= n) break;\n"
+"            GLight L = p.l[k];\n"
+"            bool keep = true;\n"
+"            if (!bad && L.oacbn.x > L.col_inner.w) {\n"
+"                vec3 dv = L.pos_type.xyz - clamp(L.pos_type.xyz, mn, mx);\n"
+"                keep = !(dot(dv, dv) > L.oacbn.x * L.oacbn.x * 1.001);\n"
+"            }\n"
+"            if (keep) r[j >> 5] |= 1u << uint(j & 31);\n"
+"        }\n"
+"    }\n"
+"    o = r;\n"
+"}\n";
 
 /* The SSAO passes' shared part: struct SsaoC (SsaoGpuConsts, 320 bytes) as a
  * std140 block, and the SPU-exact helpers. Set 0: binding 0 the block,

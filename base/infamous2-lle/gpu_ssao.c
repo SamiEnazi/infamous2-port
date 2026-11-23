@@ -17,6 +17,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sched.h>
+#include <time.h>
 #include "spu_context.h"
 #include "spu_helpers.h"
 #include "rsx_draw_engine.h"
@@ -93,6 +95,39 @@ static void add_done(spu_context* ctx, uint32_t k)
     }
 }
 uint64_t g_ssaoskip_steps, g_ssaoskip_tiles, g_ssaoskip_passes;
+/* The other SPUs of a pass spin (0xFFFE, step returns 2, 0x437C calls again) until the instance that took the
+ * pass's tiles completes it. PS3RECOMP_SSAO_SPINLOG=<us>: print every spin longer than that, with the line
+ * state (h0..h3) when it began and ended. PS3RECOMP_SSAO_SPIN_YIELD=<n>: after n spins in a row, each further
+ * spin yields the host thread (sched_yield; 0 = never, the default) so a preempted holder gets a CPU. */
+static _Thread_local uint64_t t_spin0; static _Thread_local unsigned t_spins; static _Thread_local uint16_t t_h0[4];
+static int s_spinlog = -1, s_spinyield;
+static uint64_t ssao_now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
+static void line_state(spu_context* ctx, uint16_t h[4])
+{
+    const uint32_t ea = ls32(ctx, 0x6420), st = ST_LINE_LS + (ea & 0x78);
+    for (int i = 0; i < 4; i++) h[i] = (uint16_t)ls16(ctx, st + 2u * (uint32_t)i);
+}
+static void spin_note(spu_context* ctx, int spinning)
+{
+    if (__builtin_expect(s_spinlog < 0, 0)) {
+        const char* e = getenv("PS3RECOMP_SSAO_SPINLOG"); s_spinlog = e ? atoi(e) : 0;
+        e = getenv("PS3RECOMP_SSAO_SPIN_YIELD"); s_spinyield = e ? atoi(e) : 0;
+    }
+    if (spinning) {
+        if (t_spins++ == 0) { if (s_spinlog) { t_spin0 = ssao_now_ns(); line_state(ctx, t_h0); } }
+        else if (s_spinyield && t_spins > (unsigned)s_spinyield) sched_yield();
+        return;
+    }
+    if (t_spins && s_spinlog) {
+        const uint64_t us = (ssao_now_ns() - t_spin0) / 1000u;
+        if (us >= (uint64_t)s_spinlog) {
+            uint16_t h1[4]; line_state(ctx, h1);
+            fprintf(stderr, "[gpu ssao] spu %u spun %llu us (%u spins): line %04X %04X %04X %04X -> %04X %04X %04X %04X\n",
+                    (unsigned)ctx->spu_id, (unsigned long long)us, t_spins, t_h0[0], t_h0[1], t_h0[2], t_h0[3], h1[0], h1[1], h1[2], h1[3]);
+        }
+    }
+    t_spins = 0;
+}
 /* 0x5258's contract: 0 = iterator finished, 2 = pass handed out but other jobs
  * still hold tiles (call again); 1 (callback yield) cannot happen here. */
 static uint32_t ssao_skip_step(spu_context* ctx, u128 param)
@@ -104,11 +139,15 @@ static uint32_t ssao_skip_step(spu_context* ctx, u128 param)
     for (;;) {
         lcall(ctx, SJ(00004A50), 0x532C);
         const uint32_t t = ctx->gpr[3]._u32[0] & 0xFFFFu;
-        if (t == 0xFFFEu) return 2;
+        if (t == 0xFFFEu) { spin_note(ctx, 1); return 2; }
+        spin_note(ctx, 0);
         if (t == 0xFFFFu) return 0;
         const uint32_t n = 1 + grab_rest(ctx);          /* tiles t .. t+n-1 are ours */
         if (n > 1) add_done(ctx, n - 1);
-        lcall(ctx, SJ(000046D0), 0x5748);               /* last one: label, next pass */
+        { const uint64_t h0 = s_spinlog > 0 ? ssao_now_ns() : 0;
+          lcall(ctx, SJ(000046D0), 0x5748);             /* last one: label, next pass */
+          if (s_spinlog > 0) { const uint64_t us = (ssao_now_ns() - h0) / 1000u;
+              if (us >= (uint64_t)s_spinlog) fprintf(stderr, "[gpu ssao] spu %u: the pass completion took %llu us\n", (unsigned)ctx->spu_id, (unsigned long long)us); } }
         __atomic_add_fetch(&g_ssaoskip_tiles, n, __ATOMIC_RELAXED);
         __atomic_add_fetch(&g_ssaoskip_passes, 1, __ATOMIC_RELAXED);
     }

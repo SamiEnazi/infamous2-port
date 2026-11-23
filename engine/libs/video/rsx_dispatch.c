@@ -44,6 +44,9 @@
  */
 
 #include "rsx_dispatch.h"
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -715,7 +718,31 @@ static __attribute__((noinline)) void burst_const_run(rsx_dispatch* rsx, u32 m, 
     const u32 base = rsx->regs[M_VP_UPLOAD_CONST_ID >> 2];
     const int cs = !rsx->no_seen;
     u32 chg = 0;   /* (rsx-vtx) const_gen: any word that changed value */
-    for (u32 k = 0; k < n; k++) {
+    u32 k = 0;
+#if defined(__AVX2__)
+    /* (deck) eight words a step: the constants' words of a run are consecutive (constants[slot][lane] with
+     * slot = base + (w0 + k) / 4, lane = (w0 + k) % 4), as are its registers. The same stores, the same
+     * change test. The FIFO words: aligned 4-byte words, each read whole by the vector load as by the
+     * word load (x86 reads every aligned element of a vector load at once). Only while every word of the
+     * step lands below RSX_DSP_NUM_CONSTANTS; the rest goes the word loop. */
+    if (!cs && ((uintptr_t)be_words & 3u) == 0) {
+        const u64 c0 = (u64)base * 4u + w0;                       /* the run's first word in constants[][] */
+        const u64 cmax = (u64)RSX_DSP_NUM_CONSTANTS * 4u;
+        const u32 nv = c0 >= cmax ? 0u : (u32)((cmax - c0) < n ? (cmax - c0) : n);
+        u32* const cdst = &rsx->constants[0][0] + c0;
+        const __m256i sw = _mm256_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12,
+                                            3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+        __m256i acc = _mm256_setzero_si256();
+        for (; k + 8u <= nv; k += 8u) {
+            const __m256i v = _mm256_shuffle_epi8(_mm256_loadu_si256((const __m256i*)(const void*)(be_words + k)), sw);
+            _mm256_storeu_si256((__m256i*)(void*)(rsx->regs + idx0 + k), v);
+            acc = _mm256_or_si256(acc, _mm256_xor_si256(_mm256_loadu_si256((const __m256i*)(const void*)(cdst + k)), v));
+            _mm256_storeu_si256((__m256i*)(void*)(cdst + k), v);
+        }
+        if (!_mm256_testz_si256(acc, acc)) chg = 1;
+    }
+#endif
+    for (; k < n; k++) {
         const u32 arg = __builtin_bswap32(__atomic_load_n(&be_words[k], __ATOMIC_RELAXED));
         if (cs) rsx->seen[idx0 + k]++;
         rsx->regs[idx0 + k] = arg;

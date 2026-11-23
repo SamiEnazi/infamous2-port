@@ -62,11 +62,20 @@ int rsx_draw_engine_ready(void);
 
 void (*g_rsx_drain_end_hook)(void);   /* rsx_split.h */
 
+#if defined(_WIN32) || defined(__linux__)
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <intrin.h>
 #pragma comment(lib, "synchronization.lib")   /* WaitOnAddress / WakeByAddressSingle */
+#else   /* Linux (Steam Deck work): the same code through the engine's Win32 layer */
+#include "../../runtime/platform/win32_compat.h"
+#include "../../runtime/platform/msvc_compat.h"
+#include <x86intrin.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#endif
 #include "../../runtime/platform/host_place.h"
 
 _Static_assert(offsetof(rsx_dispatch, vp) == offsetof(rsx_dispatch, regs) + sizeof(u32) * RSX_DSP_NUM_REGS,
@@ -135,6 +144,7 @@ static int sp_switch(void)
 static inline u64 sp_load_r(void) { return (u64)__atomic_load_n(&s_sp_r, __ATOMIC_ACQUIRE); }
 
 
+#ifdef _WIN32
 /* ---- (rsx-par2) PS3_STALL_MS: the RSX side's threads -------------------------
  * Each thread that matters registers itself (rsx_diag_thread_here) and marks
  * its long waits (rsx_diag_wait). The stall thread then prints, per thread,
@@ -240,6 +250,13 @@ int rsx_stall_snapshot(char* buf, int size)
     }
     return k;
 }
+
+#else   /* Linux: no thread suspension / module walk; the diagnostic is off */
+int (*g_rsx_diag_backend)(char* buf, int size);
+void rsx_diag_thread_here(int who) { (void)who; }
+void rsx_diag_wait(const char* what) { (void)what; }
+int  rsx_stall_snapshot(char* buf, int size) { (void)buf; (void)size; return 0; }
+#endif
 
 /* ---- the walker's side ------------------------------------------------- */
 
@@ -462,6 +479,10 @@ static DWORD WINAPI sp_exec_thread(LPVOID arg)
     /* the draw engine's thread: the RSX role (PS3_CPU_PLACE / PS3_HIGHQOS / PS3_PLACE_PRIO) */
     ps3_host_place_self_once(PS3_PLACE_RSX);
     rsx_diag_thread_here(RSX_DIAG_EXEC);       /* (rsx-par2) PS3_STALL_MS sees this thread */
+#ifndef _WIN32
+    pthread_setname_np(pthread_self(), "rsx_exec");
+    fprintf(stderr, "[rsx split] exec thread hosttid %ld\n", (long)syscall(SYS_gettid));
+#endif
     rsx_dispatch* e = rsx_draw_engine_dsp();
     /* the walker writes s_sp all the time: what this thread needs of it, once */
     const u8* const ring = s_sp.ring;
@@ -592,14 +613,19 @@ static int sp_init(void)
     s_sp.wl = s_sp.rc = s_sp.pub = s_sp.label_pos = 0;
     s_sp.thread = CreateThread(NULL, 0, sp_exec_thread, NULL, 0, NULL);
     if (!s_sp.thread) goto fail;
+#ifdef _WIN32
     SetThreadPriority(s_sp.thread, GetThreadPriority(GetCurrentThread()));
     { typedef HRESULT (WINAPI *set_desc_fn)(HANDLE, PCWSTR);
       set_desc_fn sd = (set_desc_fn)(void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription");
       if (sd) sd(s_sp.thread, L"rsx_exec"); }
+    const unsigned long exec_tid = (unsigned long)GetThreadId(s_sp.thread);
+#else
+    const unsigned long exec_tid = 0;   /* the exec thread logs its own (sp_exec_thread) */
+#endif
     s_sp.inited = 1;
     fprintf(stderr, "[rsx split] draw engine on its own thread (hosttid %lu), FIFO walker + dispatch on hosttid %lu, %u MB ring "
                     "(PS3RECOMP_RSX_SPLIT=0 = one thread)\n",
-            (unsigned long)GetThreadId(s_sp.thread), (unsigned long)GetCurrentThreadId(), SP_RING >> 20);
+            exec_tid, (unsigned long)GetCurrentThreadId(), SP_RING >> 20);
     return 1;
 fail:
     fprintf(stderr, "[rsx split] could not start (memory or thread): one thread, as before\n");
@@ -746,7 +772,7 @@ void rsx_split_sync(void)
     sp_wait_r(s_sp.wl);
 }
 
-#else   /* not Windows: one thread, as before */
+#else   /* neither Windows nor Linux: one thread, as before */
 int (*g_rsx_diag_backend)(char* buf, int size);
 void rsx_diag_thread_here(int who) { (void)who; }
 void rsx_diag_wait(const char* what) { (void)what; }

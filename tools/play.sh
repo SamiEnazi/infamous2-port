@@ -35,13 +35,25 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[ -x "$exe" ] || { echo "not built yet: $exe (tools/setup.sh, or python3 -I tools/rebuild.py)"; exit 1; }
 game="$root/game"
 
-# Your game folder (GitHub issue #13): game/disc is a link to it with its full path. A game folder kept
-# inside the port's folder (or beside it) keeps the OLD path in the link when the port's folder is renamed
-# or moved: the game then shows its intro logos and a black screen. Find it at the new place and link it
-# again; else say so.
+# tell <text>: said on the terminal, and in a message box when there is none (the Play launcher, the menu entry)
+tell() {
+    printf '%s\n' "$1"
+    [ -t 1 ] && return 0
+    [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || return 0
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="inFAMOUS 2" --width=560 --text="$(printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')" 2>/dev/null
+    elif command -v kdialog >/dev/null 2>&1; then kdialog --title "inFAMOUS 2" --error "$1" 2>/dev/null; fi
+    return 0
+}
+[ -x "$exe" ] || { tell "inFAMOUS 2 isn't built yet: double-click Install inFAMOUS 2 in this folder, or run ./setup.sh.
+(Missing: $exe)"; exit 1; }
+# Your game folder (GitHub issue #13): game/disc is a link to it with its full path (setup --link-game, or a setup
+# before v0.6.0; else game/disc is a copy). A game folder kept inside the port's folder (or beside it) keeps the OLD
+# path in the link when the port's folder is renamed or moved: the game then shows its intro logos and a black screen.
+# Find it at the new place and link it again; else the same game (the title the port was built for) in RPCS3's game
+# list or an Emulation/roms/ps3 folder (EmuDeck: the Deck's own storage or any SD card); else say why.
 if [ -L "$game/disc" ] && [ ! -f "$game/disc/PS3_GAME/PARAM.SFO" ]; then
     old="$(readlink "$game/disc")"; old="${old%/}"; found=""
     for base in "$root" "$(dirname "$root")"; do
@@ -52,12 +64,46 @@ if [ -L "$game/disc" ] && [ ! -f "$game/disc/PS3_GAME/PARAM.SFO" ]; then
         done
         [ -n "$found" ] && break
     done
+    # the drive it is on: /run/media/<user>/<card> (SteamOS, KDE, GNOME), /media/..., /mnt/<drive>
+    drive=""
+    case "$old" in
+        /run/media/*/*) drive="$(printf '%s' "$old" | cut -d/ -f1-5)" ;;
+        /media/*/*) drive="$(printf '%s' "$old" | cut -d/ -f1-4)" ;;
+        /mnt/*) drive="$(printf '%s' "$old" | cut -d/ -f1-3)" ;;
+    esac
+    gone_drive=0
+    if [ -n "$drive" ]; then
+        if command -v mountpoint >/dev/null 2>&1; then mountpoint -q "$drive" 2>/dev/null || gone_drive=1
+        elif [ ! -d "$drive" ]; then gone_drive=1; fi
+    fi
+    if [ -z "$found" ] && [ $gone_drive = 0 ]; then
+        title=""   # the game the port was built for: its update folder in game/dev_hdd0/game
+        for t in "$game"/dev_hdd0/game/*/USRDIR/EBOOT.BIN; do
+            t="${t%/USRDIR/EBOOT.BIN}"; t="${t##*/}"; case "$t" in *_INSTALL|"*") ;; *) title="$t" ;; esac
+        done
+        if [ -n "$title" ]; then
+            for c in $(for y in "$HOME/.config/rpcs3/games.yml" "$HOME/.var/app/net.rpcs3.RPCS3/config/rpcs3/games.yml"; do
+                           [ -f "$y" ] && sed -n "s/^$title:[[:space:]]*//p" "$y" | tr -d "\"'" | sed 's#/*$##' | tr ' ' '\001'
+                       done) "$HOME"/Emulation/roms/ps3/* /run/media/*/Emulation/roms/ps3/* /run/media/*/*/Emulation/roms/ps3/*; do
+                c="$(printf '%s' "$c" | tr '\001' ' ')"
+                if [ -f "$c/PS3_GAME/PARAM.SFO" ] && grep -qa "$title" "$c/PS3_GAME/PARAM.SFO" 2>/dev/null; then found="$(readlink -f "$c")"; break; fi
+            done
+        fi
+    fi
     if [ -n "$found" ]; then
         rm -f "$game/disc" && ln -s "$found" "$game/disc"      # the link only, never your game
         echo "Your game folder moved (it was $old): game/disc links to $found now."
+    elif [ $gone_drive = 1 ]; then
+        tell "Your game folder is on a drive that is not there now (an SD card or USB drive?):
+$old
+
+The game is used from that folder (it was not copied into the port's folder). Put the card or drive in, wait until it shows up in the file manager, then start the game again.
+
+(To keep a copy of the game in the port's folder instead: ./setup.sh --copy-game.)"
+        exit 1
     else
-        echo "Your game folder is not where it was: game/disc still points to $old, and that folder is gone."
-        echo "Move it back there, or run tools/setup.sh again with --disc <your game folder>."
+        tell "Your game folder is not where it was: game/disc points to $old, and that folder is gone.
+Move it back there, or run Install inFAMOUS 2 again (or ./setup.sh --disc <your game folder>) and choose it."
         exit 1
     fi
 fi
@@ -67,16 +113,16 @@ psarc="$game/disc/PS3_GAME/USRDIR/cache/psarc"
 if [ -d "$game/disc/PS3_GAME" ]; then
     for f in core.psarc music.psarc; do
         if [ ! -f "$psarc/$f" ]; then
-            echo "Your game folder is missing some of the game's files: $f (in PS3_GAME/USRDIR/cache/psarc)."
-            echo "Copy the complete game folder again (the one with PS3_GAME), then start the game again."
+            tell "Your game folder is missing some of the game's files: $f (in PS3_GAME/USRDIR/cache/psarc).
+Copy the complete game folder again (the one with PS3_GAME), then start the game again."
             exit 1
         fi
     done
     for f in core.psarc music.psarc install1/infamous1.psarc_s install2/infamous2.psarc_s; do
         if [ -f "$psarc/$f" ] && [ "$(head -c 4 "$psarc/$f")" != "PSAR" ]; then
-            echo "Your game's files can't be read: $f doesn't start like a game archive."
-            echo "The copy is still encrypted or damaged. The port needs a decrypted copy of the game folder,"
-            echo "the same kind RPCS3 uses for a disc game."
+            tell "Your game's files can't be read: $f doesn't start like a game archive.
+The copy is still encrypted or damaged. The port needs a decrypted copy of the game folder,
+the same kind RPCS3 uses for a disc game."
             exit 1
         fi
     done
@@ -171,7 +217,7 @@ fi
 [ -n "${PS3_OVERLAY_INI+x}" ] || export PS3_OVERLAY_INI="$root/settings.ini" PS3_CHEATS_SPOTS="$root/spots.ini" PS3_GAME_MODS_STATE="$root/mods.ini"
 [ -n "${PS3RECOMP_VK_SHADER_CACHE+x}" ] || export PS3RECOMP_VK_SHADER_CACHE="$root/work/shader_cache"
 if ! grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
-    echo "This PC's CPU has no AVX2, and the game is built for CPUs with it (Intel 4th gen / AMD Ryzen or newer)."; exit 1
+    tell "This PC's CPU has no AVX2, and the game is built for CPUs with it (Intel 4th gen / AMD Ryzen or newer)."; exit 1
 fi
 export PS3_VFS_ROOT="$game/disc" PS3_HDD0_ROOT="$game/dev_hdd0" PS3_DEV_FLASH="$flash" \
        PS3_GAMEDATA_ROOT="$game/gamedata" PS3_TITLE="inFAMOUS 2" PS3_GAME_MODS_DIR="$mods" \
@@ -189,6 +235,56 @@ if [ $spulight = 0 ]; then export PS3RECOMP_ENG_GPU_LIGHT=07000B80:07384B80 PS3R
 [ $nokbm = 1 ] && export PS3_KBM=0
 [ $trace = 1 ] && export PS3_PAD_TRACE=1
 [ $nolog = 0 ] && export PS3RECOMP_PLAYLOG="$out/playlog.tsv"
+# Local fix (Steam Deck, KDE Plasma 6 Wayland): the Wayland surface reports more than 64 formats, the
+# engine asks for 64, gets VK_INCOMPLETE and runs without a window (sound only). XWayland works.
+[ -z "${SDL_VIDEODRIVER:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && export SDL_VIDEODRIVER=x11
+# Local tuning (Steam Deck, 4 cores). Benchmarked 2026-11-16 at one city street from the same save,
+# PGO build: 28.5 -> 30.9 fps. No busy-waiting in the GCM wait and the Vulkan worker (they take CPU
+# time from the busy threads on 4 cores), one pipeline worker, a 0.25 ms frame clock (on Linux it
+# sleeps its whole period; Windows wakes it early). Each can still be set from outside.
+: "${PS3RECOMP_GCM_SPIN_US:=0}" "${PS3RECOMP_VK_TQ_SPIN_US:=0}" "${PS3RECOMP_VK_PIPE_THREADS:=1}" "${PS3_FRAMECLOCK_US:=250}"
+export PS3RECOMP_GCM_SPIN_US PS3RECOMP_VK_TQ_SPIN_US PS3RECOMP_VK_PIPE_THREADS PS3_FRAMECLOCK_US
+# (deck-merge) v0.6's native job runner on a Steam Deck (LCD and OLED: the board vendor Valve, as above): 4 pool threads
+# (its default, physical cores - 2, is 2 there). Det bench at the plaza, 2026-11-18: 2 threads 37.8 fps (the main thread
+# runs jobs in its waits: 26 ms/frame), 3 40.8, 4 41.0. Every other PC keeps the engine's own rule (physical cores - 2,
+# at most 8): it is left unset there. Everything else below is for every Linux PC.
+if [ "$(cat /sys/devices/virtual/dmi/id/board_vendor 2>/dev/null)" = Valve ]; then
+    : "${PS3_NATIVE_JOBS_THREADS:=4}"; export PS3_NATIVE_JOBS_THREADS
+fi
+# (deck-v063) v0.6.3's controller thread reads the pads every 1 ms by default: here every 4 ms. On the Deck's controller
+# (SDL HIDAPI) a pass costs 40-55 us, so 1 ms = 32 ms of CPU a second (755 passes), 4 ms = 13 ms (234 passes), on the
+# CPUs the main thread and the job pool share; street det bench with SDL pads on, guest 4-20 s, 4 runs each: 46.46 vs
+# 47.12 fps (main 19.41 vs 19.14 ms). A pad call then copies a snapshot at most ~4 ms old (1 ms with upstream's default;
+# v0.6.2 read the pads inside the call, at most every 1 ms), against a 17-20 ms frame. Windows keeps upstream's 1 ms.
+: "${PS3_PAD_THREAD_US:=4000}"; export PS3_PAD_THREAD_US
+# (deck-perf, step 6 / hd5, 2026-11-20) Two engine switches on by default here (both default off in the engine; each can
+# still be set from outside, =0 = the old path). Measured in the combination (no-PGO modules, the store lift on, 6 rotated
+# rounds of 5 configurations; docs/STEAM_DECK_PERF.md step 6): taking either one out of it was slower, never faster.
+#   PS3_NATIVE_JOBS_PRIO=1: the job runner puts a manager whose last flush came from another PPU thread and whose jobs are
+#   long (mean >= 250 us: here Edge alone) behind the main thread's jobs, with an 8 ms age limit. Without it, quick street
+#   -0.76 % (SE 0.48), plaza -0.56 % (SE 1.01); alone it was street +1.25 % (SE 0.88), plaza +2.06 % (SE 0.63).
+#   PS3RECOMP_ENG_R8=3: descriptor sets kept across frames + the fragment program structural memo (the same picture,
+#   checked byte for byte). Without it, quick street -1.69 % (SE 0.45, RSX thread +0.60 ms), plaza -1.42 % (SE 0.92).
+# With both and the store lift (Linux builds: tools/rebuild_win.py) + the mg5r profiles = build hd5c, against hd4: street
+# +1.65 % (SE 0.46, guest 4-20 s) / +2.63 % (SE 1.11, full route), plaza +1.70 % (SE 0.47), standing 60 fps equal.
+: "${PS3_NATIVE_JOBS_PRIO:=1}" "${PS3RECOMP_ENG_R8:=3}"; export PS3_NATIVE_JOBS_PRIO PS3RECOMP_ENG_R8
+# (deck-perf, hd6, 2026-11-20) The Vulkan recording worker: the RSX thread queues its vkCmd* calls and a second thread
+# records them, placed on the RSX core's SMT sibling (CPU 7, kept clear by PS3_CPU_PLACE=rsxcore). It lost on 2026-11-17
+# with the old RSX thread; on hd5 (agent sz2, abseq, PRIO=1 R8=3 both sides) quick street +2.12 % (SE 0.69, ACCEPT after
+# 3 pairs), RSX thread 18.14 -> 16.32 ms; plaza +2.4..+3.4 %. =0 = recording on the RSX thread itself, as before.
+: "${PS3RECOMP_VK_THREADED:=1}" "${PS3_CPU_PLACE_VKW:=1}"; export PS3RECOMP_VK_THREADED PS3_CPU_PLACE_VKW
+# The RSX (draw) thread alone on a core, every other thread on the rest (engine host_place.c, Linux):
+# 30.5 -> 33.0 fps on the Deck, 34.7 with the job 210 native. PS3_CPU_PLACE=0 = the OS decides.
+: "${PS3_CPU_PLACE:=rsxcore}"; export PS3_CPU_PLACE
+# (deck-merge) v0.6's game module (libInfamous2Game.so) has initial-exec thread-locals: glibc needs room for them
+# in its static TLS, else the engine starts itself again through /proc/self/exe with this tunable
+# (runtime/module/ps3_module_host.c) and the process is then called "exe" (pgrep -x Infamous2Recomp, the bench's
+# budget.py and the game-running checks miss it). Set here, the first start already has it.
+case ":${GLIBC_TUNABLES:-}:" in
+    *glibc.rtld.optional_static_tls=*) ;;
+    *) export GLIBC_TUNABLES="${GLIBC_TUNABLES:+$GLIBC_TUNABLES:}glibc.rtld.optional_static_tls=1048576" ;;
+esac
+: "${PS3_STATIC_TLS_RETRY:=1}"; export PS3_STATIC_TLS_RETRY
 # An X screen without DRI3 (a headless machine's dummy screen, some remote desktops): Mesa's GPU drivers
 # can present there only through their software path, else the game falls back to llvmpipe (the CPU).
 if [ -z "${MESA_VK_WSI_DEBUG+x}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && command -v xdpyinfo >/dev/null &&
@@ -266,9 +362,11 @@ while :; do
     break
 done
 echo "Exited (code $rc) after $(( ($(date +%s) - t0) / 60 )) min. Logs: $out"
-if [ $nolog = 0 ] && [ -f "$out/playlog.tsv" ] && command -v python3 >/dev/null; then
+# the session's summary, with setup's own Python (tools-cache/python), else the system's
+py="$root/tools-cache/python/bin/python3"; [ -x "$py" ] || py="$(command -v python3 || true)"
+if [ $nolog = 0 ] && [ -f "$out/playlog.tsv" ] && [ -n "$py" ]; then
     cap=$(grep -oE 'frame cap (off|[0-9.]+)' "$out/stderr.log" | tail -1 | awk '{print $3}')
     [ "$cap" = off ] && cap=0
-    python3 -I "$root/tools/playlog_report.py" "$out" --cap "${cap:-60}" 2>&1 || true
+    "$py" -I "$root/tools/playlog_report.py" "$out" --cap "${cap:-60}" 2>&1 || true
 fi
 exit $rc

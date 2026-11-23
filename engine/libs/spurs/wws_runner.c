@@ -39,16 +39,25 @@
  *                                   waits, claim->start latency, and a health line (queues, stalls, warnings)
  *   PS3_NATIVE_JOBS_HELP=0|1|2      waiters run queued jobs: never / only the ones they wait for (default) / any
  *   PS3_NATIVE_JOBS_STICKY=0|1      a pool thread takes the next job of the manager it just ran first (default 1)
+ *   PS3_NATIVE_JOBS_HELP_PEEK=0|1   a waiter looks at the queue without the lock before it takes it (default 1)
  *   PS3_NATIVE_JOBS_WAITSTAT=1      a line per 10 s: time in the four job waits (runner on or off)
  *   PS3_NATIVE_JOBS_LOG=1           managers as they are first seen, ownership, dependency cells
  *   PS3_NATIVE_JOBS_HEAL=0|1        the stall repair (default 1): a wait that makes no progress for 1 s with nothing
  *                                   of its manager queued or running re-reads the manager from guest memory (below)
  *   PS3_NATIVE_JOBS_NODETECT=1      tests only: a manager re-created in place is seen by its workload id and array
  *                                   bases alone, as before the fix (tests/jobrunner drives the repair with it)
+ *   PS3_NATIVE_JOBS_PRIO=0|1        (deck, s1) the pool's pick order (default 0 = one FIFO for every manager): 1 = the
+ *                                   long jobs of managers other threads flush (Edge) go behind the rest (below:
+ *                                   "priority classes"; 2-5 bench modes)
+ *   PS3_NATIVE_JOBS_PRIO_AGE_US=<n> with PRIO: a low-class job that waited <n> us goes first anyway (default 8000; 0 = never)
+ *   PS3_NATIVE_JOBS_PRIO_LONG_US=<n> with PRIO 1: "long" = a manager's mean job time >= <n> us (default 250)
  * Always on (cheap): a loud first-occurrence warning ([jobs] WARN, the first 8 of each kind, then every
  * 1000th) for anything the runner does not expect: an unknown entry type, a wait or a barrier stalled for
  * more than 2 s (with the manager's state), a cell of no known manager, an array reset with work left.
  */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE   /* (deck) pthread_setname_np (the engine build sets it; tests/jobrunner builds this file alone) */
+#endif
 #include "wws_native.h"
 #include "wws_njob.h"
 #include "../../runtime/spu/spu_context.h"
@@ -56,12 +65,19 @@
 #include "../../runtime/platform/win32_compat.h"
 #include "../../runtime/platform/host_place.h"
 #include "../../include/ps3emu/ppu_hooks.h"
+#ifdef SZ1_DIAG
+#include "../../include/ps3emu/ps3_ftrace.h"   /* (sz1) PS3_FTRACE kinds 20, 21, 24, 25: the job timeline (diag build only) */
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
+#include <x86intrin.h>   /* (ft1) __rdtsc: PS3_JOBDELAY */
 #define CPU_PAUSE() _mm_pause()
 #else
 #define CPU_PAUSE() ((void)0)
@@ -97,10 +113,143 @@ enum {
 
 /* ---- configuration ------------------------------------------------------------------------- */
 static int s_on, s_all, s_threads, s_wait, s_stats, s_log, s_waitstat, s_help, s_sticky, s_stats_sec = 10;
+/* (sz1, bench only) PS3_LIVEAB's PS3_NATIVE_JOBS_STICKY writes s_sticky through this pointer (no code in the pool loop) */
+int* const g_wws_sticky_ptr = &s_sticky;
+static int s_help_peek;   /* (main1) PS3_NATIVE_JOBS_HELP_PEEK, see help_one */
 static int s_heal = 1, s_nodetect;
 static unsigned char s_mod_on[256];
+/* (s1) PS3_NATIVE_JOBS_PRIO (see "priority classes" at the ready ring) */
+static int s_prio;
+static uint64_t s_prio_age_ns = 8000000, s_prio_long_ns = 250000;
+static unsigned char s_prio_lowmod[256];   /* mode 2 (bench): the low class by module, PS3_NATIVE_JOBS_PRIO_LOW */
 
 static int env_int(const char* n, int dflt) { const char* e = getenv(n); return e && *e ? atoi(e) : dflt; }
+
+/* (ft1) PS3_JOBDELAY=<module>:<us>[:all|main|pool][:mwait|spin] (bench only, default off): a causal test -- every job of
+ * that module takes <us> longer: after its code, before its completion is published (so whoever waits for it waits
+ * that much more). `main` = only the jobs the process thread (the main PPU thread) runs itself in its waits, `pool` =
+ * only the pool threads' (ps3-spuj*), `all` = both. `mwait` (default): MONITORX + MWAITX with a TSC timeout (user mode
+ * on Zen 2; the thread sleeps in C0 without issuing work, so the delay draws little power and leaves the core to its
+ * SMT sibling), `spin` = a PAUSE loop (the power of a busy thread). PS3_LIVEAB can change <us> while the game runs
+ * (PS3_JOBDELAY_US=<a>|<b>). Read once; off = one compare per job. */
+static int s_jd_mod = -1, s_jd_us, s_jd_where, s_jd_spin;
+static double s_jd_tsc_us;
+static volatile long s_jd_n[2];
+#if defined(__GNUC__) && defined(__linux__)
+extern volatile int g_ps3_lab[] __attribute__((weak));   /* ps3_liveab.c (absent from tests/jobrunner's build) */
+extern volatile unsigned long long g_ps3_liveab_ev __attribute__((weak));   /* ditto: the delays, per liveab block */
+#endif
+static SPU_THREAD_LOCAL int t_jd_pool, t_jd_main = -1;
+static void jd_cfg(void)
+{
+    const char* e = getenv("PS3_JOBDELAY");
+    if (!e || !*e) return;
+    int mod = 0, us = 0; char where[16] = "all", kind[16] = "mwait";
+    if (sscanf(e, "%d:%d:%15[a-z]:%15[a-z]", &mod, &us, where, kind) < 2 || mod < 200 || mod > 255 || us < 0) {
+        fprintf(stderr, "[jobdelay] cannot read PS3_JOBDELAY=%s (<module>:<us>[:all|main|pool][:mwait|spin])\n", e);
+        return;
+    }
+#if defined(__x86_64__) && defined(__linux__)
+    struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a); const uint64_t r0 = __rdtsc();
+    do clock_gettime(CLOCK_MONOTONIC, &b); while ((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec) < 20000000ll);
+    s_jd_tsc_us = (double)(__rdtsc() - r0) / (((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)) / 1000.0);
+    s_jd_mod = mod; s_jd_us = us; s_jd_where = !strcmp(where, "main") ? 1 : !strcmp(where, "pool") ? 2 : 0;
+    s_jd_spin = !strcmp(kind, "spin");
+    fprintf(stderr, "[jobdelay] PS3_JOBDELAY: every job of module %d %d us longer (%s, %s; TSC %.1f MHz)\n", mod, us,
+            s_jd_where == 1 ? "only those the main thread runs" : s_jd_where == 2 ? "only the pool's" : "on every thread",
+            s_jd_spin ? "PAUSE spin" : "MONITORX/MWAITX", s_jd_tsc_us);
+#else
+    fprintf(stderr, "[jobdelay] PS3_JOBDELAY: x86-64 Linux only, off\n");
+#endif
+}
+#if defined(__x86_64__) && defined(__linux__)
+static void jd_job(void)
+{
+    if (t_jd_main < 0) t_jd_main = (pid_t)syscall(SYS_gettid) == getpid();
+    if ((s_jd_where == 1 && !t_jd_main) || (s_jd_where == 2 && !t_jd_pool)) return;
+    int us = s_jd_us;
+#if defined(__GNUC__)
+    if (g_ps3_lab) { const int lab = g_ps3_lab[5 /* PS3_LAB_JOBDELAY_US */]; if (lab >= 0) us = lab; }
+#endif
+    if (us <= 0) return;
+    const long n = __atomic_add_fetch(&s_jd_n[t_jd_main ? 0 : 1], 1, __ATOMIC_RELAXED);
+    if (n == 1 || n % 100000 == 0) fprintf(stderr, "[jobdelay] %ld delays on %s so far (%d us)\n", n, t_jd_main ? "the main thread" : "other threads", us);
+#if defined(__GNUC__)
+    if (&g_ps3_liveab_ev) __atomic_add_fetch(&g_ps3_liveab_ev, 1, __ATOMIC_RELAXED);
+#endif
+    const uint64_t t0 = __rdtsc(), len = (uint64_t)(us * s_jd_tsc_us);
+    if (s_jd_spin) { while (__rdtsc() - t0 < len) CPU_PAUSE(); return; }
+    char line[128] __attribute__((aligned(64)));   /* a line nobody writes: MWAITX ends by its timer */
+    for (;;) {
+        const uint64_t el = __rdtsc() - t0;
+        if (el >= len) break;
+        const uint64_t left = len - el;
+        __asm__ volatile(".byte 0x0f,0x01,0xfa" :: "a"(line + 64), "c"(0), "d"(0) : "memory");   /* monitorx */
+        __asm__ volatile(".byte 0x0f,0x01,0xfb" :: "a"(0xF0), "b"((uint32_t)(left > 0xFFFFFFFFull ? 0xFFFFFFFFull : left)),
+                         "c"(2) : "memory");                                                       /* mwaitx, timer on */
+    }
+}
+#else
+static void jd_job(void) {}
+#endif
+static __attribute__((noinline)) void jd_after(int module) { if (__builtin_expect(s_jd_mod >= 0, 0) && module == s_jd_mod) jd_job(); }
+
+/* (sz1, bench only) PS3_KICKDELAY=<manager module>:<us>[:before|after][:mwait|spin] (default off): a causal test of the
+ * main thread as the bursts' producer -- the main thread (the process thread) waits <us> in each flush of that manager
+ * (hook_flush: the guest's kick), `before` = before the flush's claim (the jobs it kicked become visible <us> later:
+ * main AND the burst delayed), `after` = after it (the pool already has them: only main delayed). The manager's module
+ * is that of its first job (mgr_state.module). PS3_LIVEAB's PS3_KICKDELAY_US flips <us>; delays count in
+ * g_ps3_liveab_ev. Off: hook_flush calls this twice, one compare each. */
+#include "../../include/ps3emu/ps3_dbgdelay.h"
+static int s_kd_mod = -1, s_kd_us, s_kd_after, s_kd_spin;
+static void kd_cfg(void)
+{
+    const char* e = getenv("PS3_KICKDELAY");
+    if (!e || !*e) return;
+    int mod = 0, us = 0; char where[16] = "after", kind[16] = "mwait";
+    if (sscanf(e, "%d:%d:%15[a-z]:%15[a-z]", &mod, &us, where, kind) < 2 || us < 0) {
+        fprintf(stderr, "[kickdelay] cannot read PS3_KICKDELAY=%s (<module>:<us>[:before|after][:mwait|spin])\n", e);
+        return;
+    }
+    s_kd_mod = mod; s_kd_us = us; s_kd_after = strcmp(where, "before") != 0; s_kd_spin = !strcmp(kind, "spin");
+    fprintf(stderr, "[kickdelay] PS3_KICKDELAY: the main thread waits %d us %s each flush of manager module %d (%s)\n",
+            us, s_kd_after ? "after" : "before", mod, s_kd_spin ? "PAUSE spin" : "MONITORX/MWAITX");
+}
+static __attribute__((noinline)) void kd_flush(int module, int after)
+{
+    if (__builtin_expect(s_kd_mod < 0, 1) || module != s_kd_mod || after != s_kd_after) return;
+#if defined(__x86_64__) && defined(__linux__)
+    static SPU_THREAD_LOCAL int t_main = -1;
+    if (t_main < 0) t_main = (pid_t)syscall(SYS_gettid) == getpid();
+    if (!t_main) return;
+    int us = s_kd_us;
+#if defined(__GNUC__)
+    if (g_ps3_lab) { const int lab = g_ps3_lab[10 /* PS3_LAB_KICKDELAY_US */]; if (lab >= 0) us = lab; }
+    if (us > 0 && &g_ps3_liveab_ev) __atomic_add_fetch(&g_ps3_liveab_ev, 1, __ATOMIC_RELAXED);
+#endif
+    if (us > 0) ps3_dbg_wait_ns((uint64_t)us * 1000ull, s_kd_spin);
+#endif
+}
+
+#ifdef SZ1_DIAG
+/* ---- (sz1) PS3_FTRACE timeline of the runner (diag build only, -DSZ1_DIAG; main1's kinds 20-21 + the kicks):
+ *   20 JOB_WAIT  a waiter's wait (wait_until / the polls of one token test merged): who = PPU thread id,
+ *                a = hook (0 token, 1 array, 2 arena, 3 arena's drain part, 4 token test) | slot << 4 | barrier-blocked
+ *                << 5 | needed jobs queued << 8 | needed jobs running << 16 | needed entries not yet claimed << 24
+ *                (each capped at 255, at the wait's start), b = the manager's module | target index << 8
+ *   21 JOB_RUN   one job run: who = PPU thread id of a waiter that ran it, or 1000 + pool thread index,
+ *                a = the job's module | source << 8 (0 pool, 1 wait help, 2 token-test help, 3 world-tick help)
+ *                | queue latency (claim -> start, us, capped 65535) << 16, b = index | slot << 15 | manager module << 16
+ *   24 JOB_KICK  instant: a claim queued jobs: who = as 21 (PPU tid or 1000 + pool index), a = manager module | jobs
+ *                queued (capped 4095) << 8 | slot << 20 | stopped at a barrier << 21 | source << 24 (0 flush hook,
+ *                1 wait, 2 token test, 3 a job's completion, 4 a cell opened, 5 heal, 6 other), b = first index | last
+ *                index << 16
+ *   25 POOL_SLEEP a pool thread asleep on the ready ring's condition variable (after its 3000-PAUSE spin):
+ *                who = 1000 + pool index */
+enum { FT_JOB_WAIT = 20, FT_JOB_RUN = 21, FT_JOB_KICK = 24, FT_POOL_SLEEP = 25 };
+static SPU_THREAD_LOCAL uint32_t t_ft_who = 0xFFFFFFFFu, t_ft_src, t_ft_hook, t_ft_csrc = 6;
+static inline int ft_kind_on(int k) { return __builtin_expect(PS3_FT_ON(), 0) && ((g_ps3_ft.kinds >> k) & 1u); }
+#endif
 
 static void cfg_init(void)
 {
@@ -130,8 +279,18 @@ static void cfg_init(void)
     s_sticky = env_int("PS3_NATIVE_JOBS_STICKY", 1);   /* 0 = waiters never run jobs, 1 = only jobs they wait for, 2 = any */
     s_log = env_int("PS3_NATIVE_JOBS_LOG", 0);
     s_waitstat = env_int("PS3_NATIVE_JOBS_WAITSTAT", 0);
+    s_help_peek = env_int("PS3_NATIVE_JOBS_HELP_PEEK", 1);
     s_heal = env_int("PS3_NATIVE_JOBS_HEAL", 1);
     s_nodetect = env_int("PS3_NATIVE_JOBS_NODETECT", 0);
+    s_prio = env_int("PS3_NATIVE_JOBS_PRIO", 0);
+    { const int a = env_int("PS3_NATIVE_JOBS_PRIO_AGE_US", 8000); s_prio_age_ns = a > 0 ? (uint64_t)a * 1000u : 0; }
+    { const int a = env_int("PS3_NATIVE_JOBS_PRIO_LONG_US", 250); s_prio_long_ns = a > 0 ? (uint64_t)a * 1000u : 0; }
+    {   const char* p = getenv("PS3_NATIVE_JOBS_PRIO_LOW");
+        if (!p || !*p) p = "221";      /* mode 2: Edge's manager (its first job is module 221; its jobs are 223) */
+        while (*p) { char* q; const long v = strtol(p, &q, 10); if (q == p) { p++; continue; } if (v >= 0 && v < 256) s_prio_lowmod[v] = 1; p = q; }
+    }
+    jd_cfg();                         /* (ft1) PS3_JOBDELAY */
+    kd_cfg();                         /* (sz1) PS3_KICKDELAY */
 }
 
 /* ---- managers ------------------------------------------------------------------------------- */
@@ -166,6 +325,9 @@ typedef struct mgr_state {
     qjob     q[MQ_CAP];
     uint32_t qh, qt;
     volatile long running;             /* jobs queued or running */
+    volatile int main_flush;           /* (s1) its last flush came from the main PPU thread (PS3_NATIVE_JOBS_PRIO's class) */
+    volatile uint64_t job_ns;          /* (s1) the mean run time of its jobs (measured while PRIO 1 / 4 needs it) */
+    volatile uint64_t job_sum, job_cnt;
 } mgr_state;
 
 static mgr_state* s_mgr[MAX_MGRS];
@@ -247,40 +409,114 @@ static mgr_state* mgr_get(uint32_t ea)
  * spinning (a spinner takes the first ticket itself); a thread that takes a ticket and sees more wakes the
  * next sleeper. The producer (usually the main thread, at a flush) so pays at most one wake per claim: one
  * wake per job cost it ~8 alert syscalls per flush, about a millisecond a frame in the city. A ticket whose
- * job a waiter or a sticky thread already ran is stale: the thread that pops it finds the queue empty. */
+ * job a waiter or a sticky thread already ran is stale: the thread that pops it finds the queue empty.
+ *
+ * (deck, s1) Priority classes, PS3_NATIVE_JOBS_PRIO (default 0: everything in ring 0 = one FIFO, as before). The
+ * street frame's critical path is the main PPU thread: it kicks the anim and render streams one flush at a time
+ * and waits for the jobs it kicked, while the Edge kicker thread queues Edge's ~15 one-millisecond jobs at the
+ * frame start. In one FIFO the anim jobs the main thread kicks 1-4 ms into the frame queued behind all of them
+ * (mean 2.2 ms) and the main thread then waited ~1.5 ms a frame (work/bench/NOTES.md, "sizing (agent sz1)").
+ * With PRIO = 1 a manager is in the low class (its tickets go to ring 1) when BOTH: its last flush came from a
+ * thread other than the main PPU thread (guest thread id 1), and its jobs are long (the mean of all its jobs so far
+ * is at least PS3_NATIVE_JOBS_PRIO_LONG_US, default 250 us); everything else is high (ring 0). On the street that is
+ * Edge (221, jobs ~640 us, flushed by the Edge kicker) alone. Why both: a job that has started is never interrupted, so a long
+ * job of another thread delays the main thread's next job by up to its whole length, a short one by little; and
+ * short jobs of other threads can be on another thread's critical path -- the SPU light jobs (219, ~14 us, flushed
+ * by the light kicker) feed the RSX thread, which waits for their label: with them in the low class too (mode 5)
+ * the RSX thread was 0.5 ms a frame slower and fps 1.9 % lower than with Edge alone (NOTES.md "job priority (agent
+ * s1)"). A pool thread takes ring 0 first; the order inside a class stays FIFO, and the sticky pick only stays on a
+ * low manager while ring 0 is empty. No starvation: a low ticket older than PS3_NATIVE_JOBS_PRIO_AGE_US goes first
+ * anyway (it is also bounded by the game: the main thread stops kicking when it waits for Edge's kicker).
+ * PS3_LIVEAB's PS3_NATIVE_JOBS_PRIO flips the mode while the game runs (a flip only changes where new tickets go:
+ * both rings are always drained). Bench modes (the alternatives measured, kept for measurement): 2 = the low class
+ * by module (PS3_NATIVE_JOBS_PRIO_LOW, default "221" = Edge), 3 = no classes but the manager the main thread is
+ * waiting on right now goes first, 4 = 1 + 3, 5 = by the flushing thread alone (every other thread's manager low). */
 #define RING_CAP (1u << 16)
-static mgr_state* s_ready[RING_CAP];
-static volatile uint32_t s_rh, s_rt;
+static mgr_state* s_ready[2][RING_CAP];
+static uint64_t s_ready_t[RING_CAP];          /* ring 1: when each ticket was added (the aging) */
+static volatile uint32_t s_rh[2], s_rt[2];
 static SRWLOCK s_rlock = SRWLOCK_INIT;
 static CONDITION_VARIABLE s_rcv = CONDITION_VARIABLE_INIT;
 static volatile long s_rsleepers, s_rspinners;
+static uint64_t now_ns(void);
+static volatile uint64_t s_prio_low_n, s_prio_aged_n, s_prio_wait_max, s_prio_yield_n, s_prio_await_n;
+
+static inline int prio_mode(void)
+{
+    int v = s_prio;
+#if defined(__GNUC__) && defined(__linux__)
+    if (g_ps3_lab) { const int lab = g_ps3_lab[13 /* PS3_LAB_JOBPRIO */]; if (lab >= 0) v = lab; }
+#endif
+    return v;
+}
+/* the ring of m's tickets: 1 = the low class */
+static inline int prio_ring(const mgr_state* m, int mode)
+{
+    if (mode == 1 || mode == 4) return !m->main_flush && m->job_ns >= s_prio_long_ns;
+    if (mode == 2) return s_prio_lowmod[m->module & 255];
+    if (mode == 5) return !m->main_flush;
+    return 0;
+}
+static inline int ready_empty(void)
+{
+    return __atomic_load_n(&s_rh[0], __ATOMIC_ACQUIRE) == __atomic_load_n(&s_rt[0], __ATOMIC_ACQUIRE)
+        && __atomic_load_n(&s_rh[1], __ATOMIC_ACQUIRE) == __atomic_load_n(&s_rt[1], __ATOMIC_ACQUIRE);
+}
+/* ring 1's oldest ticket waited longer than the age limit (no lock: a slot is rewritten only after the ring wraps) */
+static int prio_low_aged(void)
+{
+    const uint32_t h = __atomic_load_n(&s_rh[1], __ATOMIC_ACQUIRE);
+    if (!s_prio_age_ns || h == __atomic_load_n(&s_rt[1], __ATOMIC_ACQUIRE)) return 0;
+    return now_ns() - s_ready_t[h % RING_CAP] >= s_prio_age_ns;
+}
 
 static void ready_add_n(mgr_state* m, uint32_t n)   /* caller holds m->lock: n tickets for jobs just queued */
 {
     if (!n) return;
+    const int r = prio_ring(m, prio_mode());
+    const uint64_t t = r ? now_ns() : 0;
     AcquireSRWLockExclusive(&s_rlock);
-    if (s_rt - s_rh + n > RING_CAP) { fprintf(stderr, "[jobs] FATAL: ready ring full\n"); fflush(stderr); abort(); }
-    for (uint32_t i = 0; i < n; i++) s_ready[(s_rt + i) % RING_CAP] = m;
-    __atomic_store_n(&s_rt, s_rt + n, __ATOMIC_RELEASE);
+    if (s_rt[r] - s_rh[r] + n > RING_CAP) { fprintf(stderr, "[jobs] FATAL: ready ring full\n"); fflush(stderr); abort(); }
+    for (uint32_t i = 0; i < n; i++) s_ready[r][(s_rt[r] + i) % RING_CAP] = m;
+    if (r) for (uint32_t i = 0; i < n; i++) s_ready_t[(s_rt[1] + i) % RING_CAP] = t;
+    __atomic_store_n(&s_rt[r], s_rt[r] + n, __ATOMIC_RELEASE);
     const long sl = s_rsleepers;
     ReleaseSRWLockExclusive(&s_rlock);
     if (sl && !__atomic_load_n(&s_rspinners, __ATOMIC_ACQUIRE)) WakeConditionVariable(&s_rcv);
 }
+/* (s1) a ticket of ring 1 taken (caller holds s_rlock): the longest wait, and whether the age limit chose it */
+static __attribute__((noinline)) void prio_took_low(uint64_t t_add, int aged)
+{
+    const uint64_t w = now_ns() - t_add;
+    s_prio_low_n++;
+    if (aged) s_prio_aged_n++;
+    if (w > s_prio_wait_max) s_prio_wait_max = w;
+}
 static mgr_state* ready_pop(void)
 {
     __atomic_add_fetch(&s_rspinners, 1, __ATOMIC_ACQ_REL);
-    for (int spin = 0; spin < 3000 && __atomic_load_n(&s_rh, __ATOMIC_ACQUIRE) == __atomic_load_n(&s_rt, __ATOMIC_ACQUIRE); spin++)
+    for (int spin = 0; spin < 3000 && ready_empty(); spin++)
         CPU_PAUSE();                       /* a burst's next job usually comes within microseconds */
     AcquireSRWLockExclusive(&s_rlock);
     __atomic_sub_fetch(&s_rspinners, 1, __ATOMIC_ACQ_REL);
-    while (s_rh == s_rt) {
+    while (s_rh[0] == s_rt[0] && s_rh[1] == s_rt[1]) {
         s_rsleepers++;
+#ifdef SZ1_DIAG
+        const uint64_t fts = ft_kind_on(FT_POOL_SLEEP) ? ps3_ft_now() : 0;
+#endif
         SleepConditionVariableSRW(&s_rcv, &s_rlock, INFINITE, 0);
+#ifdef SZ1_DIAG
+        if (fts) ps3_ft_span(FT_POOL_SLEEP, t_ft_who, 0, 0, fts, ps3_ft_now());
+#endif
         s_rsleepers--;
     }
-    mgr_state* m = s_ready[s_rh % RING_CAP];
-    __atomic_store_n(&s_rh, s_rh + 1, __ATOMIC_RELEASE);
-    const int more = s_rh != s_rt && s_rsleepers;
+    /* ring 0 first; ring 1 when ring 0 is empty or its oldest ticket is past the age limit */
+    int r = s_rh[0] == s_rt[0], aged = 0;
+    if (!r && s_rh[1] != s_rt[1] && prio_low_aged()) r = aged = 1;
+    mgr_state* m = s_ready[r][s_rh[r] % RING_CAP];
+    if (r) prio_took_low(s_ready_t[s_rh[1] % RING_CAP], aged);
+    __atomic_store_n(&s_rh[r], s_rh[r] + 1, __ATOMIC_RELEASE);
+    const int more = (s_rh[0] != s_rt[0] || s_rh[1] != s_rt[1]) && s_rsleepers;
     ReleaseSRWLockExclusive(&s_rlock);
     if (more) WakeConditionVariable(&s_rcv);   /* the chain: the next sleeper for the next ticket */
     return m;
@@ -488,7 +724,11 @@ static void claim_locked(mgr_state* m)
                 fprintf(stderr, "[jobs] WARN #%ld %s: manager %08X array %u entry %u = %08X:%08X (claimed as type 3)\n",
                         s_warn_n[W_TYPE], s_warn_name[W_TYPE], m->ea, s, i, hi, lo);
             if (type == 1) {
+#ifdef SZ1_DIAG
+                qjob j = { s, i, hi, lo, module_of_desc(lo, (hi >> 16) & 511), now_ns() };
+#else
                 qjob j = { s, i, hi, lo, module_of_desc(lo, (hi >> 16) & 511), s_stats ? now_ns() : 0 };
+#endif
                 __atomic_add_fetch(&m->running, 1, __ATOMIC_ACQ_REL);
                 mq_push_locked(m, &j);
                 pushed++;
@@ -500,6 +740,15 @@ static void claim_locked(mgr_state* m)
         advance_locked(m, s);
         if (!switched) break;
     }
+#ifdef SZ1_DIAG
+    if (pushed && ft_kind_on(FT_JOB_KICK)) {
+        const qjob* f = &m->q[(m->qt - pushed) % MQ_CAP]; const qjob* l = &m->q[(m->qt - 1) % MQ_CAP];
+        const uint64_t now = ps3_ft_now();
+        ps3_ft_span(FT_JOB_KICK, t_ft_who, (uint32_t)(m->module & 255) | ((pushed > 4095 ? 4095u : pushed) << 8) |
+                    ((l->slot & 1) << 20) | ((m->blocked_cell != 0) << 21) | ((t_ft_csrc & 7) << 24),
+                    (f->index & 0xFFFF) | ((l->index & 0xFFFF) << 16), now, now);
+    }
+#endif
     ready_add_n(m, pushed);
 }
 static void claim(mgr_state* m)
@@ -517,7 +766,11 @@ static void cell_opened(uint32_t cell, mgr_state* from)
     for (long i = 0; i < n; i++) {
         mgr_state* m = s_mgr[i];
         if (cell >= m->ea + MGR_CELLS && cell < m->ea + MGR_CELLS + 16) { any = 1; owner_owned = m->owned; }
+#ifdef SZ1_DIAG
+        if (m->owned && m->blocked_cell == cell) { const uint32_t o = t_ft_csrc; t_ft_csrc = 4; claim(m); t_ft_csrc = o; }
+#else
         if (m->owned && m->blocked_cell == cell) claim(m);
+#endif
     }
     if (!owner_owned) {
         /* the cell belongs to a manager SPURS runs: wake its workload as the policy module did */
@@ -533,6 +786,22 @@ static void cell_opened(uint32_t cell, mgr_state* from)
 }
 
 /* ---- running a job ----------------------------------------------------------------------------- */
+/* (s1) PRIO 1 / 4: a job's run time for its manager's mean (m->job_ns = all its measured jobs' time / their number),
+ * taken only for managers another thread flushes (the class needs it only there: on the street ~30 jobs a frame); calls,
+ * no branch in run_one. The mean over the manager's whole life, not a running one: Edge's single jobs range from tens of
+ * us to ms, and a running mean (1/8 per job, binary s1b) hovered around the 250 us limit, so Edge's class flapped. */
+static __attribute__((noinline)) uint64_t prio_job_t0(const mgr_state* m)
+{
+    const int mode = prio_mode();
+    return ((mode == 1 || mode == 4) && !m->main_flush) ? now_ns() : 0;
+}
+static __attribute__((noinline)) void prio_job_t1(mgr_state* m, uint64_t t0)
+{
+    if (!t0) return;
+    const uint64_t d = now_ns() - t0;
+    const uint64_t sum = __atomic_add_fetch(&m->job_sum, d, __ATOMIC_RELAXED), n = __atomic_add_fetch(&m->job_cnt, 1, __ATOMIC_RELAXED);
+    m->job_ns = sum / n;                             /* (two counters updated apart: a mean, near enough) */
+}
 static void run_one(wws_worker* w, uint32_t own_spu, mgr_state* m, const qjob* q)
 {
     const uint32_t base = G32(arr_hdr(m->ea, q->slot) + ARR_BASE);
@@ -541,6 +810,11 @@ static void run_one(wws_worker* w, uint32_t own_spu, mgr_state* m, const qjob* q
     uint32_t tok = 0xFF;
     if (q->module == 223) { tok = token_take(); wws_worker_set_spu_num(w, tok); }
     else wws_worker_set_spu_num(w, own_spu);
+#ifdef SZ1_DIAG
+    const int ft = ft_kind_on(FT_JOB_RUN);
+    const uint64_t ft0 = ft ? ps3_ft_now() : 0;
+    const uint64_t ftl = ft && q->t_push ? (now_ns() - q->t_push) / 1000u : 0;
+#endif
     const uint64_t t0 = s_stats ? now_ns() : 0;
     if (s_stats && q->t_push) {
         const uint64_t l = t0 - q->t_push;
@@ -549,9 +823,16 @@ static void run_one(wws_worker* w, uint32_t own_spu, mgr_state* m, const qjob* q
     }
     wws_result r;
     /* Track B2: a native job module (wws_njob.c, PS3_NATIVE_CULL) instead of the lifted job; 0 = declined */
+    const uint64_t tp = prio_job_t0(m);   /* (s1) PS3_NATIVE_JOBS_PRIO 1: the job's length (a call) */
     const int nat = wws_njob_try(w, &j, q->module, &r);
     if (!nat) wws_native_run(w, &j, &r);
+    jd_after(r.module);               /* (ft1) PS3_JOBDELAY (a call, no branch here: run_one keeps its PGO profile) */
+    prio_job_t1(m, tp);
     if (tok != 0xFF) token_give(tok);
+#ifdef SZ1_DIAG
+    if (ft) ps3_ft_span(FT_JOB_RUN, t_ft_who, (uint32_t)(q->module & 255) | ((t_ft_src & 15) << 8) | ((ftl > 65535 ? 65535u : (uint32_t)ftl) << 16),
+                        (q->index & 0x7FFF) | ((q->slot & 1) << 15) | ((uint32_t)(m->module & 255) << 16), ft0, ps3_ft_now());
+#endif
     if (s_stats) {
         const uint64_t d = now_ns() - t0;
         __atomic_add_fetch(&s_busy_ns, d, __ATOMIC_RELAXED);
@@ -576,13 +857,73 @@ static void run_one(wws_worker* w, uint32_t own_spu, mgr_state* m, const qjob* q
     ReleaseSRWLockExclusive(&m->lock);
     for (uint32_t d = 0; d < r.n_deps; d++)
         if (wws_cell_dec(r.dep_ea[d]) == 1) cell_opened(r.dep_ea[d], m);
+#ifdef SZ1_DIAG
+    { const uint32_t o = t_ft_csrc; t_ft_csrc = 3; claim(m); t_ft_csrc = o; }
+#else
     claim(m);
+#endif
+}
+
+/* (s1) PS3_NATIVE_JOBS_PRIO, the pool's side (see "priority classes" at the ready ring). The sticky pick: a thread
+ * stays on its last manager while that is in the high class and no low ticket is past the age limit, or, for a
+ * low manager, while ring 0 is empty (so the four threads Edge holds at the frame start move to the main thread's
+ * jobs as each Edge job ends; that is why the sizing's prototype needed PS3_NATIVE_JOBS_STICKY=0). */
+static __attribute__((noinline)) int prio_sticky_ok(const mgr_state* last, int mode)
+{
+    if (prio_ring(last, mode)) {
+        const int ok = __atomic_load_n(&s_rh[0], __ATOMIC_ACQUIRE) == __atomic_load_n(&s_rt[0], __ATOMIC_ACQUIRE);
+        if (!ok) __atomic_add_fetch(&s_prio_yield_n, 1, __ATOMIC_RELAXED);
+        return ok;
+    }
+    return !prio_low_aged();
+}
+/* modes 3 / 4: the manager the main PPU thread waits on now (its token / array / arena waits and its polled token
+ * tests that said "not yet"); a pool thread takes its queued jobs before anything else (their tickets go stale) */
+static mgr_state* volatile s_awaited;
+static SPU_THREAD_LOCAL int t_main_ppu;       /* this host thread runs guest thread 1 (set at its flushes) */
+static __attribute__((noinline)) int prio_awaited_pop(mgr_state** pm, qjob* q)
+{
+    mgr_state* a = __atomic_load_n(&s_awaited, __ATOMIC_ACQUIRE);
+    if (!a || __atomic_load_n(&a->qh, __ATOMIC_ACQUIRE) == __atomic_load_n(&a->qt, __ATOMIC_ACQUIRE)) return 0;
+    AcquireSRWLockExclusive(&a->lock);
+    const int got = mq_pop_locked(a, q);
+    ReleaseSRWLockExclusive(&a->lock);
+    if (got) { *pm = a; __atomic_add_fetch(&s_prio_await_n, 1, __ATOMIC_RELAXED); }
+    return got;
+}
+static __attribute__((noinline)) void prio_await(mgr_state* m, int on)
+{
+    if (!t_main_ppu) return;
+    const int mode = prio_mode();
+    if (mode != 3 && mode != 4) return;
+    if (on) __atomic_store_n(&s_awaited, m, __ATOMIC_RELEASE);
+    else if (__atomic_load_n(&s_awaited, __ATOMIC_ACQUIRE) == m) __atomic_store_n(&s_awaited, NULL, __ATOMIC_RELEASE);
+}
+/* a flush: its class (the main PPU thread = guest thread id 1) */
+static __attribute__((noinline)) void prio_note_flush(mgr_state* m, uint64_t thread_id)
+{
+    const int mainppu = thread_id == 1;
+    t_main_ppu = mainppu;
+    if (m->main_flush != mainppu) {
+        m->main_flush = mainppu;
+        if (s_log) fprintf(stderr, "[jobs] manager %08X (module %d): flushed by PPU thread %llu -> %s class\n", m->ea,
+                           m->module, (unsigned long long)thread_id, mainppu ? "high" : "low");
+    }
 }
 
 static DWORD WINAPI pool_main(LPVOID arg)
 {
     const uint32_t idx = (uint32_t)(uintptr_t)arg;
     ps3_host_place_self(PS3_PLACE_SPU);
+#if defined(__linux__)
+    /* (deck-merge) host_place.c names SPU-role threads ps3-spu<n> in creation order (the SPURS workers too):
+     * the pool's own name, still in work/bench/budget.py's "ps3-spu" group, so perf / top tell them apart */
+    { char nm[16]; snprintf(nm, sizeof nm, "ps3-spuj%u", idx); pthread_setname_np(pthread_self(), nm); }
+#endif
+    t_jd_pool = 1;                    /* (ft1) PS3_JOBDELAY's `pool` */
+#ifdef SZ1_DIAG
+    t_ft_who = 1000u + idx; t_ft_src = 0;
+#endif
     wws_worker* w = wws_worker_create(idx % 6);
     mgr_state* last = NULL;
     for (;;) {
@@ -592,7 +933,9 @@ static DWORD WINAPI pool_main(LPVOID arg)
         mgr_state* m = NULL;
         qjob q;
         int got = 0;
-        if (last && s_sticky) {
+        const int pm = prio_mode();    /* (s1) PS3_NATIVE_JOBS_PRIO (default 0) */
+        if (pm == 3 || pm == 4) got = prio_awaited_pop(&m, &q);
+        if (!got && last && s_sticky && (!pm || prio_sticky_ok(last, pm))) {
             AcquireSRWLockExclusive(&last->lock);
             got = mq_pop_locked(last, &q);
             ReleaseSRWLockExclusive(&last->lock);
@@ -614,9 +957,22 @@ static SPU_THREAD_LOCAL wws_worker* t_helper;
 /* The waiter runs the manager's oldest queued job only if it needs it: a job of the array it waits on,
  * below the index it waits for (PS3_NATIVE_JOBS_HELP=1). Any other job would only delay it: a pool thread
  * runs it. The queue is in claim order, so its head is the lowest such index. */
+/* PS3_NATIVE_JOBS_HELP_PEEK (main1, default 1): look at the queue without the lock first. The waiter's spin calls
+ * this on every turn -- ~15,000 times a frame on the main thread in the city (street bench, LD_PRELOAD count of the
+ * pthread_rwlock calls: the main thread's 3.4% in pthread_rwlock_* were these) -- and each locked look took the
+ * manager's lock away from the pool threads that finish and claim its jobs. Head and tail only change under the lock;
+ * a stale look skips one turn or takes the lock for nothing, and the locked test below still decides. */
 static int help_one(mgr_state* m, uint32_t slot, uint32_t below)
 {
     if (!s_help) return 0;
+    if (s_help_peek) {
+        const uint32_t qh = __atomic_load_n(&m->qh, __ATOMIC_ACQUIRE), qt = __atomic_load_n(&m->qt, __ATOMIC_ACQUIRE);
+        if (qh == qt) return 0;
+        if (s_help < 2) {
+            const qjob* h = &m->q[qh % MQ_CAP];
+            if (__atomic_load_n(&h->slot, __ATOMIC_RELAXED) != slot || __atomic_load_n(&h->index, __ATOMIC_RELAXED) >= below) return 0;
+        }
+    }
     qjob q;
     int got = 0;
     AcquireSRWLockExclusive(&m->lock);
@@ -628,6 +984,9 @@ static int help_one(mgr_state* m, uint32_t slot, uint32_t below)
     if (!got) return 0;
     if (!t_helper) t_helper = wws_worker_create(5);
     const uint64_t t0 = s_stats ? now_ns() : 0;
+#ifdef SZ1_DIAG
+    t_ft_src = t_ft_hook == 4 ? 2u : 1u;
+#endif
     run_one(t_helper, 5, m, &q);
     if (s_stats) __atomic_add_fetch(&s_help_ns, now_ns() - t0, __ATOMIC_RELAXED);
     __atomic_add_fetch(&s_help_jobs, 1, __ATOMIC_RELAXED);
@@ -735,13 +1094,42 @@ static int heal(mgr_state* m, const char* where, uint32_t a, uint32_t b, uint64_
     return moved;
 }
 
+#ifdef SZ1_DIAG
+/* (main1) the waited-for entries at a wait's start: queued / running / not claimed (see FT_JOB_WAIT) */
+static uint32_t ft_wait_state(mgr_state* m, uint32_t s, uint32_t below)
+{
+    AcquireSRWLockExclusive(&m->lock);
+    const slot_state* ss = &m->s[s];
+    const uint32_t widx = G32(arr_hdr(m->ea, s) + ARR_WIDX);
+    const uint32_t lim = below < ss->claimed ? below : ss->claimed;
+    uint32_t nq = 0, nd = 0;
+    for (uint32_t i = m->qh; i != m->qt; i++) { const qjob* q = &m->q[i % MQ_CAP]; if (q->slot == s && q->index < lim) nq++; }
+    for (uint32_t i = ss->k; i < lim; i++) if (!ss->done[i]) nd++;
+    const uint32_t want = below == 0xFFFFFFFFu ? widx : below;
+    const uint32_t uncl = want > ss->claimed ? want - ss->claimed : 0;
+    const uint32_t blocked = m->blocked_cell != 0;
+    ReleaseSRWLockExclusive(&m->lock);
+    const uint32_t nr = nd > nq ? nd - nq : 0;
+    return (blocked << 5) | ((nq > 255 ? 255 : nq) << 8) | ((nr > 255 ? 255 : nr) << 16) | ((uncl > 255 ? 255 : uncl) << 24);
+}
+#endif
 static void wait_until(mgr_state* m, wait_pred p, uint32_t a, uint32_t b)
 {
     if (p(m, a, b)) return;
     const uint64_t t0 = s_stats ? now_ns() : 0;
     const uint64_t w0 = GetTickCount64();
     uint64_t next_warn = 2000, next_heal = 1000;
+#ifdef SZ1_DIAG
+    const int ft = ft_kind_on(FT_JOB_WAIT);
+    const uint64_t ft0 = ft ? ps3_ft_now() : 0;
+    t_ft_csrc = 1;
+#endif
+    prio_await(m, 1);                          /* (s1) PS3_NATIVE_JOBS_PRIO 3 / 4 (bench): a call, no branch here */
     claim(m);                                  /* entries kicked but not flushed yet */
+#ifdef SZ1_DIAG
+    const uint32_t below = p == pred_token ? b : 0xFFFFFFFFu;
+    const uint32_t fst = ft ? ft_wait_state(m, a & 1, below) : 0;
+#endif
     for (unsigned spin = 0; !p(m, a, b); spin++) {
         if (help_one(m, a, p == pred_token ? b : 0xFFFFFFFFu)) { spin = 0; continue; }
         if (spin < 4000) CPU_PAUSE();
@@ -762,7 +1150,13 @@ static void wait_until(mgr_state* m, wait_pred p, uint32_t a, uint32_t b)
             }
         }
     }
+    prio_await(m, 0);
     if (s_stats) { __atomic_add_fetch(&s_wait_ns, now_ns() - t0, __ATOMIC_RELAXED); __atomic_add_fetch(&s_waits, 1, __ATOMIC_RELAXED); }
+#ifdef SZ1_DIAG
+    if (ft) ps3_ft_span(FT_JOB_WAIT, t_ft_who, t_ft_hook | ((a & 1) << 4) | fst,
+                        (uint32_t)(m->module & 255) | ((below > 0xFFFFFFu ? 0xFFFFFFu : below) << 8), ft0, ps3_ft_now());
+    t_ft_csrc = 6;
+#endif
 }
 
 /* the token's array: by its sequence byte; -1 = an older generation (done) */
@@ -798,7 +1192,16 @@ static void hook_flush(ppu_context* ctx, ppu_hook_body body)
     mgr_state* m = mgr_get((uint32_t)ctx->gpr[3]);
     if (!m || !m->owned) { ppu_hook_call(ctx, body); return; }
     pool_start();
+#ifdef SZ1_DIAG
+    t_ft_who = (uint32_t)ctx->thread_id; t_ft_csrc = 0;
+#endif
+    kd_flush(m->module, 0);            /* (sz1) PS3_KICKDELAY `before` (bench only, default off) */
+    prio_note_flush(m, ctx->thread_id);   /* (s1) PS3_NATIVE_JOBS_PRIO's class: before the claim queues its tickets */
     claim(m);
+    kd_flush(m->module, 1);            /* (sz1) PS3_KICKDELAY `after` */
+#ifdef SZ1_DIAG
+    t_ft_csrc = 6;
+#endif
     ctx->gpr[3] = 0;                   /* CELL_OK */
 }
 
@@ -809,6 +1212,9 @@ static void hook_token_wait(ppu_context* ctx, ppu_hook_body body)
     mgr_state* m = owned(ea);
     if (!m) { ppu_hook_call(ctx, body); return; }
     const int s = token_slot(ea, tok);
+#ifdef SZ1_DIAG
+    t_ft_who = (uint32_t)ctx->thread_id; t_ft_hook = 0;
+#endif
     if (s >= 0) { wait_until(m, pred_token, (uint32_t)s, G16(tok + 2)); ctx->gpr[3] = 1; }
     vm_base[tok] = 0xFF;
 }
@@ -818,6 +1224,9 @@ static void hook_array_wait(ppu_context* ctx, ppu_hook_body body)
 {
     mgr_state* m = owned((uint32_t)ctx->gpr[3]);
     if (!m) { ppu_hook_call(ctx, body); return; }
+#ifdef SZ1_DIAG
+    t_ft_who = (uint32_t)ctx->thread_id; t_ft_hook = 1;
+#endif
     wait_until(m, pred_drained, (uint32_t)ctx->gpr[4] & 1, 0);
     ctx->gpr[3] = 1;
 }
@@ -830,8 +1239,14 @@ static void hook_arena_wait(ppu_context* ctx, ppu_hook_body body)
     mgr_state* m = owned(ea);
     if (!m) { ppu_hook_call(ctx, body); return; }
     const int s = token_slot(ea, tok);
+#ifdef SZ1_DIAG
+    t_ft_who = (uint32_t)ctx->thread_id; t_ft_hook = 2;
+#endif
     if (s >= 0) {
         wait_until(m, pred_token, (uint32_t)s, G16(tok + 2));
+#ifdef SZ1_DIAG
+        t_ft_hook = 3;
+#endif
         if (G8(tok + 1) == G8(ea + MGR_SEQ)) wait_until(m, pred_drained, (uint32_t)(s ^ 1), 0);
     }
     vm_base[tok] = 0xFF;
@@ -844,20 +1259,55 @@ static void hook_arena_wait(ppu_context* ctx, ppu_hook_body body)
  * the PS3 a policy module still polling the workload picks such an entry up; with publish-at-flush alone the
  * job waited for the next flush, about a frame, and the main thread waited for the kicker at 0x350CE0).
  * Then it runs the asked-for job on the calling thread if it is queued. */
+#ifdef SZ1_DIAG
+/* (main1) FT_JOB_WAIT of the token tests: the polls of one thread on one token, from the first "not yet" to
+ * the answer "done" (or to a poll of another token / a gap of more than 2 ms), as one span */
+static SPU_THREAD_LOCAL struct { uint64_t t0, t1; uint32_t tok, a, b, n; } t_tt;
+static void ft_tt_flush(void)
+{
+    if (t_tt.n) ps3_ft_span(FT_JOB_WAIT, t_ft_who, t_tt.a, t_tt.b, t_tt.t0, t_tt.t1);
+    t_tt.n = 0;
+}
+#endif
 static void hook_token_test(ppu_context* ctx, ppu_hook_body body)
 {
     const uint32_t ea = (uint32_t)ctx->gpr[3], tok = (uint32_t)ctx->gpr[4];
     mgr_state* m = owned(ea);
     if (!m) { ppu_hook_call(ctx, body); return; }
     const int s = token_slot(ea, tok);
+#ifdef SZ1_DIAG
+    const int ft = ft_kind_on(FT_JOB_WAIT);
+    if (ft && t_tt.n && t_tt.tok == tok) { t_tt.t1 = ps3_ft_now(); }
+    if (s < 0) { if (ft && t_tt.n && t_tt.tok == tok) ft_tt_flush(); ctx->gpr[3] = 1; return; }
+    const uint32_t t = G16(tok + 2);
+    if (words_min(ea, (uint32_t)s) >= t) { if (ft && t_tt.n && t_tt.tok == tok) ft_tt_flush(); ctx->gpr[3] = 1; prio_await(m, 0); return; }
+    t_ft_who = (uint32_t)ctx->thread_id; t_ft_hook = 4; t_ft_csrc = 2;
+    if (ft) {
+        const uint64_t now = ps3_ft_now();
+        if (t_tt.n && (t_tt.tok != tok || now - t_tt.t1 > 2000000ull)) ft_tt_flush();
+        if (!t_tt.n) {
+            claim(m);
+            t_tt.t0 = now; t_tt.tok = tok;
+            t_tt.a = 4u | ((uint32_t)(s & 1) << 4) | ft_wait_state(m, (uint32_t)s, t);
+            t_tt.b = (uint32_t)(m->module & 255) | ((t > 0xFFFFFFu ? 0xFFFFFFu : t) << 8);
+        }
+        t_tt.n++;
+    }
+#else
     if (s < 0) { ctx->gpr[3] = 1; return; }
     const uint32_t t = G16(tok + 2);
-    if (words_min(ea, (uint32_t)s) >= t) { ctx->gpr[3] = 1; return; }
+    if (words_min(ea, (uint32_t)s) >= t) { ctx->gpr[3] = 1; prio_await(m, 0); return; }
+#endif
     claim(m);
     if (help_one(m, (uint32_t)s, t)) __atomic_add_fetch(&s_test_help, 1, __ATOMIC_RELAXED);
     else for (int i = 0; i < 64; i++) CPU_PAUSE();
     const int done = words_min(ea, (uint32_t)s) >= t;
     ctx->gpr[3] = done ? 1 : 0;
+    prio_await(m, !done);              /* (s1) PS3_NATIVE_JOBS_PRIO 3 / 4 (bench) */
+#ifdef SZ1_DIAG
+    t_ft_csrc = 6;
+    if (ft) { t_tt.t1 = ps3_ft_now(); if (done) ft_tt_flush(); }
+#endif
     /* the callers that poll this test never reach wait_until: their stall clock. It runs while tests of this
      * manager say "not yet" with nothing of it queued or running; a job or a finished test restarts it. */
     if (done || m->qh != m->qt || __atomic_load_n(&m->running, __ATOMIC_RELAXED)) { if (m->idle_since) m->idle_since = 0; }
@@ -886,6 +1336,10 @@ static void dlogic_help(uint32_t ea, uint32_t tok)
     if (!got) { inf2_dlogic_help_left++; return; }
     if (!t_helper) t_helper = wws_worker_create(5);
     const uint64_t t0 = now_ns();
+#ifdef SZ1_DIAG
+    { extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;   /* the world tick's PPU thread (the main thread) */
+      t_ft_src = 3; if (g_active_ctx) t_ft_who = (uint32_t)g_active_ctx->thread_id; }
+#endif
     run_one(t_helper, 5, m, &q);
     inf2_dlogic_help_ns += now_ns() - t0;
     inf2_dlogic_help_jobs++;
@@ -944,6 +1398,24 @@ static DWORD WINAPI stats_main(LPVOID arg)
             }
             fprintf(stderr, "[jobs] health: deepest queue %u, managers at a barrier > 2 s %u, warnings", qmax, blocked);
             for (int k = 0; k < W_N; k++) fprintf(stderr, " %s %ld%s", s_warn_name[k], s_warn_n[k], k + 1 < W_N ? "," : "\n");
+        }
+        {   /* (s1) PS3_NATIVE_JOBS_PRIO: low-class tickets taken, of them by the age limit, the longest low wait in the
+             * period, sticky picks given up for the high class, jobs taken as the awaited manager's (modes 3 / 4) */
+            static uint64_t ll, la, ly, lw;
+            const uint64_t lo = s_prio_low_n, ag = s_prio_aged_n, yi = s_prio_yield_n, aw = s_prio_await_n;
+            const uint64_t mx = __atomic_exchange_n(&s_prio_wait_max, 0, __ATOMIC_ACQ_REL);
+            const long nm = __atomic_load_n(&s_nmgr, __ATOMIC_ACQUIRE);
+            if (prio_mode() || lo != ll) {
+                fprintf(stderr, "[jobs] prio mode %d: low-class jobs %llu/s (by the age limit %llu/s), longest low wait %.2f ms,"
+                        " sticky yields %llu/s, awaited picks %llu/s; low:", prio_mode(), (unsigned long long)((lo - ll) / P),
+                        (unsigned long long)((ag - la) / P), (double)mx / 1e6, (unsigned long long)((yi - ly) / P),
+                        (unsigned long long)((aw - lw) / P));
+                for (long i = 0; i < nm; i++)
+                    if (s_mgr[i]->owned && prio_ring(s_mgr[i], prio_mode()))
+                        fprintf(stderr, " %d (%.0f us a job)", s_mgr[i]->module, (double)s_mgr[i]->job_ns / 1e3);
+                fprintf(stderr, "\n");
+            }
+            ll = lo; la = ag; ly = yi; lw = aw;
         }
         {   /* PS3_NATIVE_JOBS_VERIFY: the lifted policy module staged the same jobs on a copy */
             uint64_t v, bad; wws_native_verify_stats(&v, &bad);

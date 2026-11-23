@@ -577,6 +577,33 @@ static void rsx_u8n_init(void)
 
 /* 1 = the slot was filled, 0 = it has no fast form here (the caller runs the
  * ordinary loop). Never fails a draw: a fast form only reads a stable span. */
+#if defined(__SSE4_1__)
+#include <smmintrin.h>
+#include <tmmintrin.h>
+static int s_vtx_regs = -1;
+static inline int rsx_vtx_regs_on(void)
+{
+    if (__builtin_expect(s_vtx_regs < 0, 0)) { const char* e = getenv("PS3RECOMP_VTX_REGS"); s_vtx_regs = !(e && e[0] == '0'); }
+    return s_vtx_regs;
+}
+static inline u64 rsx_ld64(const u8* p) { u64 v; memcpy(&v, p, 8); return v; }
+static inline u32 rsx_ld32(const u8* p) { u32 v; memcpy(&v, p, 4); return v; }
+/* the n bytes at p (n = 1..16, only these read) in the low bytes of a vector, the rest 0 */
+static inline __m128i rsx_ld_n(const u8* p, u32 n)
+{
+    switch (n) {
+    case 16: return _mm_loadu_si128((const __m128i*)p);
+    case 12: return _mm_insert_epi32(_mm_cvtsi64_si128((long long)rsx_ld64(p)), (int)rsx_ld32(p + 8), 2);
+    case 8:  return _mm_cvtsi64_si128((long long)rsx_ld64(p));
+    case 6:  { u16 t; memcpy(&t, p + 4, 2); return _mm_cvtsi64_si128((long long)((u64)rsx_ld32(p) | (u64)t << 32)); }
+    case 4:  return _mm_cvtsi32_si128((int)rsx_ld32(p));
+    case 3:  return _mm_cvtsi32_si128((int)((u32)p[0] | (u32)p[1] << 8 | (u32)p[2] << 16));
+    case 2:  { u16 t; memcpy(&t, p, 2); return _mm_cvtsi32_si128((int)t); }
+    case 1:  return _mm_cvtsi32_si128((int)p[0]);
+    default: { u8 b[16] = { 0 }; memcpy(b, p, n < 16 ? n : 16); return _mm_loadu_si128((const __m128i*)b); }
+    }
+}
+#endif
 static int rsx_vertex_fetch_slot_fast(
     const rsx_vertex_fetch_plan* plan, u32 slot, u32 e0, u32 count, u8* out)
 {
@@ -589,6 +616,72 @@ static int rsx_vertex_fetch_slot_fast(
         return 0;
     const u32 sstride = fetch->stride;
     const u8* const base = fetch->stable_base + (u64)(e0 - fetch->stable_first) * sstride;
+#if defined(__SSE4_1__)
+    /* (deck) The vertex in registers: the forms below built it in a 16-byte stack array of four
+     * separate words and stored it with one 16-byte copy -- a load the four word stores cannot
+     * forward to, a store-forwarding stall per vertex (~40% of this function on the Deck, user
+     * settings plaza). Same values: each lane is computed as the loop's expression for that lane
+     * (half: e == 0 -> the sign, e == 31 -> Inf / NaN bits, else the rebias; unorm8: the same table;
+     * the integer types: the same int -> float conversions), lanes past `size` 0, lane 3 1.0f below 4
+     * components. Only the attribute's own bytes are read. PS3RECOMP_VTX_REGS=0: the stack forms. */
+    if (rsx_vtx_regs_on() && size <= 4 &&
+        (type == RSX_VTX_TYPE_FLOAT || type == RSX_VTX_TYPE_HALF || type == RSX_VTX_TYPE_UNORM8 ||
+         type == RSX_VTX_TYPE_UINT8 || type == RSX_VTX_TYPE_SINT16 || type == RSX_VTX_TYPE_SNORM16)) {
+        const __m128i one_w = _mm_setr_epi32(0, 0, 0, size < 4 ? 0x3F800000 : 0);
+        const __m128i be32 = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+        const __m128i be16 = _mm_setr_epi8(1, 0, -1, -1, 3, 2, -1, -1, 5, 4, -1, -1, 7, 6, -1, -1);
+        if (type == RSX_VTX_TYPE_FLOAT) {
+            RSX_FAST_LOOP({
+                __m128i v;
+                if (size == 3) v = _mm_insert_epi32(_mm_cvtsi64_si128((long long)rsx_ld64(src)), (int)rsx_ld32(src + 8), 2);
+                else v = rsx_ld_n(src, size * 4u);
+                _mm_storeu_si128((__m128i*)vo, _mm_or_si128(_mm_shuffle_epi8(v, be32), one_w));
+            })
+            return 1;
+        }
+        if (type == RSX_VTX_TYPE_HALF) {
+            const __m128i k7fff = _mm_set1_epi32(0x7FFF), k7c00 = _mm_set1_epi32(0x7C00);
+            const __m128i bias = _mm_set1_epi32(112 << 23), binf = _mm_set1_epi32(0x70000000);
+            RSX_FAST_LOOP({
+                const __m128i h = _mm_shuffle_epi8(rsx_ld_n(src, size * 2u), be16);
+                const __m128i t = _mm_slli_epi32(_mm_and_si128(h, k7fff), 13);
+                const __m128i e = _mm_and_si128(h, k7c00);
+                __m128i r = _mm_blendv_epi8(_mm_add_epi32(t, bias), _mm_add_epi32(t, binf), _mm_cmpeq_epi32(e, k7c00));
+                r = _mm_andnot_si128(_mm_cmpeq_epi32(e, _mm_setzero_si128()), r);
+                r = _mm_or_si128(r, _mm_slli_epi32(_mm_srli_epi32(h, 15), 31));
+                _mm_storeu_si128((__m128i*)vo, _mm_or_si128(r, one_w));
+            })
+            return 1;
+        }
+        if (type == RSX_VTX_TYPE_UNORM8) {
+            if (!s_u8n_ready) rsx_u8n_init();
+            const float* T = s_u8n_tab;
+            RSX_FAST_LOOP({
+                const __m128 f = _mm_setr_ps(T[src[0]], size > 1 ? T[src[1]] : 0.0f, size > 2 ? T[src[2]] : 0.0f,
+                                             size > 3 ? T[src[3]] : 1.0f);
+                _mm_storeu_ps((float*)vo, f);
+            })
+            return 1;
+        }
+        if (type == RSX_VTX_TYPE_UINT8) {
+            RSX_FAST_LOOP({
+                const __m128 f = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(rsx_ld_n(src, size)));
+                _mm_storeu_si128((__m128i*)vo, _mm_or_si128(_mm_castps_si128(f), one_w));
+            })
+            return 1;
+        }
+        /* SINT16 (float of the value) and SNORM16 (that / 32767) */
+        const int snorm = type == RSX_VTX_TYPE_SNORM16;
+        const __m128 d = _mm_set1_ps(32767.0f);
+        RSX_FAST_LOOP({
+            const __m128i h = _mm_shuffle_epi8(rsx_ld_n(src, size * 2u), be16);
+            __m128 f = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_slli_epi32(h, 16), 16));
+            if (snorm) f = _mm_div_ps(f, d);
+            _mm_storeu_si128((__m128i*)vo, _mm_or_si128(_mm_castps_si128(f), one_w));
+        })
+        return 1;
+    }
+#endif
     if (type == RSX_VTX_TYPE_FLOAT && size <= 4) {
         if (size == 3) {
             RSX_FAST_LOOP({
@@ -718,13 +811,16 @@ int rsx_vertex_remap_build_range(
     if (!remap || !refs || !count || !out_count)
         return 0;
     const u32 base = refs[0].base_index;
-    u32 lo = refs[0].vertex_id, hi = lo;
+    u32 lo = refs[0].vertex_id, hi = lo, other = 0;
+    /* (deck) one pass without an exit (it vectorises: ~75% of this function was the scalar loop); a
+     * different base index anywhere still returns 0, as the early exit did -- the loop writes nothing */
     for (u32 i = 1; i < count; i++) {
         const u32 v = refs[i].vertex_id;
-        if (refs[i].base_index != base) return 0;
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
+        other |= refs[i].base_index ^ base;
+        lo = v < lo ? v : lo;
+        hi = v > hi ? v : hi;
     }
+    if (other) return 0;
     const u64 span = (u64)hi - lo + 1u;
     if (span > count)
         return 0;

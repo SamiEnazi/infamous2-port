@@ -20,6 +20,7 @@
 #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
 #include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline */
 #include "../../include/ps3emu/ps3_toggles.h" /* GCM_STALL_GAP_MS, live */
+#include "../../include/ps3emu/ps3_liveab.h"  /* (ft1) PS3_LIVEAB: the in-run A/B (bench only) */
 #include "gcm_fifo_decode.h"                   /* JUMP forms */
 #include "../../runtime/platform/host_place.h" /* PS3_CPU_PLACE: the draining thread's cores */
 #include "rsx_split.h"                         /* (rsx-par) PS3RECOMP_RSX_SPLIT */
@@ -3461,8 +3462,61 @@ u32 cellGcm_display_buffer_count(void)
     return n;
 }
 
+/* (deck) PS3_DBG_FLIP_DELAY_US=<us>: a busy wait of that long in every flip request (the guest's PPU thread that
+ * ends the frame); PS3_DBG_PRESENT_DELAY_US (rsx_vulkan_backend.c) the same on the RSX thread at each present.
+ * A causal test: the thread whose delay lowers the frame rate is on the critical path. */
+void gcm_dbg_spin(const char* name, int* us)
+{
+    if (__builtin_expect(*us < 0, 0)) {
+        const char* e = getenv(name); *us = e ? atoi(e) : 0;
+        if (*us > 0) fprintf(stderr, "[dbg] %s=%d: busy wait per flip\n", name, *us);
+    }
+    if (*us <= 0) return;
+    extern unsigned long long ps3_ms_now(void);
+    struct timespec t0, t; clock_gettime(CLOCK_MONOTONIC, &t0);
+    do { __builtin_ia32_pause(); clock_gettime(CLOCK_MONOTONIC, &t); }
+    while ((t.tv_sec - t0.tv_sec) * 1000000ll + (t.tv_nsec - t0.tv_nsec) / 1000 < *us);
+}
+/* PS3_DBG_FLIP_DELAY_US; (ft1) PS3_LIVEAB's value when it sets one. Its own function: gcm_flip_request keeps its PGO profile. */
+/* (sz1) PS3_DBG_FLIP_DELAY_KIND=mwait: the same delay as MONITORX/MWAITX (ps3_dbgdelay.h: waits in C0 without issuing
+ * work, so it draws next to no power), and a first-delay line that names the thread (the main thread = the process
+ * thread, tid == pid?). PS3_LIVEAB counts each delay in g_ps3_liveab_ev. */
+#include "../../include/ps3emu/ps3_dbgdelay.h"
+#if defined(__linux__)
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+static __attribute__((noinline)) void gcm_dbg_flip_delay_mw(int us)
+{
+    static int said;
+    if (!said) {
+        said = 1;
+#if defined(__linux__)
+        const long tid = syscall(SYS_gettid);
+        fprintf(stderr, "[dbg] flip delay %d us (MWAITX) on tid %ld (%s)\n", us, tid, tid == getpid() ? "the main thread" : "NOT the main thread");
+#endif
+    }
+    extern volatile unsigned long long g_ps3_liveab_ev;
+    __atomic_add_fetch(&g_ps3_liveab_ev, 1, __ATOMIC_RELAXED);
+    ps3_dbg_wait_ns((uint64_t)us * 1000ull, 0);
+}
+static __attribute__((noinline)) void gcm_dbg_flip_delay(void)
+{
+    static int us = -1, mw = -1;
+    int lab = g_ps3_lab[PS3_LAB_FLIP_DELAY];
+    if (__builtin_expect(mw < 0, 0)) { const char* k = getenv("PS3_DBG_FLIP_DELAY_KIND"); mw = k && !strcmp(k, "mwait"); }
+    if (mw) {
+        if (us < 0) { const char* e = getenv("PS3_DBG_FLIP_DELAY_US"); us = e ? atoi(e) : 0; }
+        const int v = lab >= 0 ? lab : us;
+        if (v > 0) gcm_dbg_flip_delay_mw(v);
+        return;
+    }
+    gcm_dbg_spin("PS3_DBG_FLIP_DELAY_US", lab >= 0 ? &lab : &us);
+}
 static s32 gcm_flip_request(u32 bufferId, int in_fifo)
 {
+    gcm_dbg_flip_delay();             /* both kinds: the guest's PPU thread */
+    { extern void ppu_timebase_frame_tick(void); ppu_timebase_frame_tick(); }   /* (deck) PS3_TB_FRAMESTEP_US */
     /* GCM_FLIPCOUNT=1: every flip, with a timestamp. FLIP_DBG caps at 20 lines,
      * which answers "did it ever flip?" and not "is it still flipping, and how
      * fast?" -- the question that matters when a title stops appearing on

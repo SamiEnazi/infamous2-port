@@ -38,6 +38,16 @@ computes -- only the order and number of tests change.
                     keeps the page-map test and its re-check; one the map does not clear calls
                     ppu_lean_st<N> (the careful path, out of line). The runtime's guard pages and
                     live gcm ref word replace the tests (runtime/ppu/ppu_loader.cpp, see _LEAN_NOTE).
+  PPU_ST_CMPB=1     (cg1, 2026-11-20; needs PPU_ST_PMAP) the page-map test (and re-check) of a store
+                    as one `cmpb $1, (map, page)` instead of a load, a compare and the branch: two
+                    instructions less per store, the same byte read at the same point (see _ST_CMPB).
+  PPU_ST_RUNS=1     (cg1, 2026-11-20; needs PPU_ST_PMAP and PPU_MOVBE) three or more stores off one
+                    register in straight-line code (a prologue's register saves, a structure's
+                    fields) take one page test and one re-check for the run instead of one each;
+                    the stretch is emitted twice, the careful copy for a run whose pages are not
+                    fast (see store_runs). PPU_ST_RUN_MIN=<n>: the shortest run (default 3);
+                    PPU_ST_RUNS_VERIFY=1: the check lift (each grouped store compares its own
+                    address with the run's and its page with the map: ppu_run_bad reports).
   PPU_DRAIN_NONE=1  (track A; needs PPU_XTAIL) no trampoline drain after any call: no function of an
                     XTAIL lift returns with the trampoline set, and the runtime drains what an
                     import (ps3_hle_call) or an indirect call leaves before it returns.
@@ -303,6 +313,284 @@ _TAKE_LEAN = """static inline ppu_mm ppu_mm_take(void)
 """
 
 
+# PPU_ST_CMPB=1 (agent cg1, 2026-11-20; needs PPU_ST_PMAP): the page-map test of a store (and of its
+# re-check) as ONE instruction, `cmpb $1, (map, page)` + the branch, instead of a byte load, a compare
+# and the branch. Clang does not fold an atomic (or volatile) load into a compare, so each of the
+# ~400,000 store sites of the lift carried two extra instructions (and ~4 bytes); on the main thread
+# the page-map tests are ~11 % of the lifted code's instructions. The asm reads the same byte at the
+# same point as the relaxed atomic load did (an asm goto is volatile: never merged, hoisted or
+# dropped; the "m" operand orders it like a load of the map against the store and the signal fence
+# around it), so the store protocol is unchanged. Other targets / compilers: the old form.
+_ST_CMPB = r"""
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__clang__) || defined(__GNUC__))
+/* PPU_ST_CMPB (cg1): the page byte compared in memory, one instruction (see ppu_fastpath.py) */
+static inline __attribute__((always_inline)) int vm_pm_fast(uint32_t ea)
+{
+    __asm__ goto("cmpb $1, (%0,%q1)\n\tjne %l[no]" : : "r"(g_ppu_st_pmap), "r"((uint64_t)(ea >> 12)),
+                 "m"(*(const unsigned char (*)[1u << 20])g_ppu_st_pmap) : "cc" : no);
+    return 1;
+no:
+    return 0;
+}
+#else
+static inline int vm_pm_fast(uint32_t ea)
+{
+    return __atomic_load_n(&g_ppu_st_pmap[ea >> 12], __ATOMIC_RELAXED) == 1u;
+}
+#endif
+"""
+
+
+# --- PPU_ST_RUNS (agent cg1, 2026-11-20) ------------------------------------------------------------
+# One page test for a run of stores off one register. Where three or more lifted stores off one guest
+# register (r1 in a prologue's register saves, a structure's fields) follow one another in straight-line
+# code -- no label, branch, call or return between them, the register unchanged or moved by constants --
+# the stretch of lines from the first to the last is emitted twice:
+#     { const uint32_t _sre = (uint32_t)(rB + lo); uint8_t* const _srp = _mm.vb + _sre;
+#       if (both end pages of [_sre, _sre + span) are fast pages) { the lines, each run store a plain
+#           byte-swapped store at _srp + offset; then the fence and ONE re-check of the two pages: if
+#           either went slow meanwhile, ppu_store_pm_recheck() for every store of the run, in order }
+#       else { the lines as they were } }
+# span <= 4096, so the two end pages are all the pages the run touches; a fast page (map byte 1) is in the
+# inline range, so no address wraps. The protocol is the per-store one stretched over the run: every store
+# of the run follows the page test and precedes the re-check, and a map byte only ever changes from 1 to
+# "careful" (a line's first reservation), so a store either ran before the reserver's process barrier
+# (visible to its snapshot) or the re-check after it sees the page's bit and the line's own bit decides
+# (ppu_store_pm_recheck, as before). As with the per-store form, a store that raced a page's first
+# reservation may break that reservation needlessly (allowed: a reservation may always be lost); the
+# window is the run's length instead of one store's. The careful copy runs whenever a page of the run is
+# not fast at its start. PPU_ST_RUN_MIN=<n>: the shortest run (default 3).
+import os as _os
+import re as _re
+
+_SR_MACROS = r"""
+/* PPU_ST_RUNS (cg1): one page test for a run of stores off one register (see ppu_fastpath.py) */
+#define PPU_SRUN_OK(e, span) (vm_pm_fast(e) && vm_pm_fast((uint32_t)((e) + (span) - 1u)))
+#define PPU_SRW8(p, o, v)  (*(volatile uint8_t*)((p) + (o)) = (uint8_t)(v))
+#define PPU_SRW16(p, o, v) (*(volatile ppu_u16u*)((p) + (o)) = __builtin_bswap16((uint16_t)(v)))
+#define PPU_SRW32(p, o, v) (*(volatile ppu_u32u*)((p) + (o)) = __builtin_bswap32((uint32_t)(v)))
+#define PPU_SRW64(p, o, v) (*(volatile ppu_u64u*)((p) + (o)) = __builtin_bswap64((uint64_t)(v)))
+#define PPU_SRC(e, o, n) ppu_store_pm_recheck((uint32_t)((e) + (o)), (n));
+#ifdef PPU_ST_RUNS_VERIFY   /* the check lift: each grouped store's own address against the run's */
+#ifdef __cplusplus
+extern "C"
+#endif
+void ppu_run_bad(uint32_t ea, uint32_t n);
+#define PPU_SRV(e, o, a, n) do { if ((uint32_t)(a) != (uint32_t)((e) + (o)) || !vm_pm_fast((uint32_t)(a))) \
+    ppu_run_bad((uint32_t)(a), (n)); } while (0)
+#else
+#define PPU_SRV(e, o, a, n) ((void)0)
+#endif
+#define PPU_SRUN_END(e, span, RC) do { __atomic_signal_fence(__ATOMIC_SEQ_CST); \
+    if (__builtin_expect(!PPU_SRUN_OK(e, span), 0)) { RC } } while (0)
+"""
+
+_SR_KW = _re.compile(r"\b(if|else|goto|return|switch|case|default|for|while|do|break|continue)\b")
+# calls that leave the straight line or touch reservations / ordering: never inside a run
+_SR_BAD = _re.compile(r"\b(\w*func_[0-9A-Fa-f]+|ps3_\w+|lv2_\w+|ppu_icall\w*|DRAIN_TRAMPOLINE|PPU_TAIL\w*|"
+                      r"g_trampoline_fn|ppu_hle\w*|\w*(?:lwarx|ldarx|stwcx|stdcx|resv|reserve)\w*|ppu_hook\w*|"
+                      r"ppu_native\w*|g_ppu_patch\w*|PPU_FENCE|\w*thread_fence|\w*sync\w*|\w*eieio\w*|"
+                      r"setjmp|longjmp|abort|exit)\b")
+_SR_DECL0 = _re.compile(r"^(const\s+)?(u?int(8|16|32|64)_t|double|float|ppu_vr|__m128\w*|__m256\w*|auto|"
+                        r"PPU_RUN_VARS)\b")
+_SR_STORE = _re.compile(r"^vm_write(8|16|32|64)\(")
+_SR_BASE = _re.compile(r"^(r\d+)(?:\s*\+\s*(-?0x[0-9A-Fa-f]+|-?\d+))?$")
+_SR_ADJ = _re.compile(r"^(r\d+)\s*(\+=|-=)\s*\(?(?:\(int64_t\))?\(?(-?0x[0-9A-Fa-f]+|-?\d+)\)?\)?$")
+_SR_GSET = _re.compile(r"(?<![\w>.\]])(r\d+)\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)|(?:\+\+|--)\s*(r\d+)\b|\b(r\d+)\s*(?:\+\+|--)|&\s*(r\d+)\b")
+
+
+def _sr_split(line):
+    """The top-level statements of one line, or None for something this pass does not take apart."""
+    out, cur, dp, db = [], [], 0, 0
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch == '/' and line.startswith('/*', i):
+            j = line.find('*/', i + 2)
+            if j < 0: return None
+            i = j + 2; continue
+        if ch in '"\'': return None
+        cur.append(ch)
+        if ch == '(': dp += 1
+        elif ch == ')': dp -= 1
+        elif ch == '{': db += 1
+        elif ch == '}':
+            db -= 1
+            if db == 0 and dp == 0:
+                out.append(''.join(cur).strip()); cur = []
+        elif ch == ';' and dp == 0 and db == 0:
+            out.append(''.join(cur).strip()); cur = []
+        if dp < 0 or db < 0: return None
+        i += 1
+    if dp or db: return None
+    rest = ''.join(cur).strip()
+    if rest: return None              # a label, or text this pass does not know
+    return [s for s in out if s and s != ';']
+
+
+def _sr_args(s, i):
+    """(args, end): the top-level comma-separated arguments of the call whose '(' is at s[i]."""
+    dp, cur, args = 0, [], []
+    for j in range(i, len(s)):
+        ch = s[j]
+        if ch == '(':
+            dp += 1
+            if dp == 1: continue
+        elif ch == ')':
+            dp -= 1
+            if dp == 0:
+                args.append(''.join(cur).strip()); return args, j
+        elif ch == ',' and dp == 1:
+            args.append(''.join(cur).strip()); cur = []; continue
+        cur.append(ch)
+    return None, -1
+
+
+def _sr_gsets(t):
+    """The GPR locals a statement may assign (or take the address of)."""
+    out = set()
+    for m in _SR_GSET.finditer(t):
+        out.add(m.group(1) or m.group(2) or m.group(3) or m.group(4))
+    return out
+
+
+def _sr_stmt(st, depth=0):
+    """('store', width, base, off, value) | ('adj', reg, delta) | ('set', regs) | None (a barrier)."""
+    t = st.strip()
+    if t.endswith(';'): t = t[:-1].strip()
+    if not t or t == '/* nop */': return ('set', set())
+    if _SR_KW.search(t) or _SR_BAD.search(t): return None
+    if t.startswith('{') and t.endswith('}'):
+        inner = _sr_split(t[1:-1])
+        if inner is None: return None
+        regs = set()
+        for x in inner:
+            k = _sr_stmt(x, depth + 1)
+            if k is None: return None
+            if k[0] == 'set': regs |= k[1]
+            elif k[0] == 'adj': regs.add(k[1])
+        return ('set', regs | _sr_gsets(t))
+    if _SR_DECL0.match(t):
+        return ('set', _sr_gsets(t)) if depth else None     # a declaration: only inside a block
+    m = _SR_STORE.match(t)
+    if m and depth == 0:
+        args, end = _sr_args(t, t.index('('))
+        if args is not None and len(args) == 2 and not t[end + 1:].strip():
+            b = _SR_BASE.match(args[0])
+            if b and not _sr_gsets(t):
+                return ('store', int(m.group(1)), b.group(1), int(b.group(2) or '0', 0), args[1])
+    m = _SR_ADJ.match(t)
+    if m:
+        return ('adj', m.group(1), int(m.group(3), 0) * (1 if m.group(2) == '+=' else -1))
+    return ('set', _sr_gsets(t))
+
+
+_SR_VERIFY = _os.environ.get("PPU_ST_RUNS_VERIFY", "0") not in ("0", "")
+
+
+def store_runs(lines, stats=None):
+    """A chunk's function lines with PPU_ST_RUNS applied."""
+    run_min = int(_os.environ.get("PPU_ST_RUN_MIN", "3"))
+    out = []
+    i, n = 0, len(lines)
+    in_fn = False
+    while i < n:
+        ln = lines[i]
+        if not in_fn:
+            out.append(ln)
+            if ln.startswith("void ") and ln.rstrip().endswith("{") and "(ppu_context* ctx)" in ln:
+                in_fn = True
+            i += 1; continue
+        if ln.startswith("}"):
+            in_fn = False; out.append(ln); i += 1; continue
+        # scan a stretch of whitelisted lines from i
+        info = []
+        j = i
+        while j < n and not lines[j].startswith("}"):
+            sts = _sr_split(lines[j])
+            ks = [(_sr_stmt(s)) for s in sts] if sts is not None else None
+            if ks is None or any(k is None for k in ks): break
+            info.append(ks); j += 1
+        if not info:
+            out.append(ln); i += 1; continue
+        # runs inside lines[i:j]: per base register, members with offsets relative to the base's value at the
+        # start of the run's first line
+        runs = []                      # (first line, last line, base, [(line, stmt index, width, rel off)])
+        open_ = {}                     # base -> dict(first, members, delta, line_delta_ok)
+        def close(b):
+            r = open_.pop(b, None)
+            if r and len(r['m']) >= run_min:
+                lo = min(o for _l, _s, w, o in r['m']); hi = max(o + w // 8 for _l, _s, w, o in r['m'])
+                if hi - lo <= 4096:
+                    runs.append((r['first'], r['m'][-1][0], b, r['m'], lo, hi))
+        for li, ks in enumerate(info):
+            for si, k in enumerate(ks):
+                if k[0] == 'store':
+                    _, w, b, off, _v = k
+                    r = open_.get(b)
+                    if r is None:
+                        # start: only where nothing earlier on this line moves b
+                        if any((kk[0] == 'set' and b in kk[1]) or (kk[0] == 'adj' and kk[1] == b) for kk in ks[:si]):
+                            continue
+                        r = open_[b] = {'first': li, 'm': [], 'd': 0}
+                    r['m'].append((li, si, w, off + r['d']))
+                elif k[0] == 'adj':
+                    if k[1] in open_: open_[k[1]]['d'] += k[2]
+                elif k[0] == 'set':
+                    for reg in k[1]:
+                        if reg in open_: close(reg)
+        for b in list(open_): close(b)
+        if not runs:
+            out.extend(lines[i:j]); i = j; continue
+        # runs may overlap in lines (two bases): take them first come, non-overlapping
+        runs.sort(key=lambda r: (r[0], r[1]))
+        chosen, last = [], -1
+        for r in runs:
+            if r[0] > last:
+                chosen.append(r); last = r[1]
+        pos = 0
+        for (fl, ll, b, mem, lo, hi) in chosen:
+            out.extend(lines[i + pos:i + fl])
+            span = hi - lo
+            memset = {(l, s): (w, o) for l, s, w, o in mem}
+            fast = []
+            for l in range(fl, ll + 1):
+                sts = _sr_split(lines[i + l]); parts = []
+                for si, s in enumerate(sts):
+                    if (l, si) in memset:
+                        w, o = memset[(l, si)]
+                        k = info[l][si]
+                        if _SR_VERIFY:
+                            parts.append("PPU_SRV(_sre, 0x%X, %s, %d);" % (o - lo, _sr_args(lines[i + l].strip() and s, s.index('('))[0][0], w // 8))
+                        parts.append("PPU_SRW%d(_srp, 0x%X, %s);" % (w, o - lo, k[4]))
+                    else:
+                        parts.append(s if s.endswith('}') or s.endswith(';') else s + ';')
+                fast.append("        " + " ".join(parts))
+            rc = " ".join("PPU_SRC(_sre, 0x%X, %d)" % (o - lo, w // 8) for _l, _s, w, o in mem)
+            ea = "%s + %d" % (b, lo) if lo >= 0 else "%s - %d" % (b, -lo)
+            out.append("        { const uint32_t _sre = (uint32_t)(%s); uint8_t* const _srp = _mm.vb + _sre; (void)_srp;" % ea)
+            out.append("        if (__builtin_expect(PPU_SRUN_OK(_sre, %du), 1)) {   /* PPU_ST_RUNS: %d stores off %s */" % (span, len(mem), b))
+            out.extend(fast)
+            out.append("        PPU_SRUN_END(_sre, %du, %s);" % (span, rc))
+            out.append("        } else {")
+            out.extend(lines[i + fl:i + ll + 1])
+            out.append("        } }")
+            pos = ll + 1
+            if stats is not None:
+                stats["st_runs"] = stats.get("st_runs", 0) + 1
+                stats["st_run_stores"] = stats.get("st_run_stores", 0) + len(mem)
+        out.extend(lines[i + pos:j])
+        i = j
+    return out
+
+
+def _sr_inl() -> str:
+    """PPU_ST_RUNS: the accessors always inline. A run's careful copy is cold (the run's test is expected to
+    pass), and clang does not inline into cold code: an accessor called there takes &_mm, which then lives in
+    memory for the whole function (four stores at every entry)."""
+    return " __attribute__((always_inline))" if _on("PPU_ST_RUNS") else ""
+
+
 def _lean_on() -> bool:
     return _on("PPU_LEAN_MEM")
 
@@ -325,7 +613,7 @@ def _mm_block(movbe: bool, pmap: bool, toc: bool, lean: bool = False) -> str:
     for w in (8, 16, 32, 64):
         T, n = W[w], w // 8
         poll = " && __builtin_expect(ea != m->poll, 1)" if w == 32 else ""
-        L.append("static inline %s vm_read%d_mm(const ppu_mm* m, uint64_t a)\n{\n    const uint32_t ea = (uint32_t)a;" % (T, w))
+        L.append("static inline%s %s vm_read%d_mm(const ppu_mm* m, uint64_t a)\n{\n    const uint32_t ea = (uint32_t)a;" % (_sr_inl(), T, w))
         if lean:   # PPU_LEAN_MEM: the access alone
             acc = ("*(volatile const uint8_t*)(m->vb + ea)" if w == 8 else
                    "__builtin_bswap%d(*(volatile const ppu_u%du*)(m->vb + ea))" % (w, w))
@@ -352,8 +640,11 @@ def _mm_block(movbe: bool, pmap: bool, toc: bool, lean: bool = False) -> str:
         if toc:
             L.append("void ppu_toc_write_hit(uint32_t ea, uint32_t n);")
         L.append("#ifdef __cplusplus\n}\n#endif")
-        L.append("static inline int vm_pm_fast(uint32_t ea)\n{\n"
-                 "    return __atomic_load_n(&g_ppu_st_pmap[ea >> 12], __ATOMIC_RELAXED) == 1u;\n}")
+        if _on("PPU_ST_CMPB"):   # (cg1) the byte compared in memory: see _ST_CMPB
+            L.append(_ST_CMPB.rstrip("\n"))
+        else:
+            L.append("static inline int vm_pm_fast(uint32_t ea)\n{\n"
+                     "    return __atomic_load_n(&g_ppu_st_pmap[ea >> 12], __ATOMIC_RELAXED) == 1u;\n}")
         if toc:   # a store that may touch a folded TOC entry says so first (its page is never fast)
             L.append("#define PPU_PM_WATCH(ea, n) do { if (__builtin_expect((uint32_t)(ea) - (PPU_TOC_LO - (n) + 1u) < "
                      "(PPU_TOC_HI - PPU_TOC_LO + (n) - 1u), 0)) ppu_toc_write_hit((uint32_t)(ea), (n)); } while (0)")
@@ -364,7 +655,7 @@ def _mm_block(movbe: bool, pmap: bool, toc: bool, lean: bool = False) -> str:
         v = "v" if w == 8 else "__builtin_bswap%d(v)" % w
         st = ("__atomic_store_n(m->vb + ea, v, __ATOMIC_RELAXED)" if (w == 8 and not movbe) else
               "VM_MM_ST(%s, m, ea, %s)" % (T, v))
-        L.append("static inline void vm_write%d_mm(const ppu_mm* m, uint64_t a, %s v)\n{\n    const uint32_t ea = (uint32_t)a;" % (w, T))
+        L.append("static inline%s void vm_write%d_mm(const ppu_mm* m, uint64_t a, %s v)\n{\n    const uint32_t ea = (uint32_t)a;" % (_sr_inl(), w, T))
         if pmap:
             L.append("    if (__builtin_expect(vm_pm_fast(ea), 1)) {")
             L.append("        %s;" % st)
@@ -377,6 +668,10 @@ def _mm_block(movbe: bool, pmap: bool, toc: bool, lean: bool = False) -> str:
             L.append("    PPU_PM_WATCH(ea, %du);" % n)
         L.append("    if (vm_mm_st_ok(m, ea, %d)) { %s; vm_mm_after(m, ea, %d); return; }" % (n, st, n))
         L.append("    (vm_write%d)(a, v);   /* the out-of-line accessor, not the macro */\n}" % w)
+    if pmap and movbe and _on("PPU_ST_RUNS"):   # (cg1) see store_runs
+        if _on("PPU_ST_RUNS_VERIFY"):
+            L.append("#define PPU_ST_RUNS_VERIFY 1")
+        L.append(_SR_MACROS.strip("\n"))
     return "\n".join(L) + "\n"
 
 
@@ -897,6 +1192,15 @@ _RE_PATCH_SLOT = re.compile(r"g_ppu_patch\[(\d+)\] == 1\b")
 
 def rewrite_body(lines: list) -> list:
     """A chunk's function lines with the switched-on statement rewrites."""
+    lines = _rewrite_body0(lines)
+    if _on("PPU_ST_RUNS"):   # (cg1) last: on the final text of the stores
+        if not (_on("PPU_ST_PMAP") and _on("PPU_MOVBE")):
+            raise RuntimeError("PPU_ST_RUNS needs PPU_ST_PMAP=1 and PPU_MOVBE=1")
+        lines = store_runs(lines, STATS)
+    return lines
+
+
+def _rewrite_body0(lines: list) -> list:
     if _drain_none() and any("g_trampoline_fn = (void" in ln for ln in lines):
         raise RuntimeError("PPU_DRAIN_NONE: a function of this lift sets the trampoline (a tail jump PPU_XTAIL "
                            "did not make a tail call); the drains cannot be left out")

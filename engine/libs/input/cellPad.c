@@ -15,6 +15,7 @@
 #include "../../include/ps3emu/log_first.h"   /* PS3_LOG_FIRST */
 #include <time.h>
 #include "cellPad.h"
+#include "../../include/ps3emu/ps3_liveab.h"   /* (ft1) PS3_LIVEAB: the in-run A/B (bench only) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,9 @@
   #else
     #include <dlfcn.h>                      /* SDL 2.24's virtual pad, looked up at run time */
     #include <pthread.h>                    /* the controller thread */
+    #if defined(__linux__)
+    #include <sys/prctl.h>                  /* (deck) its name */
+    #endif
   #endif
 #endif
 
@@ -433,6 +437,42 @@ static volatile char s_poll_lock;
 static int  pad_lock_try(void) { return !__atomic_test_and_set(&s_poll_lock, __ATOMIC_ACQUIRE); }
 static void pad_lock(void)     { while (!pad_lock_try()) sched_yield(); }
 static void pad_unlock(void)   { __atomic_clear(&s_poll_lock, __ATOMIC_RELEASE); }
+
+/* SDL's joystick device list: one lock for every SDL call that can touch it.
+ * sdl2-compat, the SDL2 of SteamOS 3.7+ (Arch, Fedora 42+, Homebrew too),
+ * keeps the device-index list in globals with no lock (sdl2_compat.c:
+ * "FIXME: put a mutex on the joystick and sensor lists"): SDL_NumJoysticks
+ * frees and rebuilds it, and so does its conversion of every joystick /
+ * gamepad ADDED or REMOVED event -- on the thread that pushes the event (its
+ * SDL3 event filter) and on the thread that takes it from the queue
+ * (SDL_PollEvent, SDL_PeepEvents). cellPadInit's
+ * SDL_InitSubSystem(GAMECONTROLLER) queued those events while the RSX
+ * thread drained the queue every 4 ms: both threads freed the same list (a
+ * double free glibc's per-thread tcache does not see) and the next small
+ * malloc aborted ("malloc(): unaligned tcache chunk detected" in
+ * pad_sdl_scan, 2026-11-18). Held here around cellPadInit / End's SDL work,
+ * each pass of the controller thread (its SDL_GameControllerUpdate runs SDL's
+ * device detection, which pushes those events; its scan calls
+ * SDL_NumJoysticks) and the in-call path of PS3_PAD_THREAD=0; outside cellPad
+ * the window's event pump (rsx_vulkan_backend.c, the RSX thread) drains
+ * SDL's queue under a try-lock: a pump that finds it held skips that pass
+ * (the next comes 4 ms later, the events stay queued). Its own lock, not the
+ * poll lock: a pad call of the title never waits for a controller pass,
+ * which can block as long as a driver takes (a Bluetooth open, 0.5-0.8 s).
+ * Order: the poll lock, then this one; the raw snapshot's lock is the
+ * innermost. Windows has the real SDL2 (its own lock): a no-op there. */
+#if !defined(_WIN32)
+static volatile char s_sdl_list_lock;
+static int  pad_sdl_list_try(void)    { return !__atomic_test_and_set(&s_sdl_list_lock, __ATOMIC_ACQUIRE); }
+static void pad_sdl_list_lock(void)   { while (!pad_sdl_list_try()) sched_yield(); }
+static void pad_sdl_list_unlock(void) { __atomic_clear(&s_sdl_list_lock, __ATOMIC_RELEASE); }
+#else
+static int  pad_sdl_list_try(void)    { return 1; }
+static void pad_sdl_list_lock(void)   { }
+static void pad_sdl_list_unlock(void) { }
+#endif
+int  cellPad_host_sdl_trylock(void) { return pad_sdl_list_try(); }
+void cellPad_host_sdl_unlock(void)  { pad_sdl_list_unlock(); }
 
 /* PS3_PAD_SLOW_LOG=1 (or a number of ms above 1): a line on stderr for every
  * pad call of the title, host poll or controller-thread pass that took longer
@@ -939,6 +979,7 @@ static void pad_sdl_service(void)
 {
     const unsigned long long slow = pad_slow_us();
     const unsigned long long t0 = slow ? pad_now_us() : 0;
+    pad_sdl_list_lock();          /* SDL's joystick list (sdl2-compat): the pump drains SDL's queue under it */
     pad_virtual_drive();          /* PS3_PAD_VIRTUAL: this pass's scripted inputs */
     SDL_GameControllerUpdate();   /* the pads' newest reports, read now (and SDL's device detection) */
     const unsigned long long t1 = slow ? pad_now_us() : 0;
@@ -974,6 +1015,7 @@ static void pad_sdl_service(void)
             SDL_GameControllerGetSensorData(gc, SDL_SENSOR_ACCEL, w->accel, 3) == 0)
             w->has_accel = 1;
     }
+    pad_sdl_list_unlock();
     pad_raw_lock();
     memcpy(s_sdl_raw, raw, sizeof s_sdl_raw);
     pad_raw_unlock();
@@ -1007,14 +1049,21 @@ static void pad_sdl_thread_body(void)
 {
     long us = 1000;
     { const char* e = getenv("PS3_PAD_THREAD_US"); if (e && *e) us = atol(e); if (us < 250) us = 250; }
+    const long us_set = us;   /* (ft1) PS3_LIVEAB may change the period while the game runs */
 #ifdef _WIN32
     /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Windows 10 1803+): a wait of 1 ms
      * is 1 ms whatever the system tick is; without it, Sleep(1). */
     HANDLE tm = CreateWaitableTimerExW(NULL, NULL, 0x00000002, TIMER_ALL_ACCESS);
 #endif
+#if defined(__linux__)
+    prctl(PR_SET_NAME, "ps3-pad", 0, 0, 0);   /* (deck) this thread's name, for profilers and work/bench's thread groups */
+#endif
+    pad_sdl_list_lock();
     pad_sdl_list_devices();
+    pad_sdl_list_unlock();
     while (!__atomic_load_n(&s_sdl_thr_stop, __ATOMIC_ACQUIRE)) {
         pad_sdl_service();   /* the first pass opens what is connected */
+        { const int lab = g_ps3_lab[PS3_LAB_PAD_US]; us = lab >= 250 ? lab : us_set; }   /* (ft1) PS3_LIVEAB */
 #ifdef _WIN32
         LARGE_INTEGER due;
         due.QuadPart = -(LONGLONG)us * 10;
@@ -1025,7 +1074,9 @@ static void pad_sdl_thread_body(void)
         nanosleep(&ts, NULL);
 #endif
     }
+    pad_sdl_list_lock();
     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) pad_sdl_close(i, 0);
+    pad_sdl_list_unlock();
     pad_raw_lock();
     memset(s_sdl_raw, 0, sizeof s_sdl_raw);
     pad_raw_unlock();
@@ -1426,8 +1477,12 @@ static void pad_init_backend(void)
 
 static void pad_shutdown_backend(void)
 {
-    if (s_sdl_thr_on) pad_sdl_thread_stop();   /* it closes its controllers */
-    else for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) pad_sdl_close(i, 0);
+    if (s_sdl_thr_on) pad_sdl_thread_stop();   /* it closes its controllers (joined without the list lock: it takes it) */
+    else {
+        pad_sdl_list_lock();
+        for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) pad_sdl_close(i, 0);
+        pad_sdl_list_unlock();
+    }
     memset(s_rumble, 0, sizeof s_rumble);
 }
 
@@ -2504,7 +2559,9 @@ s32 cellPadInit(u32 max_connect)
 
     pad_map_load();   /* PS3_INPUT_MAP, before the first poll reads it */
     pad_lock();
-    pad_init_backend();
+    pad_sdl_list_lock();   /* SDL_InitSubSystem queues joystick ADDED events: not while the pump drains them */
+    pad_init_backend();    /* (the controller thread it starts waits for the list lock until this returns) */
+    pad_sdl_list_unlock();
     pad_unlock();
 
     /* Do an initial poll to detect connected controllers */
@@ -2700,6 +2757,77 @@ static unsigned long long pad_route_us(void)
     return (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000ull;
 #endif
 }
+/* (ft1, 2026-11-19) closed-loop steering of a replayed route (bench only; off unless PS3_PAD_STEER / _REC are set).
+ * The street route splits at the cathedral gate because Cole moves relative to the follow camera, whose heading differs
+ * by a few degrees from run to run. PS3_PAD_STEER_REC=<ea>:<file> logs, at every replayed pad read, the route's guest ms
+ * and the two horizontal floats of a guest position vector at <ea> (big-endian; inFAMOUS 2's (x, y, height, 1) in cm,
+ * e.g. 0x00A75560 on the street save); PS3_PAD_STEER=<ea>:<file>[:<gain>[:<from ms>:<to ms>]] reads such a file of an
+ * on-route run and, between <from> and <to> (guest ms of the route), adds to the left stick's x the heading error toward
+ * the reference point 600 ms ahead (the actual heading from the last ~200 ms of movement): x = 0x80 + gain * angle (rad),
+ * limited to +-0x30. Positive gain = push right for a target on the right (the sign is the world's; a negative gain flips it). */
+static void pad_route_steer(unsigned int ms, CellPadData* data)
+{
+    static int s_on = -1; static uint32_t s_ea; static FILE* s_rec;
+    static float (*s_ref)[3]; static int s_nref, s_from = 6000, s_to = 40000; static double s_gain = 160.0;
+    static float s_hx[16], s_hy[16]; static unsigned int s_ht[16]; static int s_hn, s_said;
+    if (__builtin_expect(s_on == 0, 1)) return;
+    if (s_on < 0) {
+        s_on = 0;
+        const char* r = getenv("PS3_PAD_STEER_REC"); const char* e = getenv("PS3_PAD_STEER");
+        char path[512];
+        if (r && *r && sscanf(r, "%x:%511s", &s_ea, path) == 2 && (s_rec = fopen(path, "w")) != NULL) {
+            s_on = 1; printf("[cellPad] PS3_PAD_STEER_REC: position at 0x%08X -> %s\n", s_ea, path);
+        } else if (e && *e) {
+            char* q; s_ea = (uint32_t)strtoul(e, &q, 16);
+            if (*q == ':') {
+                q++; char* c = strchr(q, ':'); size_t n = c ? (size_t)(c - q) : strlen(q);
+                if (n < sizeof path) { memcpy(path, q, n); path[n] = 0; }
+                if (c) { s_gain = atof(c + 1); c = strchr(c + 1, ':'); if (c) { s_from = atoi(c + 1); c = strchr(c + 1, ':'); if (c) s_to = atoi(c + 1); } }
+                FILE* f = fopen(path, "r");
+                if (f) {
+                    int cap = 0; unsigned int t; float x, y;
+                    while (fscanf(f, "%u %f %f", &t, &x, &y) == 3) {
+                        if (s_nref == cap) { cap = cap ? cap * 2 : 4096; s_ref = (float (*)[3])realloc(s_ref, cap * sizeof *s_ref); }
+                        s_ref[s_nref][0] = (float)t; s_ref[s_nref][1] = x; s_ref[s_nref][2] = y; s_nref++;
+                    }
+                    fclose(f);
+                    if (s_nref > 10) s_on = 2;
+                }
+                printf("[cellPad] PS3_PAD_STEER: position at 0x%08X, %d reference points from %s, gain %.0f, guest %d..%d ms: %s\n",
+                       s_ea, s_nref, path, s_gain, s_from, s_to, s_on == 2 ? "on" : "OFF (no reference)");
+            }
+        }
+        fflush(stdout);
+        if (!s_on) return;
+    }
+    const float px = vm_read_f32(s_ea), py = vm_read_f32(s_ea + 4);
+    if (s_on == 1) { fprintf(s_rec, "%u %.3f %.3f\n", ms, px, py); if ((ms / 1000) % 5 == 0) fflush(s_rec); return; }
+    /* history: positions of the last reads (about one per frame) */
+    s_hx[s_hn & 15] = px; s_hy[s_hn & 15] = py; s_ht[s_hn & 15] = ms; s_hn++;
+    if ((int)ms < s_from || (int)ms > s_to || s_hn < 8) return;
+    int j = s_hn - 1, k = j;
+    while (k > s_hn - 16 && k > 0 && ms - s_ht[(k - 1) & 15] <= 200) k--;
+    const float vx = px - s_hx[k & 15], vy = py - s_hy[k & 15];
+    if (vx * vx + vy * vy < 25.0f) return;                 /* < 5 cm in 200 ms: standing */
+    const float tq = (float)ms + 600.0f;
+    int a = 0; while (a + 1 < s_nref && s_ref[a + 1][0] <= tq) a++;
+    float tx = s_ref[a][1], ty = s_ref[a][2];
+    if (a + 1 < s_nref && s_ref[a + 1][0] > s_ref[a][0]) {
+        const float w = (tq - s_ref[a][0]) / (s_ref[a + 1][0] - s_ref[a][0]);
+        if (w > 0 && w < 1) { tx += w * (s_ref[a + 1][1] - tx); ty += w * (s_ref[a + 1][2] - ty); }
+    }
+    const float dx = tx - px, dy = ty - py;
+    const double ang = atan2((double)vx * dy - (double)vy * dx, (double)vx * dx + (double)vy * dy);   /* + = target to the left (x right, y forward) */
+    int sx = (int)lround(-s_gain * ang);
+    if (sx > 0x30) sx = 0x30; if (sx < -0x30) sx = -0x30;
+    const int lx = (int)data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X] + sx;
+    data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X] = (u16)(lx < 0 ? 0 : lx > 0xFF ? 0xFF : lx);
+    if (!s_said || (ms / 1000) != (unsigned)s_said) {
+        if (ms % 1000 < 40) printf("[cellPad] steer %u ms: pos %.0f %.0f ref %.0f %.0f err %.1f deg stick x %+d\n", ms, px, py, tx, ty, ang * 57.2958, sx);
+        s_said = (int)(ms / 1000);
+    }
+}
+
 static void pad_route_apply(u32 port_no, CellPadData* data)
 {
     static int s_init = 0, s_mode = 0;           /* 1 record, 2 replay */
@@ -2738,12 +2866,19 @@ static void pad_route_apply(u32 port_no, CellPadData* data)
         fflush(stdout);
     }
     if (!s_mode) return;
+    /* (deck) PS3_TB_FRAMESTEP_US (sys_timer.c): from the anchor on, the guest clock moves a fixed step
+     * per frame and the route is replayed on that clock -- the same path in every run */
+    extern int ppu_timebase_framestep_arm(void);
+    extern uint64_t ppu_timebase_framestep_us(void);
+    static int s_fs;
     if (!s_t0) {
         if (s_anchor && !pad_watch_exists(s_anchor)) return;
-        s_t0 = pad_route_us();
-        printf("[cellPad] pad route: anchor reached, %s starts\n", s_mode == 1 ? "recording" : "replay"); fflush(stdout);
+        s_fs = s_mode == 2 && ppu_timebase_framestep_arm();
+        s_t0 = s_fs ? ppu_timebase_framestep_us() : pad_route_us();
+        printf("[cellPad] pad route: anchor reached, %s starts%s\n", s_mode == 1 ? "recording" : "replay",
+               s_fs ? " (frame-stepped guest clock)" : ""); fflush(stdout);
     }
-    const unsigned int ms = (unsigned int)((pad_route_us() - s_t0) / 1000ull);
+    const unsigned int ms = (unsigned int)(((s_fs ? ppu_timebase_framestep_us() : pad_route_us()) - s_t0) / 1000ull);
     if (s_mode == 1) {
         if (!data->len) return;                      /* not a fresh packet: the game ignores it */
         if (s_have_last && !memcmp(s_last, data->button, sizeof s_last)) return;
@@ -2767,6 +2902,7 @@ static void pad_route_apply(u32 port_no, CellPadData* data)
         return;
     }
     memcpy(&data->button[2], &s_w[s_i][2], (PAD_ROUTE_WORDS - 2) * sizeof(u16));   /* words 0-1 stay live */
+    pad_route_steer(ms, data);   /* (ft1) PS3_PAD_STEER / PS3_PAD_STEER_REC (bench only, off by default) */
 }
 
 static s32 pad_get_data(u32 port_no, CellPadData* data_guest)
@@ -3470,7 +3606,7 @@ static s32 pad_set_act_direct(u32 port_no, CellPadActParam* param)
      * the send is a write to the device and can block. */
     if (changed) {
         if (s_sdl_thr_on) __atomic_store_n(&r->dirty, 1, __ATOMIC_RELEASE);
-        else { pad_lock(); pad_sdl_rumble_send((int)port_no); pad_unlock(); }
+        else { pad_lock(); pad_sdl_list_lock(); pad_sdl_rumble_send((int)port_no); pad_sdl_list_unlock(); pad_unlock(); }
     }
 #endif
     (void)changed;

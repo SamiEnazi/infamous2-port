@@ -16,6 +16,9 @@
  *   reinit_noswap  the old instance never swapped, so the new one also has the same sequence byte, active
  *                  array and table version: the first 50 entries of the new instance must still run
  *   reinit_inplace the init runs over the old object (not zeroed first)
+ *   prio           (deck, s1) two managers at once for PS3_NATIVE_JOBS_PRIO: the "main" thread (guest thread id 1)
+ *                  streams 20000 jobs with token waits, a second thread (id 8) 6000 jobs of its own manager with
+ *                  polled token tests -- the two priority classes; every job must run once, no wait may hang
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,12 +87,13 @@ static struct { uint32_t addr; ppu_hook_fn fn; } s_hooks[32];
 static int s_nhooks;
 int ppu_hook_set(uint32_t addr, ppu_hook_fn fn) { s_hooks[s_nhooks].addr = addr; s_hooks[s_nhooks].fn = fn; s_nhooks++; return 1; }
 void ppu_hook_call(ppu_context* ctx, ppu_hook_body body) { (void)ctx; (void)body; fprintf(stderr, "harness: a hook ran the game's body\n"); exit(2); }
+static HARNESS_TLS uint64_t s_tid;    /* the guest thread id the hooks see (0; the prio scenario: 1 = main, 8) */
 static uint64_t hook(uint32_t addr, uint32_t r3, uint32_t r4)
 {
     static HARNESS_TLS ppu_context* ctx;
     if (!ctx) ctx = (ppu_context*)calloc(1, sizeof *ctx);
     for (int i = 0; i < s_nhooks; i++) if (s_hooks[i].addr == addr) {
-        ctx->gpr[3] = r3; ctx->gpr[4] = r4;
+        ctx->gpr[3] = r3; ctx->gpr[4] = r4; ctx->thread_id = s_tid;
         s_hooks[i].fn(ctx, NULL);
         return ctx->gpr[3];
     }
@@ -156,10 +160,10 @@ static uint32_t kick(uint32_t mgr)
 {
     uint32_t cur = R32(mgr + 256);
     if (R32(H(mgr, cur) + 8) >= CAP - 2) { swap(mgr); cur = R32(mgr + 256); }
-    const uint32_t n = s_next_job++, desc = DESC_BASE + 128 * n;
+    const uint32_t n = __atomic_fetch_add(&s_next_job, 1, __ATOMIC_SEQ_CST), desc = DESC_BASE + 128 * n;
     W32(desc, 0x8400u); W32(desc + 4, CODE_EA);            /* UseBuffer, set 0, load: the job's code */
     push(mgr, cur, (8u << 16) | 1, desc);
-    const uint32_t tok = s_tok_ea; s_tok_ea += 4;
+    const uint32_t tok = __atomic_fetch_add(&s_tok_ea, 4, __ATOMIC_SEQ_CST);   /* (prio: two kicking threads) */
     vm_base[tok] = 0; vm_base[tok + 1] = vm_base[mgr + 260]; W16(tok + 2, R32(H(mgr, cur) + 8));
     return tok;
 }
@@ -186,6 +190,25 @@ static int check(uint32_t from, uint32_t to, const char* what)
 #define MGR   0x00B02600u
 #define ARR_A 0x00400000u
 #define ARR_B 0x00401000u
+
+/* (s1) prio: the second thread -- its own manager, polled token tests (as Edge's kicker polls Edge's) */
+#define MGR2  0x00B02A00u
+#define ARR_C 0x00402000u
+#define ARR_D 0x00403000u
+static volatile long s_second_done;
+static DWORD WINAPI second_thread(LPVOID a)
+{
+    (void)a;
+    s_tid = 8;
+    for (uint32_t i = 0; i < 6000; i++) {
+        const uint32_t t = kick(MGR2);
+        if (i % 3 == 2) flush(MGR2);
+        if (i % 10 == 9) { flush(MGR2); while (!token_test(MGR2, t)) Sleep(0); }
+    }
+    flush(MGR2); mgr_reset(MGR2);
+    __atomic_store_n(&s_second_done, 1, __ATOMIC_SEQ_CST);
+    return 0;
+}
 
 /* an instance that kicks `n` jobs, flushing every `every`, and is then waited for */
 static void run_instance(uint32_t n, uint32_t every)
@@ -243,8 +266,25 @@ int main(int argc, char** argv)
         bad = check(0, s_next_job, "old instance");
         mgr_init(MGR, ARR_A, ARR_B, 10, !strcmp(sc, "reinit_noswap"));
         bad |= second_instance(0);
+    } else if (!strcmp(sc, "prio")) {
+        mgr_init(MGR, ARR_A, ARR_B, 10, 1);
+        mgr_init(MGR2, ARR_C, ARR_D, 11, 1);
+        s_stage = "prio: two managers, two threads";
+        s_tid = 1;                                         /* this thread is the guest's main thread */
+        flush(MGR);                                        /* the runner sees the main manager first */
+        CreateThread(NULL, 0, second_thread, NULL, 0, NULL);
+        uint32_t toks[64]; int nt = 0;
+        for (uint32_t i = 0; i < 20000; i++) {
+            const uint32_t t = kick(MGR);
+            if (i % 2 == 0) flush(MGR);
+            if (i % 13 == 0) { toks[nt++] = t; if (nt == 8) { flush(MGR); for (int k = 0; k < nt; k++) token_wait(MGR, toks[k]); nt = 0; } }
+        }
+        flush(MGR); mgr_reset(MGR);
+        s_stage = "prio: the second thread's jobs";
+        while (!__atomic_load_n(&s_second_done, __ATOMIC_SEQ_CST)) Sleep(1);
+        bad = check(0, s_next_job, "prio (both managers)");
     } else {
-        fprintf(stderr, "usage: jobrunner_harness stream|reinit_same|reinit_poll|reinit_noswap|reinit_inplace\n");
+        fprintf(stderr, "usage: jobrunner_harness stream|reinit_same|reinit_poll|reinit_noswap|reinit_inplace|prio\n");
         return 2;
     }
     fflush(stdout);

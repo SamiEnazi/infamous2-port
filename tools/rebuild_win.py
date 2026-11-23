@@ -23,7 +23,8 @@ Host: on Windows clang-cl + lld-link in the Visual Studio / portable MSVC enviro
 On Linux (step_compile_linux) clang/clang++ + lld with the same flags in GNU spelling
 (PORT_LIFT_OPT / PORT_SPU_ARCH then take GNU flags), the same PORT_PGO / PORT_LIFT_LTO;
 no vsenv, no resource compiler, no SDL2.dll. Linux-only inputs: PORT_SDL2_DIR (an SDL2
-CMake config folder; unset = the system's), PORT_GLSLANG_DIR (glslang's
+CMake config folder; unset = the system's), PORT_SDL2_RUNTIME (the libSDL2-2.0.so.0 copied beside
+the engine; tools/setup.sh's downloaded one), PORT_GLSLANG_DIR (glslang's
 lib/cmake/glslang; unset = deps/glslang-install-linux when present, else the system's).
 """
 import argparse
@@ -632,11 +633,21 @@ def step_port():
             for ln in open(os.path.join(PORT_PATCHES, p), encoding="utf-8"):
                 if ln.startswith("+++ b/"):
                     patched.add(ln[6:].strip())
+    # (ft1, 2026-11-19) the patched files are made in a scratch folder (the source + every patch on it) and copied over
+    # only when the result differs from the port's copy: an unchanged patched file keeps its mtime, so its units are
+    # not compiled again on every build (before: the source was copied and patched in place, a new mtime each time)
+    stage = os.path.join(PORT, ".port_stage")
+    if os.path.isdir(stage):
+        shutil.rmtree(stage)
     for s, d in pairs:
         if not os.path.isfile(s):
             continue
         rel = os.path.relpath(d, PORT).replace("\\", "/")
-        if rel not in patched and os.path.isfile(d) and open(s, "rb").read() == open(d, "rb").read():
+        if rel in patched:
+            os.makedirs(os.path.dirname(os.path.join(stage, rel)), exist_ok=True)
+            shutil.copy(s, os.path.join(stage, rel))
+            continue
+        if os.path.isfile(d) and open(s, "rb").read() == open(d, "rb").read():
             continue   # unchanged files keep their mtime: no needless recompile
         shutil.copy(s, d)   # a changed file gets a fresh mtime: copy2 kept the source's, and a source older
                             # than the object ninja built from another version was never recompiled
@@ -649,14 +660,26 @@ def step_port():
             files = [ln[6:].strip() for ln in open(os.path.join(PORT_PATCHES, p), encoding="utf-8")
                      if ln.startswith("+++ b/")]
             try:
-                apply_patch(os.path.join(PORT_PATCHES, p), PORT, strip=1)
+                apply_patch(os.path.join(PORT_PATCHES, p), stage, strip=1)
             except PatchError as e:
                 raise StepError(f"patch {p} does not apply: {e}")
             for f in files:   # never trust a silent apply
                 src = os.path.join(PORT_SRC, f)
-                if os.path.isfile(src) and open(src, "rb").read() == open(os.path.join(PORT, f), "rb").read():
+                if os.path.isfile(src) and open(src, "rb").read() == open(os.path.join(stage, f), "rb").read():
                     raise StepError(f"patch {p} reported success but {f} is unchanged")
             print(f"  applied {p}")
+    kept = 0
+    for rel in sorted(patched):
+        a, d = os.path.join(stage, rel), os.path.join(PORT, rel)
+        if not os.path.isfile(a):
+            continue
+        if os.path.isfile(d) and open(a, "rb").read() == open(d, "rb").read():
+            kept += 1
+            continue
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+        shutil.copy(a, d)
+    shutil.rmtree(stage, ignore_errors=True)
+    print(f"  patched files: {kept} unchanged (kept their times), {len(patched) - kept} written")
     # The exe's icon: tools/make_icon.ps1 makes work/icon/app.ico from the player's own
     # PS3_GAME/ICON0.PNG; the port's CMakeLists compiles app.rc when it exists.
     ico = os.path.join(WORK, "icon", "app.ico")
@@ -776,7 +799,8 @@ def engine_build_dir():
     return os.environ.get("PORT_ENGINE_BUILD") or os.path.join(PORT, "build")
 
 
-ENGINE_FILES = ("Infamous2Recomp.exe", "Infamous2Recomp.pdb", "SDL2.dll") if IS_WIN else ("Infamous2Recomp",)
+# (Linux: libSDL2-2.0.so.0 = the SDL2 setup downloaded, PORT_SDL2_RUNTIME, beside the engine: its RUNPATH is $ORIGIN)
+ENGINE_FILES = ("Infamous2Recomp.exe", "Infamous2Recomp.pdb", "SDL2.dll") if IS_WIN else ("Infamous2Recomp", "libSDL2-2.0.so.0")
 
 
 def step_compile():
@@ -786,11 +810,11 @@ def step_compile():
 
 def step_module():
     """The game module (tools/build_module.py) into PORT_BUILD, next to the engine."""
-    if not IS_WIN:
-        spu_rewrites()
-    else:
-        spu_rewrites()
-        lift_restore_times()   # (PORT_LIFT_REUSE) after spu_rewrites: its spu/zz_native_* files count too
+    spu_rewrites()
+    # (PORT_LIFT_REUSE) after spu_rewrites: its spu/zz_native_* files count too. (ft1, 2026-11-19) on Linux too: without
+    # it every lifted file compiled with its new time, and main() gave the old times back AFTER the compile, so the next
+    # build found every dependency stamp changed and compiled the whole module a second time.
+    lift_restore_times()
     build = module_build_dir()
     os.makedirs(build, exist_ok=True)
     # the engine beside it: a prebuilt one (PORT_ENGINE_EXE) or the one step_engine built elsewhere
@@ -1005,6 +1029,12 @@ def linux_compile_flags(build, jobs, pgo="", lto="0", profdata=None, lift_opt=No
     lift_opt = lift_opt or os.environ.get("PORT_LIFT_OPT", LINUX_LIFT_OPT)
     spu_arch = spu_arch or os.environ.get("PORT_SPU_ARCH", LINUX_SPU_ARCH)
     c_rel, cxx_rel = "-O2 -DNDEBUG -g", "-O2 -DNDEBUG"   # = /O2 /Ob2 /DNDEBUG /Z7, /O2 /Ob2 /DNDEBUG
+    # PORT_C_EXTRA: flags added to the engine/runtime C and C++ (not the lifted code: PORT_LIFT_OPT /
+    # PORT_SPU_ARCH), e.g. "-march=znver2 -ffp-contract=off" for a build that only runs on one CPU.
+    extra = os.environ.get("PORT_C_EXTRA", "").strip()
+    if extra:
+        c_rel += " " + extra; cxx_rel += " " + extra
+        print(f"  engine flags + {extra}")
     link_rel = "-fuse-ld=lld"   # the symbol table stays in the ELF (= /DEBUG's public symbols)
     if pgo:
         names = os.environ.get("PORT_PGO_NAMES") or (pgo_profile_names(pgo[4:], profdata) if pgo.startswith("use:") else "base")
@@ -1049,6 +1079,9 @@ def linux_configure_cmd(build, tools, flags, port=None, tk=None, python=None):
     gl = os.environ.get("PORT_GLSLANG_DIR") or os.path.join(DEPS, "glslang-install-linux", "lib", "cmake", "glslang")
     if os.path.isdir(gl):
         cmd.append("-Dglslang_DIR=" + gl)
+    # the libraries the engine links (SDL2: tools/setup.sh puts the one it downloaded beside the program) are looked
+    # for in the program's own folder first, so the folder can be moved
+    cmd.append("-DCMAKE_BUILD_RPATH=$ORIGIN")
     return cmd + ["-DPORT_LIFT_OPT=" + lift_opt, "-DPORT_SPU_ARCH=" + spu_arch,
                   "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=" + link_rel,
                   "-DCMAKE_C_FLAGS_RELEASE=" + c_rel, "-DCMAKE_CXX_FLAGS_RELEASE=" + cxx_rel]
@@ -1083,6 +1116,11 @@ def step_engine_linux():
             raise StepError(f"{cmd[1]} exited {p.returncode} (python -I tools/build_errors.py {logf})")
         if pgo.startswith("use:") and cmd[1] == "--build":
             pgo_mismatch_summary(logf, log0)
+    sdl = os.environ.get("PORT_SDL2_RUNTIME")   # tools/setup.sh: the SDL2 it downloaded (tools/buildenv.sh be_sdl2)
+    if sdl and os.path.isfile(sdl):
+        dst = os.path.join(build, "libSDL2-2.0.so.0")
+        if not (os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(sdl) and open(dst, "rb").read() == open(sdl, "rb").read()):
+            shutil.copy2(sdl, dst)
     print("  engine built:", os.path.join(build, "Infamous2Recomp"))
 
 
@@ -1195,6 +1233,14 @@ def step_ppu():
     # PS3_TOC_FOLD=0 turn the page map / the folding off in the same exe.
     if fast:
         fast.update({"PPU_ST_PMAP": "1", "PPU_MOVBE": "1", "PPU_TOC_FOLD": "1"})
+    # cg1 / hd5 (2026-11-20; toolkit tools/ppu_fastpath.py): the store page-map test in fewer instructions -- the test and
+    # its re-check as one `cmpb` each (PPU_ST_CMPB), and one test of the two end pages for a straight-line run of three or
+    # more stores off one guest register, plain stores, one re-check after the run (PPU_ST_RUNS; a run whose pages are not
+    # fast takes its careful copy with the per-store tests). LINUX BUILDS ONLY (measured on the Steam Deck, branch
+    # deck-perf, docs/STEAM_DECK_PERF.md step 6: main thread -6 % instructions, -0.4..-0.6 ms a frame on the street);
+    # Windows builds keep the old lift. Each =0 in the environment = the old form (a different lift fingerprint: a re-lift).
+    if fast and sys.platform.startswith("linux"):
+        fast.update({"PPU_ST_CMPB": "1", "PPU_ST_RUNS": "1"})
     # Track A, lean guest memory (2026-11-16; toolkit tools/ppu_fastpath.py + runtime/memory/vm_guard.c,
     # work/native/TRACK_A.md): a guest load is one host load (no range test, no gcm poll compare: guard
     # pages and the live gcm ref word instead), no trampoline drain after calls (the runtime drains on
