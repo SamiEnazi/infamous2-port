@@ -76,6 +76,8 @@ extern uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
   DEFINE_AUDIO_GUID(ps3r_IID_IMMDeviceEnumerator,  0xA95664D2,0x9614,0x4F35,0xA7,0x46,0xDE,0x8D,0xB6,0x36,0x17,0xE6);
   DEFINE_AUDIO_GUID(ps3r_IID_IAudioClient,         0x1CB9AD4C,0xDBFA,0x4c32,0xB1,0x78,0xC2,0xF5,0x68,0xA7,0x03,0xB2);
   DEFINE_AUDIO_GUID(ps3r_IID_IAudioRenderClient,   0xF294ACFC,0x3146,0x4483,0xA7,0xBF,0xAD,0xDC,0xA7,0xC2,0x60,0xE2);
+  DEFINE_AUDIO_GUID(ps3r_IID_IMMNotificationClient, 0x7991EEC9,0x7E89,0x4D85,0x83,0x90,0x6C,0x70,0x3C,0xEC,0x60,0xC0);
+  DEFINE_AUDIO_GUID(ps3r_IID_IUnknown,             0x00000000,0x0000,0x0000,0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46);
 
   /* Map to the names used in the code */
   #define IID_IMMDeviceEnumerator  ps3r_IID_IMMDeviceEnumerator
@@ -366,6 +368,98 @@ static int s_wasapi_quiet = 0;
 
 static void audio_backend_shutdown(void);
 
+/* ---- Follow the Windows default output -----------------------------------
+ * A shared-mode stream is opened on one endpoint, and choosing another
+ * default output in Windows does not invalidate it: the game kept playing to
+ * the old device until it was restarted. An IMMNotificationClient registered
+ * on the device enumerator hears the change (OnDefaultDeviceChanged, render
+ * flow, console role -- the role audio_backend_init opens) and only raises a
+ * flag plus the new device's id; the mixing thread sees the flag in
+ * audio_backend_room and reopens on the new default (wasapi_reopen) when it
+ * is not the device already open. The callback runs on a Windows thread and
+ * must not block or call back into the enumerator, so it does nothing else.
+ * PS3_AUDIO_FOLLOW_DEFAULT=0 = keep the device opened at start, as before. */
+static IMMDeviceEnumerator* s_wasapi_notify_enum = NULL;  /* holds the registration */
+static volatile LONG        s_wasapi_default_changed = 0;
+static CRITICAL_SECTION     s_wasapi_id_lock;
+static int                  s_wasapi_id_lock_init = 0;
+static WCHAR                s_wasapi_dev_id[512];      /* endpoint now open ("" = none) */
+static WCHAR                s_wasapi_pending_id[512];  /* newest default reported */
+
+static void wasapi_copy_id(WCHAR* dst, LPCWSTR src)
+{
+    if (!src) { dst[0] = 0; return; }
+    size_t i = 0;
+    for (; src[i] && i < 511; i++) dst[i] = src[i];
+    dst[i] = 0;
+}
+
+static HRESULT STDMETHODCALLTYPE wnc_QueryInterface(IMMNotificationClient* self, REFIID riid, void** out)
+{
+    if (!out) return E_POINTER;
+    if (!memcmp(riid, &ps3r_IID_IUnknown, sizeof(GUID)) ||
+        !memcmp(riid, &ps3r_IID_IMMNotificationClient, sizeof(GUID))) {
+        *out = self;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+/* One static object for the whole run: the count is not needed. */
+static ULONG STDMETHODCALLTYPE wnc_AddRef(IMMNotificationClient* self)  { (void)self; return 1; }
+static ULONG STDMETHODCALLTYPE wnc_Release(IMMNotificationClient* self) { (void)self; return 1; }
+static HRESULT STDMETHODCALLTYPE wnc_OnDeviceStateChanged(IMMNotificationClient* self, LPCWSTR id, DWORD st)
+{ (void)self; (void)id; (void)st; return S_OK; }
+static HRESULT STDMETHODCALLTYPE wnc_OnDeviceAdded(IMMNotificationClient* self, LPCWSTR id)
+{ (void)self; (void)id; return S_OK; }
+static HRESULT STDMETHODCALLTYPE wnc_OnDeviceRemoved(IMMNotificationClient* self, LPCWSTR id)
+{ (void)self; (void)id; return S_OK; }
+static HRESULT STDMETHODCALLTYPE wnc_OnDefaultDeviceChanged(IMMNotificationClient* self, EDataFlow flow,
+                                                            ERole role, LPCWSTR id)
+{
+    (void)self;
+    if (flow != eRender || role != eConsole) return S_OK;
+    EnterCriticalSection(&s_wasapi_id_lock);
+    wasapi_copy_id(s_wasapi_pending_id, id);
+    LeaveCriticalSection(&s_wasapi_id_lock);
+    InterlockedExchange(&s_wasapi_default_changed, 1);
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE wnc_OnPropertyValueChanged(IMMNotificationClient* self, LPCWSTR id,
+                                                            const PROPERTYKEY key)
+{ (void)self; (void)id; (void)key; return S_OK; }
+
+static IMMNotificationClientVtbl s_wnc_vtbl = {
+    wnc_QueryInterface, wnc_AddRef, wnc_Release,
+    wnc_OnDeviceStateChanged, wnc_OnDeviceAdded, wnc_OnDeviceRemoved,
+    wnc_OnDefaultDeviceChanged, wnc_OnPropertyValueChanged
+};
+static IMMNotificationClient s_wnc = { &s_wnc_vtbl };
+
+/* Register once, on the enumerator the first open made (kept until Quit). */
+static void wasapi_notify_start(IMMDeviceEnumerator* enumerator)
+{
+    if (s_wasapi_notify_enum) return;
+    { const char* e = getenv("PS3_AUDIO_FOLLOW_DEFAULT"); if (e && e[0] == '0') return; }
+    if (!s_wasapi_id_lock_init) { InitializeCriticalSection(&s_wasapi_id_lock); s_wasapi_id_lock_init = 1; }
+    const HRESULT hr = enumerator->lpVtbl->RegisterEndpointNotificationCallback(enumerator, &s_wnc);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[cellAudio] default-output notifications unavailable (0x%08lX)\n", (unsigned long)hr);
+        return;
+    }
+    enumerator->lpVtbl->AddRef(enumerator);
+    s_wasapi_notify_enum = enumerator;
+}
+
+static void wasapi_notify_stop(void)
+{
+    if (!s_wasapi_notify_enum) return;
+    s_wasapi_notify_enum->lpVtbl->UnregisterEndpointNotificationCallback(s_wasapi_notify_enum, &s_wnc);
+    s_wasapi_notify_enum->lpVtbl->Release(s_wasapi_notify_enum);
+    s_wasapi_notify_enum = NULL;
+    InterlockedExchange(&s_wasapi_default_changed, 0);
+}
+
 /* Open the default output in shared mode for 48 kHz stereo float.
  * Shared mode only takes the device's own mix format unless Windows converts
  * it: without AUTOCONVERTPCM a 44.1 kHz, 5.1 or 7.1 device (HDMI outputs often
@@ -392,6 +486,8 @@ static int audio_backend_init(void)
         return -1;
     }
 
+    wasapi_notify_start(enumerator);
+
     IMMDevice* device = NULL;
     hr = enumerator->lpVtbl->GetDefaultAudioEndpoint(enumerator, eRender,
                                                       eConsole, &device);
@@ -399,6 +495,14 @@ static int audio_backend_init(void)
     if (FAILED(hr)) {
         WLOG("[cellAudio] No default audio output (0x%08lX): no sound until one appears\n", hr);
         return -1;
+    }
+    if (s_wasapi_id_lock_init) {
+        LPWSTR id = NULL;
+        if (FAILED(device->lpVtbl->GetId(device, &id))) id = NULL;
+        EnterCriticalSection(&s_wasapi_id_lock);
+        wasapi_copy_id(s_wasapi_dev_id, id);
+        LeaveCriticalSection(&s_wasapi_id_lock);
+        if (id) CoTaskMemFree(id);
     }
 
     WAVEFORMATEX wfx;
@@ -486,8 +590,8 @@ static int audio_backend_init(void)
     return 0;
 }
 
-/* The device went away (AUDCLNT_E_DEVICE_INVALIDATED: the default output
- * changed, headphones or an HDMI screen unplugged, sleep) or never opened:
+/* The device went away (AUDCLNT_E_DEVICE_INVALIDATED: headphones or an HDMI
+ * screen unplugged, sleep) or never opened:
  * open the default output again, after 1, 2, 4 ... at most 30 s. Before, the
  * game stayed silent until it was restarted. Mixing thread only (the one
  * caller of audio_backend_room); init/shutdown otherwise run before it starts
@@ -553,9 +657,27 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
     }
 }
 
+/* Windows has a new default output (wasapi_notify_start): move to it now,
+ * not after the reopen back-off, unless it is the device already open (the
+ * same id is reported again, e.g. when only its multimedia role moved). */
+static void wasapi_follow_default(void)
+{
+    if (!InterlockedExchange(&s_wasapi_default_changed, 0)) return;
+    EnterCriticalSection(&s_wasapi_id_lock);
+    const int same = s_wasapi_client && s_wasapi_pending_id[0] &&
+                     wcscmp(s_wasapi_pending_id, s_wasapi_dev_id) == 0;
+    LeaveCriticalSection(&s_wasapi_id_lock);
+    if (same) return;
+    fprintf(stderr, "[cellAudio] Windows default output changed: switching to it\n");
+    s_wasapi_reopens = 0;
+    s_wasapi_retry_at = 0;
+    wasapi_reopen();
+}
+
 /* Frames the device can take right now; -1 with no device open. */
 static int audio_backend_room(void)
 {
+    if (s_wasapi_default_changed) wasapi_follow_default();
     if (!s_wasapi_client) { wasapi_reopen(); if (!s_wasapi_client) return -1; }
     UINT32 padding = 0;
     const HRESULT hr = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
@@ -964,6 +1086,9 @@ s32 cellAudioQuit(void)
 
     audio_stop_mix_thread();
     audio_backend_shutdown();
+#if AUDIO_BACKEND_WASAPI
+    wasapi_notify_stop();
+#endif
 
     /* Port buffers live in the guest vm_base arena (bump-allocated, not host
      * malloc) -- just drop the references; never free() them. */
