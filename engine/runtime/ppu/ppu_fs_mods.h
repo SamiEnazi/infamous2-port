@@ -90,6 +90,7 @@
 #include <unordered_map>
 #include <tuple>
 #include <array>
+#include <deque>
 #include <vector>
 #include <ctype.h>
 #include "ps3emu/ps3_game_mods.h"
@@ -810,6 +811,7 @@ struct Mod {
     bool live = false;                   /* mod.json "live": true -- patched in memory, on and off at once (live_*) */
     std::vector<std::pair<int, std::string>> levels;   /* a live mod's "karma_levels": karma level (0-6) -> its folder */
     int dark = 0;                        /* a live mod's "dark_bolts": bit r = karma level r, 0x80 = always */
+    std::vector<std::string> patch_for;  /* "patch_for": a patch that makes these mods (folder or name) work together */
     std::vector<Module> modules;
     bool on = true;                      /* the saved choice */
     bool have_pick = false;
@@ -1285,6 +1287,10 @@ static std::vector<Mod> scan()
                 for (size_t i = 0; i < kj->ok.size(); i++)
                     for (int q = 0; q < 7; q++)
                         if (ieq(kj->ok[i], kKarmaLevels[q]) && kj->ov[i].t == 3 && !kj->ov[i].s.empty()) m.levels.push_back({ q, kj->ov[i].s });
+        if (const J* pj = j.get("patch_for"))      /* the mods this patch merges: used only while all of them are */
+            if (pj->t == 4)
+                for (const J& a : pj->a)
+                    if (a.t == 3 && !a.s.empty()) m.patch_for.push_back(a.s);
         if (const J* dj = j.get("dark_bolts")) {   /* true, or the karma levels it is for */
             if (dj->t == 1 && dj->s == "true") m.dark = 0x80;
             else if (dj->t == 4)
@@ -1539,17 +1545,148 @@ static bool xp_overlap(const Xp& a, const Xp& b)
  * the same whole file, a whole file one replaces and the other patches, a
  * texture at the same offset, or packed-file patches that overlap. The same
  * rule resolve() always had, both ways round. */
-static bool mods_clash(const Mod& a, const Mod& b)
+/* ---- automatic merges ------------------------------------------------------------
+ * Two mods that replace the same whole file, or one replaces it and the other
+ * patches packed files in it, are both used when they change different packed
+ * files. Each mod's copy is compared with the game's, packed file by packed file
+ * (same number of packed files, else it can't merge); the file the game gets is
+ * the game's own with each mod's changed packed files put in, as an
+ * xpps_patches file_<i>_... patch would, and the other mods' packed-file patches
+ * on top. Texture patches onto such a file still clash: their offsets move with
+ * the packed files. Comparisons are cached in <cache>/merge by the mod file's
+ * path, size and time, so only the first start after a change reads the files. */
+struct PfDiff { bool ok = false; std::vector<int> changed; };
+static std::mutex g_pf_mx;
+static std::map<std::string, PfDiff> g_pf;
+
+static uint64_t fnv64(const std::string& s)
 {
-    for (const Part& f : a.files) if (b.targets.count(f.target)) return true;
-    for (const Part& f : b.files) if (a.targets.count(f.target)) return true;
-    for (const Tex& x : a.tex)
-        for (const Tex& y : b.tex)
-            if (x.off == y.off && x.target == y.target) return true;
-    for (const Xp& x : a.xp)
-        for (const Xp& y : b.xp)
-            if (xp_overlap(x, y)) return true;
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+    return h;
+}
+static std::string hex64(uint64_t v) { char b[24]; snprintf(b, sizeof b, "%016llx", (unsigned long long)v); return b; }
+
+/* The packed files f's copy of its target changes against the game's. */
+static PfDiff pf_diff(const Part& f)
+{
+    const std::string key = sig_line("mod", f.path) + "target " + f.target + "\n";
+    std::lock_guard<std::mutex> lk(g_pf_mx);
+    auto it = g_pf.find(key);
+    if (it != g_pf.end()) return it->second;
+    PfDiff r;
+    const std::string dir = join(g.cache, "merge"), cp = join(dir, hex64(fnv64(key)) + ".txt");
+    Bytes cb;
+    if (!g.cache.empty() && read_all(cp, cb)) {
+        const std::string c(cb.begin(), cb.end());
+        if (c.size() > key.size() && !c.compare(0, key.size(), key)) {
+            const std::string rest = c.substr(key.size());
+            if (!rest.compare(0, 2, "ok")) {
+                r.ok = true;
+                const char* p = rest.c_str() + 2;
+                while (*p) { char* e = nullptr; const long v = strtol(p, &e, 10); if (e == p) break; r.changed.push_back((int)v); p = e; }
+            }
+            g_pf[key] = r;
+            return r;
+        }
+    }
+    static Arcs arcs;   /* under g_pf_mx */
+    int idx = -1;
+    Psarc* a = arcs.find(f.target, idx);
+    Bytes o, m;
+    XpLayout Lo, Lm;
+    std::string e;
+    if (a && a->entry((uint32_t)idx, o) && read_all(f.path, m) && xp_layout(o, Lo, e) && xp_layout(m, Lm, e) &&
+        Lo.files.size() == Lm.files.size()) {
+        r.ok = true;
+        for (size_t i = 0; i < Lo.files.size() && r.ok; i++) {
+            const uint64_t ao = (uint64_t)Lo.data_off + Lo.files[i].off, am = (uint64_t)Lm.data_off + Lm.files[i].off;
+            const uint32_t so = Lo.files[i].size, sm = Lm.files[i].size;
+            if (ao + so > o.size() || am + sm > m.size()) { r.ok = false; break; }
+            if (so != sm || memcmp(o.data() + ao, m.data() + am, so)) r.changed.push_back((int)i);
+        }
+        if (!r.ok) r.changed.clear();
+    }
+    if (!g.cache.empty()) {
+        std::string c = key + (r.ok ? "ok" : "no");
+        for (int i : r.changed) c += " " + std::to_string(i);
+        c += "\n";
+        mkdirs(dir);
+        write_all(cp, Bytes(c.begin(), c.end()));
+    }
+    fprintf(stderr, "[mods] merge: %s changes %s\n", f.path.c_str(),
+            r.ok ? (std::to_string(r.changed.size()) + " of its packed files").c_str() : "a file that can't be compared packed file by packed file");
+    g_pf[key] = r;
+    return r;
+}
+
+static const Part* whole_of(const Mod& m, const std::string& t)
+{
+    for (const Part& f : m.files) if (f.target == t) return &f;
+    return nullptr;
+}
+
+/* The packed files m changes in t: its whole file's changed ones, and its
+ * packed-file patches. false: not known (a texture patch, or a file that
+ * doesn't compare). */
+static bool touched(const Mod& m, const std::string& t, std::set<int>& out)
+{
+    for (const Tex& x : m.tex) if (x.target == t) return false;
+    if (const Part* f = whole_of(m, t)) {
+        const PfDiff d = pf_diff(*f);
+        if (!d.ok) return false;
+        out.insert(d.changed.begin(), d.changed.end());
+    }
+    for (const Xp& x : m.xp) if (x.target == t) out.insert(x.index);
+    return true;
+}
+
+static bool mods_clash(const Mod& a, const Mod& b, const std::set<std::string>* skip = nullptr)
+{
+    for (const std::string& t : a.targets) {
+        if (!b.targets.count(t) || (skip && skip->count(t))) continue;
+        if (whole_of(a, t) || whole_of(b, t)) {   /* merged when they change different packed files */
+            std::set<int> sa, sb;
+            if (!touched(a, t, sa) || !touched(b, t, sb)) return true;
+            for (int i : sa) if (sb.count(i)) return true;
+            continue;
+        }
+        for (const Tex& x : a.tex)
+            for (const Tex& y : b.tex)
+                if (x.target == t && y.target == t && x.off == y.off) return true;
+        for (const Xp& x : a.xp)
+            for (const Xp& y : b.xp)
+                if (x.target == t && xp_overlap(x, y)) return true;
+    }
     return false;
+}
+
+/* ---- merge patches (mod.json "patch_for") ---------------------------------------
+ * Two mods that change the same parts of a file can't both be used. A third mod,
+ * a merge patch, can carry the file with both mods' changes: "patch_for": ["Mod A",
+ * "Mod B"] (folder or name). It is used only while every mod it names is used;
+ * then, for the files it has, its copy replaces theirs, and those files no longer
+ * count as a clash between them (or with the patch). Their other files are used
+ * as always. The Mods page lists it like any mod; turned off, the named mods clash
+ * as before. */
+static std::string and_list(const std::vector<std::string>& v);
+static bool patch_names(const Mod& p, const Mod& m)
+{
+    if (&p == &m) return false;
+    for (const std::string& s : p.patch_for) if (ieq(s, m.folder) || ieq(s, m.name)) return true;
+    return false;
+}
+
+/* The files the used patches carry for each mod they name (by index). */
+static std::map<size_t, std::set<std::string>> patch_cover(const std::vector<Mod>& mods, const std::vector<size_t>& used)
+{
+    std::map<size_t, std::set<std::string>> c;
+    for (size_t p : used) {
+        if (mods[p].patch_for.empty()) continue;
+        for (size_t i : used)
+            if (patch_names(mods[p], mods[i])) c[i].insert(mods[p].targets.begin(), mods[p].targets.end());
+    }
+    return c;
 }
 
 /* The order mods are applied in: the ones with a priority first, the higher
@@ -1581,19 +1718,67 @@ static std::vector<size_t> plan_pass(const std::vector<Mod>& mods, const std::ve
                                      const std::map<std::string, std::string>& out, std::map<std::string, std::string>& why,
                                      std::map<size_t, std::vector<size_t>>* lost_to = nullptr)
 {
-    std::vector<size_t> used;
-    for (size_t i : order) {
-        const Mod& m = mods[i];
-        if (m.live || !m.on || !m.for_game || !m.err.empty() || out.count(lower(m.folder))) continue;   /* live: not served at load */
-        std::vector<size_t> clash;
-        for (size_t u : used) if (mods_clash(m, mods[u])) clash.push_back(u);
-        if (clash.empty()) { used.push_back(i); continue; }
-        std::string s = "it changes the same files as ";
-        for (size_t k = 0; k < clash.size(); k++) s += (k ? ", " : "") + mods[clash[k]].name;
-        why[lower(m.folder)] = s;
-        if (lost_to) (*lost_to)[i] = clash;
+    auto can = [&](const Mod& m) { return !m.live && m.on && m.for_game && m.err.empty() && !out.count(lower(m.folder)); };   /* live: not served at load */
+    const std::map<std::string, std::string> why0 = why;
+    std::set<size_t> dropped;   /* merge patches whose mods were not all used: tried again without them */
+    for (size_t round = 0; round <= mods.size() + 1; round++) {
+        why = why0;
+        std::map<size_t, std::vector<size_t>> lost;
+        /* merge patches whose mods are all on go first, then the rest in order */
+        std::vector<size_t> ready, rest;
+        for (size_t i : order) {
+            const Mod& m = mods[i];
+            if (!can(m)) continue;
+            if (m.patch_for.empty()) { rest.push_back(i); continue; }
+            std::vector<std::string> names;
+            bool all = !dropped.count(i);
+            for (const std::string& nm : m.patch_for) {
+                bool got = false;
+                for (size_t j = 0; j < mods.size() && !got; j++)
+                    if (j != i && mods[j].patch_for.empty() && (ieq(nm, mods[j].folder) || ieq(nm, mods[j].name)) && can(mods[j])) got = true;
+                if (!got) all = false;
+                names.push_back(nm);
+            }
+            if (all) ready.push_back(i);
+            else why[lower(m.folder)] = "a merge patch, used only while " + and_list(names) + (names.size() > 1 ? " are" : " is") + " used";
+        }
+        std::vector<size_t> used;
+        auto skip_for = [&](size_t a, size_t b) {   /* the files a used patch merges for a and b */
+            std::set<std::string> s;
+            for (size_t p : used) {
+                if (mods[p].patch_for.empty()) continue;
+                const bool ca = p == a || patch_names(mods[p], mods[a]), cb = p == b || patch_names(mods[p], mods[b]);
+                if (ca && cb) s.insert(mods[p].targets.begin(), mods[p].targets.end());
+            }
+            return s;
+        };
+        for (const std::vector<size_t>* list : { &ready, &rest })
+            for (size_t i : *list) {
+                const Mod& m = mods[i];
+                std::vector<size_t> clash;
+                for (size_t u : used) {
+                    const std::set<std::string> sk = skip_for(i, u);
+                    if (mods_clash(m, mods[u], &sk)) clash.push_back(u);
+                }
+                if (clash.empty()) { used.push_back(i); continue; }
+                std::string s = "it changes the same files as ";
+                for (size_t k = 0; k < clash.size(); k++) s += (k ? ", " : "") + mods[clash[k]].name;
+                why[lower(m.folder)] = s;
+                lost[i] = clash;
+            }
+        /* a used patch needs every mod it names used too */
+        bool again = false;
+        for (size_t p : used) {
+            if (mods[p].patch_for.empty()) continue;
+            for (size_t j = 0; j < mods.size(); j++)
+                if (patch_names(mods[p], mods[j]) && mods[j].patch_for.empty() && can(mods[j]) &&
+                    std::find(used.begin(), used.end(), j) == used.end()) { dropped.insert(p); again = true; }
+        }
+        if (again) continue;
+        if (lost_to) for (auto& l : lost) (*lost_to)[l.first] = l.second;
+        return used;
     }
-    return used;
+    return {};
 }
 
 /* A mod as it would be used: its folder, the options picked and its files. */
@@ -1624,18 +1809,65 @@ static void resolve(std::vector<Mod>& mods)
         bool again = false;
         std::set<std::string> targets;
         for (size_t i : used) for (const std::string& t : mods[i].targets) targets.insert(t);
+        const std::map<size_t, std::set<std::string>> cover = patch_cover(mods, used);   /* a merge patch's files replace theirs */
         for (const std::string& t : targets) {
             const Part* base = nullptr;
             std::vector<const Tex*> tl;
             std::vector<const Xp*> xl;
             std::set<size_t> who;
+            std::vector<const Part*> bases;
             for (size_t i : used) {
-                for (const Part& f : mods[i].files) if (f.target == t) { base = &f; who.insert(i); }
+                auto cv = cover.find(i);
+                if (cv != cover.end() && cv->second.count(t)) continue;
+                for (const Part& f : mods[i].files) if (f.target == t) { base = &f; bases.push_back(&f); who.insert(i); }
                 for (const Tex& x : mods[i].tex) if (x.target == t) { tl.push_back(&x); who.insert(i); }
                 for (const Xp& x : mods[i].xp) if (x.target == t) { xl.push_back(&x); who.insert(i); }
             }
             std::string bym;
             for (size_t i : who) bym += (bym.empty() ? "" : " + ") + mods[i].name;
+            std::deque<Xp> merged;   /* an automatic merge: each mod's changed packed files, onto the game's file */
+            if (bases.size() > 1) {
+                std::string merr;
+                for (const Part* b : bases) {
+                    const PfDiff d = pf_diff(*b);
+                    Bytes md;
+                    XpLayout Lm;
+                    if (!d.ok || !read_all(b->path, md) || !xp_layout(md, Lm, merr)) { merr = "cannot merge " + b->path; break; }
+                    for (int pi : d.changed) {
+                        if (pi < 0 || (size_t)pi >= Lm.files.size()) { merr = "cannot merge " + b->path; break; }
+                        const XpFile& F = Lm.files[(size_t)pi];
+                        const uint64_t a0 = (uint64_t)Lm.data_off + F.off;
+                        if (a0 + F.size > md.size()) { merr = "cannot merge " + b->path; break; }
+                        Xp x;
+                        x.target = t; x.index = pi; x.chunk = false;
+                        x.name = base_of(b->path) + " file_" + std::to_string(pi);
+                        x.path = join(join(g.cache, "merge"), hex64(fnv64(sig_line("mod", b->path) + t + " " + std::to_string(pi))) + ".bin");
+                        if (!finfo(x.path).ok) {
+                            mkdirs(join(g.cache, "merge"));
+                            if (!write_all(x.path, Bytes(md.begin() + (ptrdiff_t)a0, md.begin() + (ptrdiff_t)(a0 + F.size)))) { merr = "cannot write " + x.path; break; }
+                        }
+                        merged.push_back(x);
+                    }
+                    if (!merr.empty()) break;
+                }
+                if (merr.empty()) {
+                    std::vector<const Xp*> all;
+                    for (const Xp& x : merged) all.push_back(&x);
+                    all.insert(all.end(), xl.begin(), xl.end());
+                    xl.swap(all);
+                    base = nullptr;
+                    fprintf(stderr, "[mods] merge: %s from %s (%zu packed file(s))\n", t.c_str(), bym.c_str(), merged.size());
+                } else {   /* leave out the last of them, as a failed build does */
+                    fprintf(stderr, "[mods] %s: %s\n", t.c_str(), merr.c_str());
+                    size_t last = *who.begin();
+                    for (size_t i : who) if (rank[i] > rank[last]) last = i;
+                    blamed[lower(mods[last].folder)] = "could not merge " + t + " with the mods before it: " + merr;
+                    StartInfo& f = fails[lower(mods[last].folder)];
+                    for (size_t i : who) if (i != last) f.partners[lower(mods[i].folder)] = mod_key(mods[i]);
+                    again = true;
+                    break;
+                }
+            }
             if (tl.empty() && xl.empty()) { serve[t] = base->path; by[t] = bym; continue; }
             std::string path, err;
             if (!build(t, base, tl, xl, arcs, path, err)) {

@@ -56,10 +56,14 @@ The page also says why a mod is not used:
 - its `mod.json` doesn't name the game,
 - one of its files is broken (for example, a texture whose header doesn't
   match its name),
-- it changes the same file as a mod that comes before it.
+- it changes the same file as a mod that comes before it, and the two can't
+  be merged,
+- it is a merge patch and not every mod it names is used.
 
 When two mods change the same thing, the Manager refuses to turn on the second
-one. Here the one that comes first is used and the other is left out whole.
+one. Here the port first tries to merge them (see **Merging** below); only
+when that can't be done is the one that comes first used and the other left
+out whole.
 First means: the mods you put first with **Use this one instead** (each goes
 above every mod it clashes with), then the rest by folder name. "The same thing" means the same
 whole file, a texture at the same offset, an overlapping packed-file patch, or
@@ -69,6 +73,35 @@ works alone, the last one in that order is left out. The page's view of the
 next start uses the clash rule only (nothing is built while you choose); the
 start itself builds everything, and a mod whose file could not be built this
 time stays shown as not used until it or the mods it failed with change.
+
+### Merging
+
+Two mods that change the same file are both used when the port can merge them:
+
+- **Different packed files, merged by themselves.** An `.xpps` file holds
+  packed files. When mods replace the same whole file (or one replaces it and
+  another patches packed files in it with `xpps_patches`), each mod's copy is
+  compared with the game's, packed file by packed file. If they changed
+  different packed files, the game gets its own file with each mod's changed
+  packed files put in (as `file_<i>_...` patches would) and the other mods'
+  packed-file patches on top. Two mods that changed the same packed file, a
+  copy with a different number of packed files, or a texture patch onto such a
+  file still clash. The comparison reads both files once; it is cached in
+  `mods\.port_cache\merge` (by the mod file's size and time) for the next
+  starts. Log lines start with `[mods] merge:`.
+- **A merge patch, for mods that change the same parts.** A third mod can
+  carry the file with both mods' changes and say which mods it merges:
+
+  ```
+  {"game": "inf2", "name": "Lightning Bolt + Electric Dash patch", "patch_for": ["Lightning Bolt", "Electric Dash"], ...}
+  ```
+
+  Each name is a mod's folder or name. The patch is used only while every
+  mod it names is used. Then its files replace theirs for the files it has,
+  those files are no longer a clash between them (or with the patch), and
+  their other files are used as always. With one of them off, the page says
+  "a merge patch, used only while ... are used" and the other is used alone;
+  with the patch off, they clash as before. The Manager ignores the key.
 
 Downloaded mods are treated as untrusted:
 
@@ -148,6 +181,7 @@ applied), and the new one waits for the old one to end.
 
 ```
 <mod>/mod.json        {"game": "inf2", "name": ..., "author": ..., "version": ...}
+                      port only: "patch_for": [mods] (a merge patch, see Merging)
 <mod>/files/          .xpps files that replace the game's (by file name, any subfolder;
                       a mod with no files/ folder keeps them in the mod folder itself)
 <files>/texture_patches/<target>.xpps/[data]<OFFSET>_..._<W>x<H>_<DXTn>_m<mips>.dds
