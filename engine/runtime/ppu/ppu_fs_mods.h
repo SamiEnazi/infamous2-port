@@ -1995,14 +1995,14 @@ static void clash_items(const Mod& a, const Mod& b, std::vector<Clash>& out, con
         std::vector<int> pi;   /* packed files both change */
         if (whole_of(a, t) || whole_of(b, t)) {   /* merged when they change different packed files */
             std::set<int> sa, sb;
-            if (!touched(a, t, sa) || !touched(b, t, sb)) { out.push_back({ t, "*", false }); continue; }
+            if (!touched(a, t, sa) || !touched(b, t, sb)) { out.push_back({ t, "*", a.live != b.live }); continue; }
             for (int i : sa) if (sb.count(i)) pi.push_back(i);
         } else {
             std::set<uint32_t> offs;
             for (const Tex& x : a.tex)
                 for (const Tex& y : b.tex)
                     if (x.target == t && y.target == t && x.off == y.off) offs.insert(x.off);
-            for (uint32_t off : offs) { char h[16]; snprintf(h, sizeof h, "t%x", (unsigned)off); out.push_back({ t, h, false }); }
+            for (uint32_t off : offs) { char h[16]; snprintf(h, sizeof h, "t%x", (unsigned)off); out.push_back({ t, h, a.live != b.live }); }
             std::set<int> ps;
             for (const Xp& x : a.xp)
                 for (const Xp& y : b.xp)
@@ -2012,6 +2012,7 @@ static void clash_items(const Mod& a, const Mod& b, std::vector<Clash>& out, con
         if (pi.empty()) continue;
         std::vector<char> ok(pi.size(), 0);
         if (can_merge && !a.live && !b.live) pf_merge(a, b, t, pi, ok);
+        if (a.live != b.live) ok.assign(pi.size(), 1);   /* a live mod and a regular one: the regular mod keeps it, no question */
         for (size_t k = 0; k < pi.size(); k++) out.push_back({ t, "p" + std::to_string(pi[k]), ok[k] != 0 });
     }
 }
@@ -2143,16 +2144,7 @@ static void merge_used(std::vector<Mod>& fm, const std::vector<size_t>& used, co
                            (w ? fm[a] : fm[b]).name + "'s");
             }
         }
-    for (size_t a : used)
-        for (size_t l : live_on) {
-            std::vector<Clash> cl;
-            clash_items(fm[a], fm[l], cl, nullptr, false);
-            for (const Clash& k : cl)
-                if (res_winner(fm[a], fm[l], k.target, k.item) == 1) {
-                    drop_item(fm[a], k.target, k.item);
-                    merge_note(k.target + ", " + item_label(k.item) + ": left to the live mod " + fm[l].name + ", not " + fm[a].name + "'s");
-                }
-        }
+    (void)live_on;   /* a live mod never takes a part from a regular mod: it leaves its own out (live_build) */
 }
 
 /* The order mods are applied in: the ones with a priority first, the higher
@@ -2666,14 +2658,15 @@ static bool live_partner_now_locked(const Mod& o)
     return it != g.start.end() && it->second.active;
 }
 /* With g.mx held: a live mod's build key: mod_key, and the mods in the game now
- * that it resolved a conflict with (their parts it leaves out change with them). */
+ * that it resolved a conflict with, and the regular mods in the game now (their parts
+ * it leaves out change with them). */
 static std::string live_key_locked(const Mod& m)
 {
     std::string k = mod_key(m);
     for (const Mod& o : g.list) {
         if (&o == &m || !live_partner_now_locked(o)) continue;
         const std::string f = lower(o.folder) + "|";
-        bool any = false;
+        bool any = !o.live;   /* a regular mod in the game: its parts are always left out */
         for (const auto& r : m.res) if (!r.first.compare(0, f.size(), f)) { any = true; break; }
         if (any) k += "|with " + lower(o.folder);
     }
@@ -3017,7 +3010,7 @@ static void live_worker()
                 std::vector<Clash> cl;
                 try { clash_items(m, o, cl, nullptr, false); } catch (const std::exception&) {}
                 for (const Clash& k : cl)
-                    if (res_winner(m, o, k.target, k.item) == 1) {
+                    if (!o.live || res_winner(m, o, k.target, k.item) == 1) {   /* a regular mod always keeps its parts */
                         drop_item(m, k.target, k.item);
                         fprintf(stderr, "[mods] live: \"%s\": %s, %s left to %s (the player's choice)\n", m.name.c_str(), k.target.c_str(),
                                 item_label(k.item).c_str(), o.name.c_str());

@@ -926,11 +926,22 @@ static void test_conflicts()
         merge_used(fm, { 0, 1 }, {});
         CHECK(fm[0].files.empty() && fm[1].tex.size() == 1);
     }
-    {   /* a live mod: never merged byte by byte, but a part can be given to it */
+    {   /* a live mod against a regular one: no question asked, the regular mod keeps every part
+           (the live mod leaves its overlapping windows out), even with an old "live wins" line */
         Mod l = b; l.live = true; l.folder = "CL"; l.name = "CL";
         std::vector<Clash> c3;
         clash_items(a, l, c3);
-        CHECK(c3.size() == 2 && !c3[0].merges && !c3[1].merges);
+        CHECK(!c3.empty());
+        bool all = true;
+        for (const Clash& k : c3) all = all && k.merges;
+        CHECK(all && !mods_clash(a, l));
+        l.res["ca|zeke.xpps|p0"] = true; a.res["cl|zeke.xpps|p0"] = false;
+        std::vector<Mod> fm = { a, l };
+        merge_used(fm, { 0 }, {}, { 1 });
+        CHECK(fm[0].files.size() == a.files.size());
+        bool nodrop = true;
+        for (const Part& p : fm[0].files) nodrop = nodrop && p.drop.empty();
+        CHECK(nodrop);
     }
     {
         std::lock_guard<std::mutex> lk(g.mx);
