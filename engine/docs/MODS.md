@@ -84,9 +84,10 @@ Two mods that change the same file are both used when the port can merge them:
   compared with the game's, packed file by packed file. If they changed
   different packed files, the game gets its own file with each mod's changed
   packed files put in (as `file_<i>_...` patches would) and the other mods'
-  packed-file patches on top. Two mods that changed the same packed file, a
-  copy with a different number of packed files, or a texture patch onto such a
-  file still clash. The comparison reads both files once; it is cached in
+  packed-file patches on top. A copy that adds packed files at the end (a
+  new power usually does) is fine too: then the others' changed packed files
+  go into that copy instead of the game's. Two copies that both add packed
+  files, or a texture patch onto such a file, can't be combined. The comparison reads both files once; it is cached in
   `mods\.port_cache\merge` (by the mod file's size and time) for the next
   starts. Log lines start with `[mods] merge:`.
 - **A merge patch, for mods that change the same parts.** A third mod can
@@ -110,8 +111,8 @@ Two mods that change the same file are both used when the port can merge them:
   about 16 bytes count as one place.
 - **Conflicts: the same place.** When both change the very same place of a
   packed file (or something that can't be combined: a texture at the same
-  offset, a texture patch onto a file the other replaces, a file with another
-  number of packed files), turning the second mod on asks **Combine these
+  offset, a texture patch onto a file the other replaces, two copies that
+  both add packed files), turning the second mod on asks **Combine these
   mods?**. **Combine** combines everything as above, and where both change
   the same place the mod you just turned on is used there (a checkbox gives
   those places to the other mod instead); a part that can't be combined uses
@@ -127,8 +128,11 @@ Two mods that change the same file are both used when the port can merge them:
   the mods that are on, so turning a mod off takes its changes back out.
   What each file got from which mod is written to `merge_log.txt` in the
   mods folder at every start (and to the session log, `[mods] merge:`).
-  Live mods are never combined byte by byte: where a live mod and another
-  change the same part, the mod you turned on keeps it.
+  Live mods are never combined byte by byte and never asked about with a
+  regular mod: the regular mod's file is used whole and the live mod's
+  bytes are written on top in memory wherever its own windows are found
+  there (where the regular mod changed those very bytes, they are not).
+  Between two live mods, the mod you turned on keeps a part both change.
 
 Downloaded mods are treated as untrusted:
 

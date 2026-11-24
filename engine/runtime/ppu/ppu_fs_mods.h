@@ -1583,7 +1583,7 @@ static bool xp_overlap(const Xp& a, const Xp& b)
  * on top. Texture patches onto such a file still clash: their offsets move with
  * the packed files. Comparisons are cached in <cache>/merge by the mod file's
  * path, size and time, so only the first start after a change reads the files. */
-struct PfDiff { bool ok = false; std::vector<int> changed; };
+struct PfDiff { bool ok = false; std::vector<int> changed; int extra = 0; };   /* extra: packed files it adds at the end */
 static std::mutex g_pf_mx;
 static std::map<std::string, PfDiff> g_pf;
 static Arcs g_pf_arcs;   /* under g_pf_mx: the game's archives, for the comparisons */
@@ -1599,7 +1599,7 @@ static std::string hex64(uint64_t v) { char b[24]; snprintf(b, sizeof b, "%016ll
 /* The packed files f's copy of its target changes against the game's. */
 static PfDiff pf_diff(const Part& f)
 {
-    const std::string key = sig_line("mod", f.path) + "target " + f.target + "\n";
+    const std::string key = "v2\n" + sig_line("mod", f.path) + "target " + f.target + "\n";
     std::lock_guard<std::mutex> lk(g_pf_mx);
     auto it = g_pf.find(key);
     if (it != g_pf.end()) return it->second;
@@ -1613,7 +1613,13 @@ static PfDiff pf_diff(const Part& f)
             if (!rest.compare(0, 2, "ok")) {
                 r.ok = true;
                 const char* p = rest.c_str() + 2;
-                while (*p) { char* e = nullptr; const long v = strtol(p, &e, 10); if (e == p) break; r.changed.push_back((int)v); p = e; }
+                while (*p) {
+                    char* e = nullptr;
+                    const long v = strtol(p, &e, 10);
+                    if (e == p) break;
+                    if (v < 0) r.extra = (int)-v; else r.changed.push_back((int)v);
+                    p = e;
+                }
             }
             g_pf[key] = r;
             return r;
@@ -1625,25 +1631,28 @@ static PfDiff pf_diff(const Part& f)
     XpLayout Lo, Lm;
     std::string e;
     if (a && a->entry((uint32_t)idx, o) && read_all(f.path, m) && xp_layout(o, Lo, e) && xp_layout(m, Lm, e) &&
-        Lo.files.size() == Lm.files.size()) {
+        Lo.files.size() <= Lm.files.size()) {   /* the same packed files, or the game's and more at the end */
         r.ok = true;
+        r.extra = (int)(Lm.files.size() - Lo.files.size());
         for (size_t i = 0; i < Lo.files.size() && r.ok; i++) {
             const uint64_t ao = (uint64_t)Lo.data_off + Lo.files[i].off, am = (uint64_t)Lm.data_off + Lm.files[i].off;
             const uint32_t so = Lo.files[i].size, sm = Lm.files[i].size;
             if (ao + so > o.size() || am + sm > m.size()) { r.ok = false; break; }
             if (so != sm || memcmp(o.data() + ao, m.data() + am, so)) r.changed.push_back((int)i);
         }
-        if (!r.ok) r.changed.clear();
+        if (!r.ok) { r.changed.clear(); r.extra = 0; }
     }
     if (!g.cache.empty()) {
         std::string c = key + (r.ok ? "ok" : "no");
         for (int i : r.changed) c += " " + std::to_string(i);
+        if (r.extra) c += " -" + std::to_string(r.extra);
         c += "\n";
         mkdirs(dir);
         write_all(cp, Bytes(c.begin(), c.end()));
     }
     fprintf(stderr, "[mods] merge: %s changes %s\n", f.path.c_str(),
-            r.ok ? (std::to_string(r.changed.size()) + " of its packed files").c_str() : "a file that can't be compared packed file by packed file");
+            r.ok ? (std::to_string(r.changed.size()) + " of its packed files" + (r.extra ? " and adds " + std::to_string(r.extra) : std::string())).c_str()
+                 : "a file that can't be compared packed file by packed file");
     g_pf[key] = r;
     return r;
 }
@@ -1652,6 +1661,13 @@ static const Part* whole_of(const Mod& m, const std::string& t)
 {
     for (const Part& f : m.files) if (f.target == t) return &f;
     return nullptr;
+}
+
+/* Whether m's whole copy of t adds packed files (only one mod's can be the base). */
+static bool adds(const Mod& m, const std::string& t)
+{
+    const Part* f = whole_of(m, t);
+    return f && pf_diff(*f).extra > 0;
 }
 
 /* The packed files m changes in t: its whole file's changed ones, and its
@@ -1723,7 +1739,7 @@ static bool pf_version(const Mod& m, const std::string& t, int i, const Bytes& o
     if (f && !f->drop.count(i)) {
         XpLayout Lm;
         std::string e;
-        if (!md || !xp_layout(*md, Lm, e) || Lm.files.size() != Lo.files.size()) return false;
+        if (!md || !xp_layout(*md, Lm, e) || Lm.files.size() < Lo.files.size()) return false;
         const uint64_t a = (uint64_t)Lm.data_off + Lm.files[(size_t)i].off;
         if (a + Lm.files[(size_t)i].size > md->size()) return false;
         v.assign(md->begin() + (ptrdiff_t)a, md->begin() + (ptrdiff_t)(a + Lm.files[(size_t)i].size));
@@ -1995,7 +2011,7 @@ static void clash_items(const Mod& a, const Mod& b, std::vector<Clash>& out, con
         std::vector<int> pi;   /* packed files both change */
         if (whole_of(a, t) || whole_of(b, t)) {   /* merged when they change different packed files */
             std::set<int> sa, sb;
-            if (!touched(a, t, sa) || !touched(b, t, sb)) { out.push_back({ t, "*", a.live != b.live }); continue; }
+            if (!touched(a, t, sa) || !touched(b, t, sb) || (adds(a, t) && adds(b, t))) { out.push_back({ t, "*", a.live != b.live }); continue; }
             for (int i : sa) if (sb.count(i)) pi.push_back(i);
         } else {
             std::set<uint32_t> offs;
@@ -2012,7 +2028,8 @@ static void clash_items(const Mod& a, const Mod& b, std::vector<Clash>& out, con
         if (pi.empty()) continue;
         std::vector<char> ok(pi.size(), 0);
         if (can_merge && !a.live && !b.live) pf_merge(a, b, t, pi, ok);
-        if (a.live != b.live) ok.assign(pi.size(), 1);   /* a live mod and a regular one: the regular mod keeps it, no question */
+        if (a.live != b.live) ok.assign(pi.size(), 1);   /* a live mod and a regular one: both kept, no question (the live
+                                                            mod's bytes go in where its windows are found in memory) */
         for (size_t k = 0; k < pi.size(); k++) out.push_back({ t, "p" + std::to_string(pi[k]), ok[k] != 0 });
     }
 }
@@ -2144,7 +2161,7 @@ static void merge_used(std::vector<Mod>& fm, const std::vector<size_t>& used, co
                            (w ? fm[a] : fm[b]).name + "'s");
             }
         }
-    (void)live_on;   /* a live mod never takes a part from a regular mod: it leaves its own out (live_build) */
+    (void)live_on;   /* a live mod never takes a part from a regular mod: it patches on top in memory */
 }
 
 /* The order mods are applied in: the ones with a priority first, the higher
@@ -2295,7 +2312,15 @@ static void resolve(std::vector<Mod>& mods)
             for (const Part* b : bases) if (!b->drop.empty()) dropped = true;
             if (bases.size() > 1 || dropped) {
                 std::string merr;
+                const Part* grown = nullptr;   /* a copy that adds packed files: the others' go into it, not the game's */
+                for (const Part* b : bases)
+                    if (pf_diff(*b).extra > 0) {
+                        if (grown) { merr = "both " + grown->path + " and " + b->path + " add packed files"; break; }
+                        grown = b;
+                    }
                 for (const Part* b : bases) {
+                    if (!merr.empty()) break;
+                    if (b == grown) continue;   /* the base itself */
                     const PfDiff d = pf_diff(*b);
                     Bytes md;
                     XpLayout Lm;
@@ -2318,13 +2343,26 @@ static void resolve(std::vector<Mod>& mods)
                     }
                     if (!merr.empty()) break;
                 }
+                if (merr.empty() && grown)   /* a packed file of the base given to another mod must be replaced by one */
+                    for (int pi : grown->drop) {
+                        bool got = false;
+                        for (const Xp& x : merged) if (x.index == pi && !x.chunk) got = true;
+                        for (const Xp* x : xl) if (x->index == pi && !x->chunk) got = true;
+                        if (!got) { merr = "packed file " + std::to_string(pi) + " of " + grown->path + " is left out with nothing in its place"; break; }
+                    }
                 if (merr.empty()) {
                     std::vector<const Xp*> all;
                     for (const Xp& x : merged) all.push_back(&x);
                     all.insert(all.end(), xl.begin(), xl.end());
                     xl.swap(all);
-                    base = nullptr;
-                    merge_note(t + ": built from the game's copy + " + bym + " (" + std::to_string(merged.size()) + " changed packed file(s))");
+                    base = grown;
+                    if (grown) {
+                        std::string gm;
+                        for (size_t i : who) for (const Part& f : fm[i].files) if (&f == grown) gm = mods[i].name;
+                        merge_note(t + ": built from " + gm + "'s copy (it adds " + std::to_string(pf_diff(*grown).extra) + " packed file(s)) + " + bym +
+                                   " (" + std::to_string(merged.size()) + " changed packed file(s) of the others)");
+                    } else
+                        merge_note(t + ": built from the game's copy + " + bym + " (" + std::to_string(merged.size()) + " changed packed file(s))");
                 } else {   /* leave out the last of them, as a failed build does */
                     fprintf(stderr, "[mods] %s: %s\n", t.c_str(), merr.c_str());
                     size_t last = *who.begin();
@@ -2658,15 +2696,14 @@ static bool live_partner_now_locked(const Mod& o)
     return it != g.start.end() && it->second.active;
 }
 /* With g.mx held: a live mod's build key: mod_key, and the mods in the game now
- * that it resolved a conflict with, and the regular mods in the game now (their parts
- * it leaves out change with them). */
+ * that it resolved a conflict with (their parts it leaves out change with them). */
 static std::string live_key_locked(const Mod& m)
 {
     std::string k = mod_key(m);
     for (const Mod& o : g.list) {
         if (&o == &m || !live_partner_now_locked(o)) continue;
         const std::string f = lower(o.folder) + "|";
-        bool any = !o.live;   /* a regular mod in the game: its parts are always left out */
+        bool any = false;
         for (const auto& r : m.res) if (!r.first.compare(0, f.size(), f)) { any = true; break; }
         if (any) k += "|with " + lower(o.folder);
     }
@@ -3010,7 +3047,7 @@ static void live_worker()
                 std::vector<Clash> cl;
                 try { clash_items(m, o, cl, nullptr, false); } catch (const std::exception&) {}
                 for (const Clash& k : cl)
-                    if (!o.live || res_winner(m, o, k.target, k.item) == 1) {   /* a regular mod always keeps its parts */
+                    if (o.live && res_winner(m, o, k.target, k.item) == 1) {   /* live vs live: the player's choice */
                         drop_item(m, k.target, k.item);
                         fprintf(stderr, "[mods] live: \"%s\": %s, %s left to %s (the player's choice)\n", m.name.c_str(), k.target.c_str(),
                                 item_label(k.item).c_str(), o.name.c_str());
