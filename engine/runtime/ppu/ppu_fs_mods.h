@@ -97,6 +97,7 @@
 #include <vector>
 #include <ctype.h>
 #include "ps3emu/ps3_game_mods.h"
+#include "ppu_fs_xcombine.h"   /* format-aware combine of two mods' whole copies of one PACK file */
 #ifdef _WIN32
 #include <direct.h>
 #include <shellapi.h>
@@ -2001,6 +2002,87 @@ static void pf_merge(const Mod& a, const Mod& b, const std::string& t, const std
     }
 }
 
+/* Two mods' whole copies of t, combined by what each added and changed (ppu_fs_xcombine.h):
+ * pointers, lists both extended, counters both raised, the same insert from both.
+ * Only for whole copies with nothing else on t. The pair is taken in a fixed order
+ * (by their files), so a and b either way round give the same file. Cached like
+ * pf_merge: memory, and <cache>/merge/<hash>.x (the answer and its log) + .xpps. */
+struct XcRes { bool ok = false; std::string path, err; std::vector<std::string> log; };
+static std::map<std::string, XcRes> g_xc;   /* under g_pf_mx */
+static bool xc_fit(const Mod& m, const std::string& t)
+{
+    const Part* f = whole_of(m, t);
+    if (!f || !f->drop.empty() || m.live) return false;
+    for (const Tex& x : m.tex) if (x.target == t) return false;
+    for (const Xp& x : m.xp) if (x.target == t) return false;
+    return true;
+}
+static const XcRes* xc_combine(const Mod& a, const Mod& b, const std::string& t)
+{
+    if (!xc_fit(a, t) || !xc_fit(b, t) || g.cache.empty()) return nullptr;
+    std::string sa = sig_line("mod", whole_of(a, t)->path), sb = sig_line("mod", whole_of(b, t)->path);
+    const bool swap = sb < sa;
+    if (swap) std::swap(sa, sb);
+    const std::string key = "xcombine 1 " + t + "\n" + sa + sb;
+    std::lock_guard<std::mutex> lk(g_pf_mx);
+    auto it = g_xc.find(key);
+    if (it != g_xc.end()) return &it->second;
+    const std::string dir = join(g.cache, "merge"), h = hex64(fnv64(key));
+    {
+        Bytes cb;
+        if (read_all(join(dir, h + ".x"), cb)) {
+            const std::string c(cb.begin(), cb.end());
+            if (c.size() > key.size() && !c.compare(0, key.size(), key)) {
+                XcRes r;
+                size_t p = key.size();
+                auto line = [&]() { const size_t e = c.find('\n', p); std::string l = c.substr(p, e == std::string::npos ? std::string::npos : e - p); p = e == std::string::npos ? c.size() : e + 1; return l; };
+                const std::string st = line();
+                r.ok = st == "ok";
+                if (!r.ok) r.err = st.size() > 3 ? st.substr(3) : st;
+                while (p < c.size()) r.log.push_back(line());
+                if (r.ok) r.path = join(dir, h + ".xpps");
+                if (!r.ok || finfo(r.path).ok) return &g_xc.emplace(key, r).first->second;
+            }
+        }
+    }
+    XcRes r;
+    int ai = -1;
+    Psarc* ar = g_pf_arcs.find(t, ai);
+    Bytes o, ma, mb;
+    const Mod& A = swap ? b : a; const Mod& B = swap ? a : b;
+    if (!ar || !ar->entry((uint32_t)ai, o) || !read_all(whole_of(A, t)->path, ma) || !read_all(whole_of(B, t)->path, mb)) r.err = "a file could not be read";
+    else {
+        xm::Arc G, MA, MB;
+        xm::Delta da, db;
+        Bytes out;
+        if (!G.load(o)) r.err = "the game's file: " + G.err;
+        else if (!MA.load(ma)) r.err = A.name + "'s file: " + MA.err;
+        else if (!MB.load(mb)) r.err = B.name + "'s file: " + MB.err;
+        else if (!xm::make_delta(G, MA, A.name, da)) r.err = A.name + ": " + da.err;
+        else if (!xm::make_delta(G, MB, B.name, db)) r.err = B.name + ": " + db.err;
+        else {
+            /* each reading checked: its delta gives its file back */
+            Bytes chk;
+            std::string e;
+            if (!xm::apply_delta(G, da, chk, e) || chk != ma) r.err = A.name + "'s file is not read exactly";
+            else if (!xm::apply_delta(G, db, chk, e) || chk != mb) r.err = B.name + "'s file is not read exactly";
+            else if (xm::combine_files(G, da, db, 0, out, r.log, e)) {
+                mkdirs(dir);
+                r.path = join(dir, h + ".xpps");
+                r.ok = write_all(r.path, out);
+                if (!r.ok) r.err = "cannot write " + r.path;
+            } else r.err = e;
+        }
+    }
+    std::string c = key + (r.ok ? std::string("ok") : "no " + r.err) + "\n";
+    for (const std::string& l : r.log) c += l + "\n";
+    mkdirs(dir);
+    write_all(join(dir, h + ".x"), Bytes(c.begin(), c.end()));
+    fprintf(stderr, "[mods] combine: %s of %s and %s: %s\n", t.c_str(), A.name.c_str(), B.name.c_str(), r.ok ? "combined" : r.err.c_str());
+    for (const std::string& l : r.log) fprintf(stderr, "[mods] combine:   %s\n", l.c_str());
+    return &g_xc.emplace(key, r).first->second;
+}
+
 /* Every part a and b both change (skip: files a used merge patch carries for
  * them). can_merge: packed files may merge byte by byte (never with a live mod). */
 static void clash_items(const Mod& a, const Mod& b, std::vector<Clash>& out, const std::set<std::string>* skip = nullptr,
@@ -2009,6 +2091,10 @@ static void clash_items(const Mod& a, const Mod& b, std::vector<Clash>& out, con
     for (const std::string& t : a.targets) {
         if (!b.targets.count(t) || (skip && skip->count(t))) continue;
         std::vector<int> pi;   /* packed files both change */
+        if (can_merge && !a.live && !b.live) {   /* two whole copies: combined by what each added and changed */
+            const XcRes* x = xc_combine(a, b, t);
+            if (x && x->ok) { out.push_back({ t, "*", true }); continue; }
+        }
         if (whole_of(a, t) || whole_of(b, t)) {   /* merged when they change different packed files */
             std::set<int> sa, sb;
             if (!touched(a, t, sa) || !touched(b, t, sb) || (adds(a, t) && adds(b, t))) { out.push_back({ t, "*", a.live != b.live }); continue; }
@@ -2142,6 +2228,17 @@ static void merge_used(std::vector<Mod>& fm, const std::vector<size_t>& used, co
                 ok.assign(1, r.first ? 1 : 0); path.assign(1, r.second.first); ov.assign(1, r.second.second);
             };
             for (const Clash& k : cl) {
+                if (k.merges && k.item == "*" && !fm[a].live && !fm[b].live) {   /* whole copies combined */
+                    const XcRes* x = xc_combine(fm[a], fm[b], k.target);
+                    if (!x || !x->ok) continue;
+                    drop_item(fm[a], k.target, "*");
+                    drop_item(fm[b], k.target, "*");
+                    Part f; f.target = k.target; f.path = x->path;
+                    fm[a].files.push_back(f);
+                    merge_note(k.target + ": " + fm[a].name + " and " + fm[b].name + " combined (each one's additions kept)");
+                    for (const std::string& l : x->log) merge_note("  " + l);
+                    continue;
+                }
                 if (k.merges) {
                     if (k.item.size() < 2 || k.item[0] != 'p') continue;   /* (a live mod's part: kept by both) */
                     const int i = atoi(k.item.c_str() + 1);
