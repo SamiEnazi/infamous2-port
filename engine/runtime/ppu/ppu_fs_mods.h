@@ -812,6 +812,7 @@ struct Mod {
     std::vector<std::pair<int, std::string>> levels;   /* a live mod's "karma_levels": karma level (0-6) -> its folder */
     int dark = 0;                        /* a live mod's "dark_bolts": bit r = karma level r, 0x80 = always */
     std::vector<std::string> patch_for;  /* "patch_for": a patch that makes these mods (folder or name) work together */
+    std::vector<int> discover;           /* "discover_powers": powers (0-95) this mod adds, shown as discovered in any save */
     std::vector<Module> modules;
     bool on = true;                      /* the saved choice */
     bool have_pick = false;
@@ -1287,6 +1288,11 @@ static std::vector<Mod> scan()
                 for (size_t i = 0; i < kj->ok.size(); i++)
                     for (int q = 0; q < 7; q++)
                         if (ieq(kj->ok[i], kKarmaLevels[q]) && kj->ov[i].t == 3 && !kj->ov[i].s.empty()) m.levels.push_back({ q, kj->ov[i].s });
+        if (const J* dp = j.get("discover_powers"))   /* the power numbers a mod adds: a save made before it never
+                                                         * reaches their story moment, so they would stay undiscovered */
+            if (dp->t == 4)
+                for (const J& a : dp->a)
+                    if (a.t == 2) { const int v = atoi(a.s.c_str()); if (v >= 0 && v < 96) m.discover.push_back(v); }
         if (const J* pj = j.get("patch_for"))      /* the mods this patch merges: used only while all of them are */
             if (pj->t == 4)
                 for (const J& a : pj->a)
@@ -2247,6 +2253,36 @@ static int live_karma_level()
     return 3;
 }
 
+/* mod.json "discover_powers": while a save is being played (Cole's character object at 0x00A6E9E4 is set),
+ * each listed power whose word (0x00A64E60 + 4 * power, the save's power state: 1 discovered, 2 its
+ * requirement met, 4 bought, 0x20 new) lacks the 1 bit gets 0x23: discovered, buyable, marked new. The game
+ * saves it with the rest, so the power stays found when the mod is later turned off. Only mods in use. */
+static void live_discover()
+{
+    std::set<int> want;
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        if (!g.use) return;
+        for (const Mod& m : g.list)
+            if (m.on && m.for_game && m.err.empty()) for (int p : m.discover) want.insert(p);
+    }
+    if (want.empty() || !vm_base) return;
+    const HANDLE me = GetCurrentProcess();
+    uint8_t c[4], w[4 * 96];
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(me, vm_base + 0x00A6E9E4u, c, sizeof c, &got) || got != sizeof c || !be32(c)) return;
+    if (!ReadProcessMemory(me, vm_base + 0x00A64E60u, w, sizeof w, &got) || got != sizeof w) return;
+    for (int p : want) {
+        const uint32_t v = be32(w + 4 * p);
+        if (v & 1) continue;
+        uint8_t nv[4];
+        put_be32(nv, v | 0x23);
+        SIZE_T put = 0;
+        const bool ok = WriteProcessMemory(me, vm_base + 0x00A64E60u + 4u * (uint32_t)p, nv, sizeof nv, &put) && put == sizeof nv;
+        fprintf(stderr, "[mods] discover_powers: power %d %08x -> %08x%s\n", p, v, v | 0x23, ok ? "" : " (write failed)");
+    }
+}
+
 static void live_pass()
 {
     const auto t0 = std::chrono::steady_clock::now();
@@ -2414,6 +2450,7 @@ static void live_pass()
 }
 #else
 static int live_karma_level() { return -1; }
+static void live_discover() {}
 static void live_pass() {}
 #endif
 
@@ -2501,6 +2538,7 @@ static void live_worker()
         while (build_one(true)) {}
         live_pass();
         live_dark_update();
+        live_discover();
         if (build_one(false)) { std::lock_guard<std::mutex> lk(lv.mx); lv.kick = true; }   /* the next one soon */
     }
 }
@@ -2602,8 +2640,8 @@ static void init_body()
         }
         {
             bool any = false;
-            { std::lock_guard<std::mutex> lk(g.mx); for (const Mod& m : g.list) if (m.live) any = true; }
-            if (any) live_kick();
+            { std::lock_guard<std::mutex> lk(g.mx); for (const Mod& m : g.list) if (m.live || !m.discover.empty()) any = true; }
+            if (any) live_kick();   /* (the worker also finds "discover_powers" powers) */
         }
         test_start();
     }
