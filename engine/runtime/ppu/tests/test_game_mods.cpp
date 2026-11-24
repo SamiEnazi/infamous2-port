@@ -716,6 +716,170 @@ static void test_merge()
     g_pf.clear();
 }
 
+
+/* ---- conflicts: byte-by-byte merges and the player's choices, end to end ------- */
+static void be32_put(std::string& s, size_t at, uint32_t v) { s[at] = (char)(v >> 24); s[at + 1] = (char)(v >> 16); s[at + 2] = (char)(v >> 8); s[at + 3] = (char)v; }
+/* An XPPS PACK file: one chunk, packed files of the given bytes. */
+static std::string mk_xpps(const std::vector<std::string>& files)
+{
+    const size_t tab = 48, nf = files.size(), data = tab + 24 + 28 + nf * 16;
+    std::string d(data, '\0');
+    memcpy(&d[0], "PACK", 4);
+    uint32_t off = 0;
+    for (size_t i = 0; i < nf; i++) {
+        const size_t r = tab + 24 + 28 + i * 16;
+        be32_put(d, r + 4, (uint32_t)files[i].size()); be32_put(d, r + 8, off);
+        off += (uint32_t)files[i].size();
+    }
+    be32_put(d, 24, (uint32_t)tab); be32_put(d, 40, (uint32_t)data); be32_put(d, 44, off);
+    be32_put(d, tab + 4, 1); be32_put(d, tab + 12, (uint32_t)nf);
+    be32_put(d, tab + 24 + 4, off); be32_put(d, tab + 24 + 8, 0); be32_put(d, tab + 24 + 20, 0); be32_put(d, tab + 24 + 24, (uint32_t)nf);
+    for (const std::string& f : files) d += f;
+    return d;
+}
+/* A PSARC with these files, stored (not compressed). */
+static std::string mk_psarc(const std::vector<std::pair<std::string, std::string>>& files)
+{
+    std::vector<std::string> ent;
+    std::string names;
+    for (auto& f : files) names += "/" + f.first + "\n";
+    ent.push_back(names);
+    for (auto& f : files) ent.push_back(f.second);
+    const uint32_t bsz = 65536, n = (uint32_t)ent.size();
+    std::vector<uint32_t> blocks;
+    std::vector<uint32_t> first;
+    for (const std::string& e : ent) { first.push_back((uint32_t)blocks.size()); for (size_t q = 0; q < e.size() || q == 0; q += bsz) { blocks.push_back((uint32_t)(e.size() - q < bsz ? e.size() - q : 0)); if (e.empty()) break; } }
+    const uint32_t toclen = 32 + n * 30 + (uint32_t)blocks.size() * 2;
+    std::string h(32, '\0');
+    memcpy(&h[0], "PSAR", 4); be32_put(h, 4, 0x00010004); memcpy(&h[8], "zlib", 4);
+    be32_put(h, 12, toclen); be32_put(h, 16, 30); be32_put(h, 20, n); be32_put(h, 24, bsz);
+    std::string toc(n * 30, '\0'), tab;
+    uint64_t off = toclen;
+    for (uint32_t i = 0; i < n; i++) {
+        std::string& r = toc;
+        const size_t q = (size_t)i * 30;
+        be32_put(r, q + 16, first[i]);
+        const uint64_t usz = ent[i].size();
+        for (int k = 0; k < 5; k++) { r[q + 20 + k] = (char)(usz >> (8 * (4 - k))); r[q + 25 + k] = (char)(off >> (8 * (4 - k))); }
+        off += ent[i].size();
+    }
+    for (uint32_t b : blocks) { tab += (char)(b >> 8); tab += (char)b; }
+    std::string out = h + toc + tab;
+    for (const std::string& e : ent) out += e;
+    return out;
+}
+
+static void test_conflicts()
+{
+    /* the byte merge itself */
+    {
+        const uint8_t o[4] = { 1, 2, 3, 4 };
+        Bytes a = { 9, 2, 3, 4 }, b = { 1, 2, 3, 8 }, c = { 7, 2, 3, 4 }, m;
+        CHECK(merge_bytes(o, 4, a, b, m) && m == Bytes({ 9, 2, 3, 8 }));
+        CHECK(!merge_bytes(o, 4, a, c, m));           /* the same byte, two ways */
+        CHECK(merge_bytes(o, 4, a, a, m) && m == a);  /* the same change */
+        CHECK(!merge_bytes(o, 4, a, Bytes({ 1, 2, 3 }), m));
+    }
+    const std::string root = join(W, "cf");
+    wipe(root);
+    mkdirs(join(root, "game/PS3_GAME/USRDIR"));
+    std::vector<std::string> pf;
+    for (int i = 0; i < 3; i++) { std::string x(16, '\0'); for (int k = 0; k < 16; k++) x[k] = (char)(i * 16 + k); pf.push_back(x); }
+    put_file(join(root, "game/PS3_GAME/USRDIR/infamous2.psarc_s"), mk_psarc({ { "zeke.xpps", mk_xpps(pf) } }));
+    static std::string vfs;
+    vfs = join(root, "game");
+    ppu_vfs_root = vfs.c_str();
+    { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf_arcs = Arcs(); g_pf.clear(); g_bm.clear(); }
+    g.dir = join(root, "mods"); g.cache = join(g.dir, ".port_cache"); g.state_path = join(root, "cf_state.ini");
+    g.start.clear(); g.start_sig.clear(); g.use = true;
+    std::vector<std::string> fa = pf, fb = pf;
+    fa[1][0] = (char)0xA1; fa[2][3] = (char)0xA2;   /* A: packed file 1 byte 0, packed file 2 byte 3 */
+    fb[1][5] = (char)0xB1; fb[2][3] = (char)0xB2;   /* B: packed file 1 byte 5 (merges), packed file 2 byte 3 (conflicts) */
+    Mod a = mk("CA", {}, "zeke.xpps"), b = mk("CB", {}, "zeke.xpps");
+    a.path = join(g.dir, "CA"); b.path = join(g.dir, "CB");
+    a.files[0].path = join(a.path, "zeke.xpps"); b.files[0].path = join(b.path, "zeke.xpps");
+    put_file(a.files[0].path, mk_xpps(fa)); put_file(b.files[0].path, mk_xpps(fb));
+    std::vector<Clash> cl;
+    clash_items(a, b, cl);
+    CHECK(cl.size() == 2);
+    if (cl.size() == 2) {
+        CHECK(cl[0].item == "p1" && cl[0].merges);
+        CHECK(cl[1].item == "p2" && !cl[1].merges);
+    }
+    CHECK(mods_clash(a, b));
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.list = { a, b };
+        g.gen++;
+        plan_locked();
+        CHECK(g.plan.next[0] && !g.plan.next[1]);
+        CHECK(g.plan.unres[0] == 1 && g.plan.unres[1] == 1);
+    }
+    ps3_game_mod gm;
+    CHECK(ps3_game_mods_get(1, &gm) && gm.conflicts == 1 && !strcmp(gm.conflicts_with, "CA"));
+    ps3_game_mod_conflict c[8];
+    CHECK(ps3_game_mods_conflicts(1, c, 8) == 2);
+    CHECK(c[0].merges && !c[1].merges && c[1].winner == -1 && c[1].other == 0 && !strcmp(c[1].what, "zeke.xpps, packed file 2"));
+    const int w1[2] = { -1, 0 };   /* CB's version of packed file 2 */
+    CHECK(ps3_game_mods_resolve(1, w1, 2) == 2);   /* not live: a restart */
+    CHECK(ps3_game_mods_conflicts(1, c, 8) == 2 && c[1].winner == 0);
+    CHECK(ps3_game_mods_conflicts(0, c, 8) == 2 && c[1].winner == 1);
+    CHECK(ps3_game_mods_get(1, &gm) && gm.conflicts == 0 && gm.next && !strcmp(gm.merged_with, "CA"));
+    {   /* saved both ways in mods.ini, and read back */
+        const std::map<std::string, Saved> st = state_read();
+        CHECK(st.count("cb") && st.at("cb").res.count("ca|zeke.xpps|p2") && st.at("cb").res.at("ca|zeke.xpps|p2"));
+        CHECK(st.count("ca") && st.at("ca").res.count("cb|zeke.xpps|p2") && !st.at("ca").res.at("cb|zeke.xpps|p2"));
+        CHECK_HAS(get_file(g.state_path), "win = ca|zeke.xpps|p2");
+    }
+    auto served = [&]() {
+        std::vector<Mod> ms;
+        { std::lock_guard<std::mutex> lk(g.mx); ms = g.list; }
+        resolve(ms);
+        std::lock_guard<std::mutex> lk(g.mx);
+        auto it = g.serve.find("zeke.xpps");
+        return it == g.serve.end() ? std::string() : get_file(it->second);
+    };
+    {
+        std::vector<std::string> want = pf;
+        want[1][0] = (char)0xA1; want[1][5] = (char)0xB1; want[2][3] = (char)0xB2;
+        const std::string got = served();
+        CHECK(got == mk_xpps(want));
+        CHECK(g.start["ca"].active && g.start["cb"].active);
+    }
+    const int w2[2] = { -1, 1 };   /* now CA's */
+    CHECK(ps3_game_mods_resolve(1, w2, 2) == 2);
+    {
+        std::vector<std::string> want = pf;
+        want[1][0] = (char)0xA1; want[1][5] = (char)0xB1; want[2][3] = (char)0xA2;
+        CHECK(served() == mk_xpps(want));
+        CHECK(!ps3_game_mods_restart_needed());   /* this "session" now uses what is saved */
+    }
+    {   /* a texture patch onto a file another mod replaces: the whole file is the part */
+        Mod t = mk("CT", { { "zeke.xpps", 0x10 } });
+        std::vector<Clash> c2;
+        clash_items(a, t, c2);
+        CHECK(c2.size() == 1 && c2[0].item == "*" && !c2[0].merges);
+        t.res["ca|zeke.xpps|*"] = true;
+        CHECK(!mods_clash(a, t));
+        std::vector<Mod> fm = { a, t };
+        merge_used(fm, { 0, 1 }, {});
+        CHECK(fm[0].files.empty() && fm[1].tex.size() == 1);
+    }
+    {   /* a live mod: never merged byte by byte, but a part can be given to it */
+        Mod l = b; l.live = true; l.folder = "CL"; l.name = "CL";
+        std::vector<Clash> c3;
+        clash_items(a, l, c3);
+        CHECK(c3.size() == 2 && !c3[0].merges && !c3[1].merges);
+    }
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.list.clear(); g.gen++;
+    }
+    g.cache.clear();
+    ppu_vfs_root = ".";
+    { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf_arcs = Arcs(); g_pf.clear(); g_bm.clear(); }
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: test_game_mods <work folder> [<downloads> [<game folder>] [<png> <jpg>]]\n"); return 2; }
@@ -730,6 +894,8 @@ int main(int argc, char** argv)
     fprintf(stderr, "+mods.ini: %d ok, %d failed\n", g_pass, g_fail);
     test_merge();
     fprintf(stderr, "+merge: %d ok, %d failed\n", g_pass, g_fail);
+    test_conflicts();
+    fprintf(stderr, "+conflicts: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 6) test_images(slashes(argv[4]), slashes(argv[5]));
     fprintf(stderr, "+images: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 3) test_real(slashes(argv[2]), argc >= 4 ? slashes(argv[3]) : std::string());

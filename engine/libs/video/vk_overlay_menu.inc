@@ -234,6 +234,7 @@ static void menu_escape(void)
 {
     if (s_quit_ask) { s_quit_cancel = true; return; }
     if (s_restart_ask) { s_restart_cancel = true; return; }
+    if (s_cf_ask) { s_cf_cancel = true; return; }
     if (s_upd_ask) { s_upd_cancel = true; return; }
     if (remap_escape() || remap_capturing()) return;
     if (s_sub) { s_sub_want = SUB_NONE; return; }
@@ -732,12 +733,22 @@ static void page_mods(Rows& R)
         std::string by = sfmt("%s%s%s%s", ver ? "v" : "", ver ? m.version : "", who ? (ver ? " by " : "By ") : "", who ? m.author : "");
         const bool good = m.active && m.on && m.next;
         const bool bad = !m.for_game || !strncmp(m.status, "Not used", 8) || (m.on && !m.next && !m.live);
-        MRow& r = mrow_toggle(R, ("mod:" + std::string(m.folder)).c_str(), m.name, m.on != 0, [i](bool on) { ps3_game_mods_set_on(i, on ? 1 : 0); });
+        MRow& r = mrow_toggle(R, ("mod:" + std::string(m.folder)).c_str(), m.name, m.on != 0, [i](bool on) { ps3_game_mods_set_on(i, on ? 1 : 0); if (on) mods_conflict_open(i, true); });
         r.d(by.empty() ? sfmt("Folder: %s", m.folder) : by).st(m.status, bad).off(!m.for_game)
          .wh(m.live ? WH_INSTANT : (m.on != 0) != (m.active != 0) ? WH_PENDING : WH_RESTART);
         if (m.live) r.nt(sfmt("Live mod: %d texture patch(es), %d xpps patch(es), on and off at once", m.n_tex, m.n_xpps));
         else r.nt(sfmt("%d file(s), %d texture patch(es), %d xpps patch(es)%s", m.n_files, m.n_tex, m.n_xpps, good ? ", in use now" : ""));
         r.pic = pic_for(i, m);
+        if (m.conflicts && m.on && m.for_game)
+            mrow_action(R, ("conflict:" + std::string(m.folder)).c_str(), "Merge with the mods it conflicts with", "Resolve",
+                        [i] { mods_conflict_open(i, false); })
+                .d(sfmt("%d part(s) of the game files it and %s both change: pick whose version each uses.", m.conflicts, m.conflicts_with))
+                .ind().wh(m.live ? WH_INSTANT : WH_RESTART);
+        else if (m.merged_with[0] && m.on && m.for_game)
+            mrow_action(R, ("merged:" + std::string(m.folder)).c_str(), "Merged", "Change",
+                        [i] { mods_conflict_open(i, false); })
+                .d(sfmt("Used together with %s. Change whose version each shared part uses.", m.merged_with)).ind()
+                .wh(m.live ? WH_INSTANT : WH_RESTART);
         if (m.clash && m.on)
             mrow_action(R, ("prefer:" + std::string(m.folder)).c_str(), "Use this one instead", "Use", [i] { ps3_game_mods_prefer(i); })
                 .d(m.prefer).ind().wh(WH_RESTART);
@@ -1047,7 +1058,7 @@ static void menu_census(void)
 /* ---- input ---------------------------------------------------------------------- */
 static bool menu_modal(void)
 {
-    return s_quit_ask || s_restart_ask || s_upd_ask || s_rm.state != RM_IDLE ||
+    return s_quit_ask || s_restart_ask || s_cf_ask || s_upd_ask || s_rm.state != RM_IDLE ||
            ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
 }
 static bool kp(ImGuiKey k, bool rep = true) { return ImGui::IsKeyPressed(k, rep); }
@@ -1781,6 +1792,7 @@ static void draw_menu(double now)
 
     quit_confirm();
     restart_confirm();   /* [modsui] */
+    conflict_dialog();   /* [modsui] a mod turned on conflicts with another */
     update_confirm();    /* [update] */
     ImGui::End();
 
