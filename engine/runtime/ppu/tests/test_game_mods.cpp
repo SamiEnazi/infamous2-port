@@ -898,11 +898,11 @@ static void test_conflicts()
         }
         std::vector<Clash> c4;
         { std::lock_guard<std::mutex> lk(g.mx); clash_items(g.list[0], g.list[1], c4); }
-        CHECK(c4.size() == 1 && c4[0].item == "p0" && c4[0].merges);
+        CHECK(c4.size() == 1 && c4[0].item == "*" && c4[0].merges);   /* whole copies: combined by the format-aware merge */
         std::vector<std::string> want = base;
         want[0][300] = (char)0xB0; want[0].insert(2, "INSERTED-BY-CA");
         CHECK(served() == mk_xpps(want));
-        CHECK_HAS(get_file(join(g.dir, "merge_log.txt")), "zeke.xpps, packed file 0: CA and CB combined");
+        CHECK_HAS(get_file(join(g.dir, "merge_log.txt")), "zeke.xpps: CA and CB combined (each one's additions kept)");
         /* both change the same byte of packed file 0, CB resolved first: combined, CB's byte there */
         gb[0][500] = (char)0xBB; ga[0][500 + 14] = (char)0xAA;   /* the game's byte 500 (in CA's copy 14 further on) */
         put2(0, mk_xpps(ga), "v3/zeke.xpps"); put2(1, mk_xpps(gb), "v3/zeke.xpps");
