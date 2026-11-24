@@ -2023,7 +2023,7 @@ static const XcRes* xc_combine(const Mod& a, const Mod& b, const std::string& t)
     std::string sa = sig_line("mod", whole_of(a, t)->path), sb = sig_line("mod", whole_of(b, t)->path);
     const bool swap = sb < sa;
     if (swap) std::swap(sa, sb);
-    const std::string key = "xcombine 1 " + t + "\n" + sa + sb;
+    const std::string key = "xcombine 2 " + t + "\n" + sa + sb;
     std::lock_guard<std::mutex> lk(g_pf_mx);
     auto it = g_xc.find(key);
     if (it != g_xc.end()) return &it->second;
