@@ -740,14 +740,14 @@ static void page_mods(Rows& R)
         else r.nt(sfmt("%d file(s), %d texture patch(es), %d xpps patch(es)%s", m.n_files, m.n_tex, m.n_xpps, good ? ", in use now" : ""));
         r.pic = pic_for(i, m);
         if (m.conflicts && m.on && m.for_game)
-            mrow_action(R, ("conflict:" + std::string(m.folder)).c_str(), "Merge with the mods it conflicts with", "Resolve",
+            mrow_action(R, ("conflict:" + std::string(m.folder)).c_str(), "Combine with the mods it conflicts with", "Combine",
                         [i] { mods_conflict_open(i, false); })
-                .d(sfmt("%d part(s) of the game files it and %s both change: pick whose version each uses.", m.conflicts, m.conflicts_with))
+                .d(sfmt("It and %s change the same bytes in %d place(s) of the game files: combine them to use both.", m.conflicts_with, m.conflicts))
                 .ind().wh(m.live ? WH_INSTANT : WH_RESTART);
         else if (m.merged_with[0] && m.on && m.for_game)
-            mrow_action(R, ("merged:" + std::string(m.folder)).c_str(), "Merged", "Change",
+            mrow_action(R, ("merged:" + std::string(m.folder)).c_str(), "Combined", "Change",
                         [i] { mods_conflict_open(i, false); })
-                .d(sfmt("Used together with %s. Change whose version each shared part uses.", m.merged_with)).ind()
+                .d(sfmt("Used together with %s. Change whose bytes are used where both change the same place.", m.merged_with)).ind()
                 .wh(m.live ? WH_INSTANT : WH_RESTART);
         if (m.clash && m.on)
             mrow_action(R, ("prefer:" + std::string(m.folder)).c_str(), "Use this one instead", "Use", [i] { ps3_game_mods_prefer(i); })

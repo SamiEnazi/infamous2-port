@@ -780,6 +780,26 @@ static void test_conflicts()
         CHECK(merge_bytes(o, 4, a, a, m) && m == a);  /* the same change */
         CHECK(!merge_bytes(o, 4, a, Bytes({ 1, 2, 3 }), m));
     }
+    {   /* with changes of size: an insertion and a change elsewhere both kept; the same place: only with a preference */
+        Bytes o(4000);
+        uint32_t x = 12345;
+        for (uint8_t& c : o) { x = x * 1103515245u + 12345u; c = (uint8_t)(x >> 16); }
+        Bytes a = o, b = o, m, want = o;
+        const Bytes ins(37, 0xEE);
+        a.insert(a.begin() + 1000, ins.begin(), ins.end());     /* A inserts 37 bytes at 1000 */
+        b[3000] ^= 0xFF; b.erase(b.begin() + 3500, b.begin() + 3510);   /* B changes 3000, removes 3500..3510 */
+        want[3000] ^= 0xFF; want.erase(want.begin() + 3500, want.begin() + 3510); want.insert(want.begin() + 1000, ins.begin(), ins.end());
+        CHECK(merge3(o.data(), o.size(), a, b, -1, m) && m == want);
+        CHECK(merge3(o.data(), o.size(), b, a, -1, m) && m == want);
+        Bytes c = o; c.insert(c.begin() + 1000, 5, 0x11);      /* C inserts elsewhere-sized bytes at the same place */
+        int ov = 0;
+        CHECK(!merge3(o.data(), o.size(), a, c, -1, m));
+        CHECK(merge3(o.data(), o.size(), a, c, 1, m, &ov) && ov == 1 && m == c);
+        CHECK(merge3(o.data(), o.size(), a, c, 0, m, &ov) && ov == 1 && m == a);
+        Bytes d = o; d[10] = (uint8_t)~d[10];                  /* same size both, same byte: preferred one's */
+        Bytes e = o; e[10] = (uint8_t)(d[10] ^ 1); e[20] ^= 1;
+        CHECK(merge3(o.data(), o.size(), d, e, 0, m, &ov) && ov == 1 && m[10] == d[10] && m[20] == e[20]);
+    }
     const std::string root = join(W, "cf");
     wipe(root);
     mkdirs(join(root, "game/PS3_GAME/USRDIR"));
@@ -853,6 +873,47 @@ static void test_conflicts()
         want[1][0] = (char)0xA1; want[1][5] = (char)0xB1; want[2][3] = (char)0xA2;
         CHECK(served() == mk_xpps(want));
         CHECK(!ps3_game_mods_restart_needed());   /* this "session" now uses what is saved */
+    }
+    {   /* packed files of other sizes combine too: CA grows packed file 0, CB changes it elsewhere */
+        std::vector<std::string> base = pf;   /* packed file 0 made long and varied, as a real one */
+        { uint32_t x = 777; base[0].resize(800); for (char& ch : base[0]) { x = x * 1103515245u + 12345u; ch = (char)(x >> 16); } }
+        put_file(join(root, "game/PS3_GAME/USRDIR/infamous2.psarc_s"), mk_psarc({ { "zeke.xpps", mk_xpps(base) } }));
+        { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf_arcs = Arcs(); }
+        std::vector<std::string> ga = base, gb = base;
+        ga[0].insert(2, "INSERTED-BY-CA");
+        gb[0][300] = (char)0xB0;
+        /* new files (the caches key on name, size and time: a rewrite in the same second would look the same) */
+        auto put2 = [&](int which, const std::string& d, const char* nm) {
+            std::lock_guard<std::mutex> lk(g.mx);
+            Mod& m = g.list[(size_t)which];
+            m.files[0].path = join(m.path, nm);
+            put_file(m.files[0].path, d);
+        };
+        put2(0, mk_xpps(ga), "v2/zeke.xpps"); put2(1, mk_xpps(gb), "v2/zeke.xpps");
+        { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf.clear(); g_bm.clear(); }
+        {
+            std::lock_guard<std::mutex> lk(g.mx);
+            g.list[0].res.clear(); g.list[1].res.clear();
+            g.gen++;
+        }
+        std::vector<Clash> c4;
+        { std::lock_guard<std::mutex> lk(g.mx); clash_items(g.list[0], g.list[1], c4); }
+        CHECK(c4.size() == 1 && c4[0].item == "p0" && c4[0].merges);
+        std::vector<std::string> want = base;
+        want[0][300] = (char)0xB0; want[0].insert(2, "INSERTED-BY-CA");
+        CHECK(served() == mk_xpps(want));
+        CHECK_HAS(get_file(join(g.dir, "merge_log.txt")), "zeke.xpps, packed file 0: CA and CB combined");
+        /* both change the same byte of packed file 0, CB resolved first: combined, CB's byte there */
+        gb[0][500] = (char)0xBB; ga[0][500 + 14] = (char)0xAA;   /* the game's byte 500 (in CA's copy 14 further on) */
+        put2(0, mk_xpps(ga), "v3/zeke.xpps"); put2(1, mk_xpps(gb), "v3/zeke.xpps");
+        { std::lock_guard<std::mutex> lk(g.mx); g.gen++; }
+        CHECK(ps3_game_mods_conflicts(1, c, 8) == 1 && !c[0].merges);
+        const int w3[1] = { 0 };
+        CHECK(ps3_game_mods_resolve(1, w3, 1) == 2);
+        std::vector<std::string> want2 = base;
+        want2[0][300] = (char)0xB0; want2[0][500] = (char)0xBB; want2[0].insert(2, "INSERTED-BY-CA");
+        CHECK(served() == mk_xpps(want2));
+        CHECK_HAS(get_file(join(g.dir, "merge_log.txt")), "CB's used there");
     }
     {   /* a texture patch onto a file another mod replaces: the whole file is the part */
         Mod t = mk("CT", { { "zeke.xpps", 0x10 } });
