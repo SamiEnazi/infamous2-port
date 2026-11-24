@@ -1832,7 +1832,7 @@ static void mods_conflict_open(int i, bool toggled)
     if (!ps3_game_mods_get(i, &m)) return;
     const int n = ps3_game_mods_conflicts(i, NULL, 0);
     if (n <= 0) return;
-    s_cf.assign((size_t)(n < 256 ? n : 256), ps3_game_mod_conflict());
+    s_cf.assign((size_t)n, ps3_game_mod_conflict());   /* every part: one left out of the answer leaves the mod out */
     const int got = ps3_game_mods_conflicts(i, s_cf.data(), (int)s_cf.size());
     s_cf.resize((size_t)(got < (int)s_cf.size() ? got : (int)s_cf.size()));
     s_cf_pick.assign(s_cf.size(), 0);
@@ -1895,16 +1895,20 @@ static void conflict_dialog(void)
         for (size_t k = 0; k < s_cf.size(); k++) if (!s_cf[k].merges && s_cf[k].winner == 1) other_first = true;
     }
     const float row = ImGui::GetTextLineHeightWithSpacing();
-    const float h = (float)s_cf.size() * row + row * 0.5f;
+    int automatic = 0, shown = 0;
+    for (const ps3_game_mod_conflict& c : s_cf) { if (c.merges) automatic++; else shown++; }
+    const float h = (float)(shown + (automatic ? 1 : 0)) * row + row * 0.5f;
     const float hmax = io.DisplaySize.y * 0.45f;
     ImGui::BeginChild("##cflist", ImVec2(0.0f, h < hmax ? h : hmax), ImGuiChildFlags_AutoResizeX);
-    for (size_t k = 0; k < s_cf.size(); k++) {
+    for (size_t k = 0; k < s_cf.size(); k++) {   /* the parts that need the answer; the rest as one line */
         const ps3_game_mod_conflict& c = s_cf[k];
+        if (c.merges) continue;
         const char* win = other_first ? c.other_name : s_cf_name.c_str();
-        if (c.merges) ImGui::TextDisabled("%s: combined (they change different places)", c.what);
-        else if (c.part[0] == 'p') ImGui::Text("%s: combined; where both change the same bytes, %s's are used", c.what, win);
-        else ImGui::Text("%s: can't be combined, %s's is used", c.what, win);
+        const char* lose = other_first ? s_cf_name.c_str() : c.other_name;
+        if (c.part[0] == 'p') ImGui::Text("%s: combined; where both change the same bytes, %s's are used", c.what, win);
+        else ImGui::Text("%s: can't be combined: %s's copy is used, ALL of %s's changes to it are left out", c.what, win, lose);
     }
+    if (automatic) ImGui::TextDisabled("%d more part(s): combined on their own (they change different places)", automatic);
     ImGui::EndChild();
     int overlaps = 0;
     for (const ps3_game_mod_conflict& c : s_cf) if (!c.merges) overlaps++;

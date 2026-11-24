@@ -669,7 +669,7 @@ static void seed_diff(const Mod& m, std::vector<int> changed)   /* what pf_diff 
     PfDiff d;
     d.ok = true; d.changed = changed;
     const Part& f = m.files[0];
-    g_pf[sig_line("mod", f.path) + "target " + f.target + "\n"] = d;
+    g_pf["v2\n" + sig_line("mod", f.path) + "target " + f.target + "\n"] = d;
 }
 
 static void test_merge()
@@ -914,6 +914,28 @@ static void test_conflicts()
         want2[0][300] = (char)0xB0; want2[0][500] = (char)0xBB; want2[0].insert(2, "INSERTED-BY-CA");
         CHECK(served() == mk_xpps(want2));
         CHECK_HAS(get_file(join(g.dir, "merge_log.txt")), "CB's used there");
+        /* CA adds packed files at the end (as a new power does): CB's changes go into CA's copy */
+        std::vector<std::string> ga4 = base, gb4 = base;
+        ga4.push_back("NEW-PACKED-FILE-ONE"); ga4.push_back("NEW-PACKED-FILE-TWO");
+        ga4[1][1] = (char)0xA4;
+        gb4[0][300] = (char)0xB4; gb4[1][4] = (char)0xB5;
+        put2(0, mk_xpps(ga4), "v4/zeke.xpps"); put2(1, mk_xpps(gb4), "v4/zeke.xpps");
+        { std::lock_guard<std::mutex> lk(g.mx); g.list[0].res.clear(); g.list[1].res.clear(); g.gen++; }
+        std::vector<Clash> c5;
+        { std::lock_guard<std::mutex> lk(g.mx); clash_items(g.list[0], g.list[1], c5); }
+        CHECK(c5.size() == 1 && c5[0].item == "p1" && c5[0].merges);
+        std::vector<std::string> want4 = ga4;
+        want4[0][300] = (char)0xB4; want4[1][4] = (char)0xB5;
+        CHECK(served() == mk_xpps(want4));
+        CHECK_HAS(get_file(join(g.dir, "merge_log.txt")), "built from CA's copy (it adds 2 packed file(s))");
+        {   /* both add packed files: the whole file, one of them */
+            std::vector<std::string> gb5 = gb4;
+            gb5.push_back("CB-ADDS-ONE");
+            put2(1, mk_xpps(gb5), "v5/zeke.xpps");
+            std::vector<Clash> c6;
+            { std::lock_guard<std::mutex> lk(g.mx); g.gen++; clash_items(g.list[0], g.list[1], c6); }
+            CHECK(c6.size() == 1 && c6[0].item == "*" && !c6[0].merges);
+        }
     }
     {   /* a texture patch onto a file another mod replaces: the whole file is the part */
         Mod t = mk("CT", { { "zeke.xpps", 0x10 } });
