@@ -1758,14 +1758,154 @@ static bool merge_bytes(const uint8_t* po, size_t n, const Bytes& va, const Byte
     return true;
 }
 
-struct BmRes { bool ok = false; std::string path; };
+/* ---- the three-way merge with changes of size ------------------------------------
+ * A mod's copy of a packed file against the game's, as hunks: o[o0, o1) became
+ * v[v0, v1). Same size: the runs of changed bytes. Else the common start and end
+ * are cut off and the middle is matched on 16-byte windows that occur once in
+ * both copies (a patience diff: the longest run of them in the same order), so
+ * bytes a mod inserted or removed move everything after them as one block. */
+struct Hunk { size_t o0, o1, v0, v1; };
+static const size_t kDiffMax = 16u << 20;   /* bigger packed files are not diffed: one hunk */
+
+static void diff_hunks(const uint8_t* o, size_t no, const Bytes& v, std::vector<Hunk>& out)
+{
+    out.clear();
+    const size_t nv = v.size();
+    size_t p = 0;
+    while (p < no && p < nv && o[p] == v[p]) p++;
+    if (p == no && p == nv) return;
+    size_t s = 0;
+    while (s < no - p && s < nv - p && o[no - 1 - s] == v[nv - 1 - s]) s++;
+    const size_t ob = p, oe = no - s, vb = p, ve = nv - s;
+    if (no == nv) {   /* in place: runs of changed bytes, joined over gaps under 8 */
+        size_t i = ob;
+        while (i < oe) {
+            if (o[i] == v[i]) { i++; continue; }
+            size_t e = i + 1, j = i + 1;
+            while (j < oe && j - e < 8) { if (o[j] != v[j]) e = j + 1; j++; }
+            out.push_back({ i, e, i, e });
+            i = e;
+        }
+        return;
+    }
+    const size_t K = 16;
+    if (oe - ob < K * 2 || ve - vb < K * 2 || oe - ob > kDiffMax || ve - vb > kDiffMax) { out.push_back({ ob, oe, vb, ve }); return; }
+    auto key = [&](const uint8_t* q) { uint64_t x, y; memcpy(&x, q, 8); memcpy(&y, q + 8, 8); return x * 0x9E3779B97F4A7C15ull ^ (y + 0x632BE59BD9B4E019ull) * 0xC2B2AE3D27D4EB4Full; };
+    std::unordered_map<uint64_t, int64_t> po, pv;   /* window -> its place, -1 if more than one */
+    /* only windows whose key ends in three 0 bits (the same ones in both copies, as they go by content) */
+    po.reserve((oe - ob) / 4); pv.reserve((ve - vb) / 4);
+    for (size_t i = ob; i + K <= oe; i++) { const uint64_t h = key(o + i); if (h & 7) continue; auto r = po.emplace(h, (int64_t)i); if (!r.second) r.first->second = -1; }
+    for (size_t i = vb; i + K <= ve; i++) { const uint64_t h = key(v.data() + i); if (h & 7) continue; auto r = pv.emplace(h, (int64_t)i); if (!r.second) r.first->second = -1; }
+    std::vector<std::pair<size_t, size_t>> an;   /* (o place, v place), by v place */
+    for (size_t i = vb; i + K <= ve; i++) {
+        if (key(v.data() + i) & 7) continue;
+        auto a = pv.find(key(v.data() + i));
+        if (a == pv.end() || a->second != (int64_t)i) continue;
+        auto b = po.find(a->first);
+        if (b == po.end() || b->second < 0 || memcmp(o + b->second, v.data() + i, K)) continue;
+        an.push_back({ (size_t)b->second, i });
+    }
+    /* the longest run in the same order in both (patience sorting on the o places) */
+    std::vector<size_t> tails, prev(an.size(), (size_t)-1);
+    for (size_t k = 0; k < an.size(); k++) {
+        size_t lo = 0, hi = tails.size();
+        while (lo < hi) { const size_t m = (lo + hi) / 2; if (an[tails[m]].first < an[k].first) lo = m + 1; else hi = m; }
+        if (lo) prev[k] = tails[lo - 1];
+        if (lo == tails.size()) tails.push_back(k); else tails[lo] = k;
+    }
+    std::vector<size_t> chain;
+    for (size_t k = tails.empty() ? (size_t)-1 : tails.back(); k != (size_t)-1; k = prev[k]) chain.push_back(k);
+    std::reverse(chain.begin(), chain.end());
+    size_t co = ob, cv = vb;
+    auto gap = [&](size_t o0, size_t o1, size_t v0, size_t v1) {
+        while (o0 < o1 && v0 < v1 && o[o0] == v[v0]) { o0++; v0++; }
+        while (o0 < o1 && v0 < v1 && o[o1 - 1] == v[v1 - 1]) { o1--; v1--; }
+        if (o0 < o1 || v0 < v1) out.push_back({ o0, o1, v0, v1 });
+    };
+    for (size_t k : chain) {
+        const size_t ao = an[k].first, av = an[k].second;
+        if (ao < co || av < cv) continue;   /* inside the match before it */
+        if (ao - co != av - cv || memcmp(o + co, v.data() + cv, ao - co)) gap(co, ao, cv, av);
+        size_t len = 0;
+        while (ao + len < oe && av + len < ve && o[ao + len] == v[av + len]) len++;
+        co = ao + len; cv = av + len;
+    }
+    gap(co, oe, cv, ve);
+}
+
+/* Both mods' changes to one packed file (po, n bytes: the game's) in one copy.
+ * Changes to different places are all kept, with what either inserted or removed.
+ * Where both change the same place differently, prefer (0 a, 1 b) says whose
+ * change is used there; -1: that fails. overlaps: how many such places. */
+static bool merge3(const uint8_t* po, size_t n, const Bytes& va, const Bytes& vb, int prefer, Bytes& out, int* overlaps = nullptr)
+{
+    if (overlaps) *overlaps = 0;
+    if (va.size() == n && vb.size() == n && prefer < 0) return merge_bytes(po, n, va, vb, out);
+    std::vector<Hunk> ha, hb;
+    diff_hunks(po, n, va, ha);
+    diff_hunks(po, n, vb, hb);
+    struct E { Hunk h; int side; };
+    std::vector<E> ev;
+    for (const Hunk& h : ha) ev.push_back({ h, 0 });
+    for (const Hunk& h : hb) ev.push_back({ h, 1 });
+    std::stable_sort(ev.begin(), ev.end(), [](const E& x, const E& y) { return x.h.o0 < y.h.o0; });
+    std::vector<E> use;
+    size_t k = 0;
+    while (k < ev.size()) {   /* clusters of hunks over the same bytes */
+        size_t j = k + 1, end = ev[k].h.o1;
+        bool sides[2] = { false, false };
+        sides[ev[k].side] = true;
+        while (j < ev.size() && (ev[j].h.o0 < end || (ev[j].h.o0 == end && ev[j].h.o0 == ev[j].h.o1 && ev[k].h.o0 == end))) {
+            end = (std::max)(end, ev[j].h.o1); sides[ev[j].side] = true; j++;
+        }
+        if (sides[0] && sides[1]) {
+            const size_t c0 = ev[k].h.o0;
+            auto side_bytes = [&](int sd) {   /* that side's version of [c0, end) */
+                const Bytes& v = sd ? vb : va;
+                Bytes r;
+                size_t cur = c0;
+                for (size_t q = k; q < j; q++) {
+                    if (ev[q].side != sd) continue;
+                    r.insert(r.end(), po + cur, po + ev[q].h.o0);
+                    r.insert(r.end(), v.begin() + (ptrdiff_t)ev[q].h.v0, v.begin() + (ptrdiff_t)ev[q].h.v1);
+                    cur = ev[q].h.o1;
+                }
+                r.insert(r.end(), po + cur, po + end);
+                return r;
+            };
+            const bool same = side_bytes(0) == side_bytes(1);
+            if (!same) {
+                if (prefer < 0) return false;
+                if (overlaps) ++*overlaps;
+            }
+            const int keep = same ? 0 : prefer;
+            for (size_t q = k; q < j; q++) if (ev[q].side == keep) use.push_back(ev[q]);
+        } else
+            for (size_t q = k; q < j; q++) use.push_back(ev[q]);
+        k = j;
+    }
+    out.clear();
+    out.reserve((std::max)(va.size(), vb.size()));
+    size_t cur = 0;
+    for (const E& e : use) {
+        const Bytes& v = e.side ? vb : va;
+        out.insert(out.end(), po + cur, po + e.h.o0);
+        out.insert(out.end(), v.begin() + (ptrdiff_t)e.h.v0, v.begin() + (ptrdiff_t)e.h.v1);
+        cur = e.h.o1;
+    }
+    out.insert(out.end(), po + cur, po + n);
+    return true;
+}
+
+struct BmRes { bool ok = false; std::string path; int overlaps = 0; };
 static std::map<std::string, BmRes> g_bm;   /* under g_pf_mx: pf_merge's answers by key */
 
-static std::string bm_key(const Mod& a, const Mod& b, const std::string& t, int i)
+static std::string bm_key(const Mod& a, const Mod& b, const std::string& t, int i, int prefer)
 {
     std::string sa = part_sig(a, t, i), sb = part_sig(b, t, i);
-    if (sb < sa) std::swap(sa, sb);   /* the same either way round */
-    return "bytes " + t + " " + std::to_string(i) + "\n" + sa + sb;
+    if (prefer == 1) std::swap(sa, sb);   /* the preferred one first */
+    else if (prefer < 0 && sb < sa) std::swap(sa, sb);   /* the same either way round */
+    return std::string(prefer < 0 ? "merge2 " : "merge2 prefer first ") + t + " " + std::to_string(i) + "\n" + sa + sb;
 }
 
 /* Whether a's and b's changes to the packed files `idx` of t merge byte by byte
@@ -1774,8 +1914,10 @@ static std::string bm_key(const Mod& a, const Mod& b, const std::string& t, int 
  * <cache>/merge/<hash>.m by the files' names, sizes and times). Without a cache
  * folder nothing merges (the merged copy has nowhere to go). */
 static void pf_merge(const Mod& a, const Mod& b, const std::string& t, const std::vector<int>& idx,
-                     std::vector<char>& ok, std::vector<std::string>* paths = nullptr)
+                     std::vector<char>& ok, std::vector<std::string>* paths = nullptr, int prefer = -1,
+                     std::vector<int>* overlaps = nullptr)
 {
+    if (overlaps) overlaps->assign(idx.size(), 0);
     ok.assign(idx.size(), 0);
     if (paths) paths->assign(idx.size(), std::string());
     std::lock_guard<std::mutex> lk(g_pf_mx);
@@ -1783,7 +1925,7 @@ static void pf_merge(const Mod& a, const Mod& b, const std::string& t, const std
     std::vector<std::string> keys(idx.size());
     std::vector<size_t> todo;
     for (size_t k = 0; k < idx.size(); k++) {
-        keys[k] = bm_key(a, b, t, idx[k]);
+        keys[k] = bm_key(a, b, t, idx[k], prefer);
         auto it = g_bm.find(keys[k]);
         if (it == g_bm.end() && !g.cache.empty()) {
             const std::string h = hex64(fnv64(keys[k]));
@@ -1794,6 +1936,7 @@ static void pf_merge(const Mod& a, const Mod& b, const std::string& t, const std
                     BmRes r;
                     r.ok = !c.compare(keys[k].size(), 2, "ok");
                     if (r.ok) r.path = join(dir, h + ".bin");
+                    if (r.ok) r.overlaps = atoi(c.c_str() + keys[k].size() + 2);
                     if (!r.ok || finfo(r.path).ok) it = g_bm.emplace(keys[k], r).first;   /* "ok" with its copy gone: again */
                 }
             }
@@ -1801,6 +1944,7 @@ static void pf_merge(const Mod& a, const Mod& b, const std::string& t, const std
         if (it == g_bm.end()) { todo.push_back(k); continue; }
         ok[k] = it->second.ok;
         if (paths) (*paths)[k] = it->second.path;
+        if (overlaps) (*overlaps)[k] = it->second.overlaps;
     }
     if (todo.empty()) return;
     int ai = -1;
@@ -1818,23 +1962,26 @@ static void pf_merge(const Mod& a, const Mod& b, const std::string& t, const std
         Bytes va, vb, mg;
         if (have && pf_version(a, t, i, o, Lo, fa ? &ma : nullptr, va) && pf_version(b, t, i, o, Lo, fb ? &mb : nullptr, vb)) {
             const uint64_t a0 = (uint64_t)Lo.data_off + Lo.files[(size_t)i].off;
-            if (merge_bytes(o.data() + a0, Lo.files[(size_t)i].size, va, vb, mg)) {
+            if (merge3(o.data() + a0, Lo.files[(size_t)i].size, va, vb, prefer, mg, &r.overlaps)) {
                 const std::string bp = join(dir, hex64(fnv64(keys[k])) + ".bin");
                 mkdirs(dir);
                 if (write_all(bp, mg)) { r.ok = true; r.path = bp; }
             }
         }
         if (!g.cache.empty()) {
-            const std::string c = keys[k] + (r.ok ? "ok\n" : "no\n");
+            const std::string c = keys[k] + (r.ok ? "ok " + std::to_string(r.overlaps) + "\n" : std::string("no\n"));
             mkdirs(dir);
             write_all(join(dir, hex64(fnv64(keys[k])) + ".m"), Bytes(c.begin(), c.end()));
         }
         fprintf(stderr, "[mods] merge: %s packed file %d of %s and %s: %s\n", t.c_str(), i, a.name.c_str(), b.name.c_str(),
-                r.ok ? "merged byte by byte" : have ? "they change the same bytes (or its size): the player picks one"
-                                                    : "can't be merged byte by byte (a file could not be read or compared): the player picks one");
+                r.ok ? (r.overlaps ? (std::to_string(r.overlaps) + " place(s) both change: " + (prefer ? b : a).name + "'s used there").c_str()
+                                   : "combined")
+                     : have ? "both change the same bytes: combined once the conflict is resolved"
+                            : "can't be combined (a file could not be read or compared)");
         g_bm[keys[k]] = r;
         ok[k] = r.ok;
         if (paths) (*paths)[k] = r.path;
+        if (overlaps) (*overlaps)[k] = r.overlaps;
     }
 }
 
@@ -1928,6 +2075,17 @@ static std::map<size_t, std::set<std::string>> patch_cover(const std::vector<Mod
     return c;
 }
 
+/* The merge log: what each combined file got from which mod, written at every start
+ * to <mods>/merge_log.txt (resolve). Nothing is written into the game's or the mods'
+ * files: every start builds them again from the game's own and the mods that are on,
+ * so a mod turned off has its changes taken back out. */
+static std::vector<std::string> g_merge_log;   /* under g.mx's caller: resolve() only (one thread at start) */
+static void merge_note(const std::string& s)
+{
+    fprintf(stderr, "[mods] merge: %s\n", s.c_str());
+    g_merge_log.push_back(s);
+}
+
 /* The used mods' copies as the game gets them (fm: a copy of the list, by the same
  * indices): for each pair of used mods, the packed files they both change merged
  * byte by byte (the merged copy goes to the first of them as a packed-file patch,
@@ -1957,15 +2115,32 @@ static void merge_used(std::vector<Mod>& fm, const std::vector<size_t>& used, co
                     m.target = k.target; m.index = i; m.chunk = false; m.path = path[0];
                     m.name = fm[a].name + " + " + fm[b].name + " (merged) file_" + std::to_string(i);
                     fm[a].xp.push_back(m);
-                    fprintf(stderr, "[mods] merge: %s packed file %d: %s and %s merged byte by byte\n", k.target.c_str(), i,
-                            fm[a].name.c_str(), fm[b].name.c_str());
+                    merge_note(k.target + ", " + item_label(k.item) + ": " + fm[a].name + " and " + fm[b].name + " combined (different places)");
                     continue;
                 }
                 const int w = res_winner(fm[a], fm[b], k.target, k.item);
                 if (w < 0) continue;   /* (plan_pass never uses both then) */
+                if (k.item[0] == 'p') {   /* resolved: combined, the winner's bytes where both change the same place */
+                    const int i = atoi(k.item.c_str() + 1);
+                    std::vector<char> ok;
+                    std::vector<std::string> path;
+                    std::vector<int> ov;
+                    pf_merge(fm[a], fm[b], k.target, { i }, ok, &path, w, &ov);
+                    if (ok[0]) {
+                        drop_item(fm[a], k.target, k.item);
+                        drop_item(fm[b], k.target, k.item);
+                        Xp m;
+                        m.target = k.target; m.index = i; m.chunk = false; m.path = path[0];
+                        m.name = fm[a].name + " + " + fm[b].name + " (combined) file_" + std::to_string(i);
+                        fm[a].xp.push_back(m);
+                        merge_note(k.target + ", " + item_label(k.item) + ": " + fm[a].name + " and " + fm[b].name + " combined; " +
+                                   std::to_string(ov[0]) + " place(s) both change, " + (w ? fm[b] : fm[a]).name + "'s used there");
+                        continue;
+                    }
+                }
                 drop_item(w ? fm[a] : fm[b], k.target, k.item);
-                fprintf(stderr, "[mods] merge: %s, %s: %s's version (the player's choice), not %s's\n", k.target.c_str(),
-                        item_label(k.item).c_str(), (w ? fm[b] : fm[a]).name.c_str(), (w ? fm[a] : fm[b]).name.c_str());
+                merge_note(k.target + ", " + item_label(k.item) + ": " + (w ? fm[b] : fm[a]).name + "'s version (it can't be combined), not " +
+                           (w ? fm[a] : fm[b]).name + "'s");
             }
         }
     for (size_t a : used)
@@ -1975,8 +2150,7 @@ static void merge_used(std::vector<Mod>& fm, const std::vector<size_t>& used, co
             for (const Clash& k : cl)
                 if (res_winner(fm[a], fm[l], k.target, k.item) == 1) {
                     drop_item(fm[a], k.target, k.item);
-                    fprintf(stderr, "[mods] merge: %s, %s: the live mod %s's version (the player's choice), not %s's\n", k.target.c_str(),
-                            item_label(k.item).c_str(), fm[l].name.c_str(), fm[a].name.c_str());
+                    merge_note(k.target + ", " + item_label(k.item) + ": left to the live mod " + fm[l].name + ", not " + fm[a].name + "'s");
                 }
         }
 }
@@ -2107,6 +2281,7 @@ static void resolve(std::vector<Mod>& mods)
         std::vector<size_t> live_on;
         for (size_t i = 0; i < mods.size(); i++) if (mods[i].live && mods[i].on && mods[i].for_game && mods[i].err.empty()) live_on.push_back(i);
         std::vector<Mod> fm = mods;   /* as the game gets them: merged parts, the player's choices */
+        g_merge_log.clear();
         merge_used(fm, used, cover, live_on);
         for (const std::string& t : targets) {
             const Part* base = nullptr;
@@ -2157,7 +2332,7 @@ static void resolve(std::vector<Mod>& mods)
                     all.insert(all.end(), xl.begin(), xl.end());
                     xl.swap(all);
                     base = nullptr;
-                    fprintf(stderr, "[mods] merge: %s from %s (%zu packed file(s))\n", t.c_str(), bym.c_str(), merged.size());
+                    merge_note(t + ": built from the game's copy + " + bym + " (" + std::to_string(merged.size()) + " changed packed file(s))");
                 } else {   /* leave out the last of them, as a failed build does */
                     fprintf(stderr, "[mods] %s: %s\n", t.c_str(), merr.c_str());
                     size_t last = *who.begin();
@@ -2209,6 +2384,14 @@ static void resolve(std::vector<Mod>& mods)
             serve[t] = path; by[t] = bym;
         }
         if (again) continue;
+        if (!g.dir.empty()) {   /* the merge log, for the player (and the next start rebuilds it) */
+            std::string L = "# inFAMOUS 2 port: how the mods that are on were combined at the last start.\n"
+                            "# Nothing is written into the game's or the mods' files: each start builds them again\n"
+                            "# from the game's own and the mods that are on, so a mod turned off is taken back out.\n";
+            for (const std::string& x : g_merge_log) L += x + "\n";
+            if (g_merge_log.empty()) L += "(no files combined)\n";
+            write_all(join(g.dir, "merge_log.txt"), Bytes(L.begin(), L.end()));
+        }
         std::lock_guard<std::mutex> lk(g.mx);
         g.serve.swap(serve);
         g.serve_mod.swap(by);

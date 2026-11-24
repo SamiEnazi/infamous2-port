@@ -102,28 +102,33 @@ Two mods that change the same file are both used when the port can merge them:
   their other files are used as always. With one of them off, the page says
   "a merge patch, used only while ... are used" and the other is used alone;
   with the patch off, they clash as before. The Manager ignores the key.
-- **The same packed file, merged byte by byte.** When two mods change the
-  same packed file but keep its size and change different bytes of it, the
-  port merges it too: the game's copy with both mods' changed bytes (a
-  three-way merge). The merged copy is kept in `mods\.port_cache\merge`.
-- **Conflicts you resolve.** Anything else both mods change (the same bytes
-  of a packed file, a packed file whose size changed, a texture at the same
-  offset, a texture patch onto a file the other replaces, a file that can't be
-  compared) is a conflict. When you turn a mod on and it conflicts with a mod
-  that is on, the Mods page asks: it lists each part both change (what
-  merged by itself is shown too) and you pick, per part, whose version is
-  used. **Merge** uses everything else of both mods together; **Turn ... off**
-  keeps the other one; **Decide later** leaves the mod out until you press
-  **Resolve** on its row. The choices are saved in `mods.ini` in both mods'
-  sections (`win = <other folder>|<file>|<part>`, `lose = ...`) and can be
-  changed with **Change** on the mod's **Merged** row. A conflict between
-  regular mods needs a restart (the files are built at start): after
-  **Merge**, the page offers **Restart now** or **Later**. A mod that merges
-  by itself when you turn it on gets the same restart question. With a live
-  mod in it, the choice applies at once: the live mod leaves out the parts
-  you gave to the other mod, or the other mod leaves out the parts you gave
-  to the live mod (from the next start, if that one is not live). Live mods
-  are never merged byte by byte.
+- **The same packed file, combined.** When two mods change the same packed
+  file in different places, the port combines it: the game's copy with both
+  mods' changes (a three-way merge). Bytes a mod inserted or removed are
+  fine: the copies are matched on 16-byte runs that occur once in both, so
+  everything after an insertion moves with it. Changes closer together than
+  about 16 bytes count as one place.
+- **Conflicts: the same place.** When both change the very same place of a
+  packed file (or something that can't be combined: a texture at the same
+  offset, a texture patch onto a file the other replaces, a file with another
+  number of packed files), turning the second mod on asks **Combine these
+  mods?**. **Combine** combines everything as above, and where both change
+  the same place the mod you just turned on is used there (a checkbox gives
+  those places to the other mod instead); a part that can't be combined uses
+  that mod's version. **Turn ... off** keeps the other one; **Later** leaves
+  the mod out until you press **Combine** on its row. The choice is saved in
+  `mods.ini` in both mods' sections (`win = <other folder>|<file>|<part>`,
+  `lose = ...`); **Change** on the mod's **Combined** row changes it.
+- **Restart, and taking a mod back out.** Regular mods are built at start,
+  so after **Combine** the page offers **Restart now** or **Later** (a mod
+  that combines on its own when you turn it on gets the same question). Live
+  mods take it at once. Nothing is ever written into the game's or the mods'
+  files: every start builds the combined files again from the game's own and
+  the mods that are on, so turning a mod off takes its changes back out.
+  What each file got from which mod is written to `merge_log.txt` in the
+  mods folder at every start (and to the session log, `[mods] merge:`).
+  Live mods are never combined byte by byte: where a live mod and another
+  change the same part, the mod you turned on keeps it.
 
 Downloaded mods are treated as untrusted:
 
