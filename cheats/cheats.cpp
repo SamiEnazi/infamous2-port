@@ -2638,8 +2638,8 @@ WorkersInit s_workers_init;
  *  - he moves `speed` times as far each frame: from Cole's update, after the game's body, his horizontal step since
  *    last frame is added (speed-1) more times through the game's own SetWorldPosition 0x004ABDFC (his movement starts
  *    each frame from +0x90, so the extra distance sticks; height is left to the game). Steps over 1 m in a frame
- *    (teleports, cutscene cuts) are never scaled. In the air the step follows his take-off speed, and from the start
- *    of the game's landing steer until he is on the ground nothing is added;
+ *    (teleports, cutscene cuts) are never scaled. In the air nothing is added: the air speed below already does it
+ *    (both together made jumps far too fast and broke the landing);
  *  - his jump/fall controller's air speed (+0x44, UpdateGravity) is `speed` times the game's, and the landing roll
  *    keeps the speed he landed with (at most `speed` times);
  *  - his animation players run `anim` times as fast on the ground (not in the air, nor 0.3 s after);
@@ -2843,7 +2843,7 @@ void ed_tick(struct ppu_context* ctx, uint32_t c)
         const double tn = now_s(); const float fdt = (float)(tn - tprev); tprev = tn;
         const float d2 = dx * dx + dy * dy;
         if (ed_log()) fprintf(stderr, "[ed] %.3f step %.1f dz %.1f%s\n", tn, sqrtf(d2), dz, fixed ? " (landing)" : "");
-        if (d2 > 0.0001f && d2 < 100.0f * 100.0f && !fixed) {
+        if (d2 > 0.0001f && d2 < 100.0f * 100.0f && !fixed && !air) {
             float m = S.speed - 1.0f;
             if (air && v0 > 0.0f && fdt > 0.0f && fdt < 0.1f) {
                 const float want = v0 * fdt, sg = sqrtf(d2);
