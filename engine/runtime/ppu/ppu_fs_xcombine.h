@@ -64,6 +64,7 @@ struct Combine {
     std::set<uint32_t> parallel_units, concat_units;
     std::set<uint32_t> fixed_words;             /* words the list copies set (counts): bytes merge leaves them */
     size_t conflicts = 0;                       /* places both changed differently (the preferred one's kept) */
+    bool swap_better = false;                   /* B names more of a same insert's records than A: better to move A's */
 
     Combine(const Arc& g, const Delta& a, const Delta& b, int pref, std::vector<std::string>& lg)
         : G(g), A(a), B(b), prefer(pref), log(lg) {}
@@ -217,6 +218,8 @@ bool Combine::merge_parallel(Blob& a, const Blob& b, size_t bi, int ma)
         std::vector<bool> ua(nr, false), ub(nr, false), taken(nr, false);
         for (const auto& q : xa) ua[q.first / r] = true;
         for (const auto& p : xb) ub[p.first / r] = true;
+        /* the mod using fewer of these records keeps none in place: the other's records may name each other by place */
+        if (std::count(ua.begin(), ua.end(), true) < std::count(ub.begin(), ub.end(), true)) swap_better = true;
         std::map<uint32_t, uint32_t> move;   /* B record -> slot */
         for (uint32_t i = 0; i < nr; i++) {
             if (!ub[i]) continue;
@@ -1175,8 +1178,23 @@ bool Combine::run()
 static bool combine_files(const Arc& G, const Delta& A, const Delta& B, int prefer, Bytes& out, std::vector<std::string>& log, std::string& err,
                           Delta* merged = nullptr, bool allow_conflicts = false)
 {
-    Combine c(G, A, B, prefer, log);
+    std::vector<std::string> l1;
+    Combine c(G, A, B, prefer, l1);
     if (!c.run()) { err = c.err; return false; }
+    if (c.swap_better) {   /* the second mod's record moves would break its own records: combine the other way round */
+        std::vector<std::string> l2;
+        Combine d(G, B, A, 1 - prefer, l2);
+        if (d.run() && !d.swap_better) {
+            log.insert(log.end(), l2.begin(), l2.end());
+            if (d.conflicts && !allow_conflicts) { err = std::to_string(d.conflicts) + " place(s) both mods change differently"; return false; }
+            if (!apply_delta(G, d.M, out, err)) return false;
+            Arc chk;
+            if (!chk.load(out)) { err = "the combined file doesn't read back: " + chk.err; return false; }
+            if (merged) *merged = std::move(d.M);
+            return true;
+        }
+    }
+    log.insert(log.end(), l1.begin(), l1.end());
     if (c.conflicts && !allow_conflicts) { err = std::to_string(c.conflicts) + " place(s) both mods change differently"; return false; }
     if (!apply_delta(G, c.M, out, err)) return false;
     Arc chk;
