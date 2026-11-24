@@ -818,6 +818,8 @@ struct Mod {
     int dark = 0;                        /* a live mod's "dark_bolts": bit r = karma level r, 0x80 = always */
     std::vector<std::string> patch_for;  /* "patch_for": a patch that makes these mods (folder or name) work together */
     std::vector<int> discover;           /* "discover_powers": powers (0-95) this mod adds, shown as discovered in any save */
+    struct KarmaPatch { std::vector<int> find, rep; int levels = 0; };   /* bytes; -1 = ?? */
+    std::vector<KarmaPatch> kpatch;      /* "karma_patches": bytes of the mod's own that change with Cole's karma level */
     std::vector<std::pair<std::string, std::string>> alias;   /* "file_alias": lower USRDIR path the game lacks -> the
                                                                  game file read in its place (alias_redirect) */
     std::map<std::string, bool> res;     /* conflicts the player resolved: "<other folder>|<file>|<part>" (lower) -> this mod's
@@ -1320,6 +1322,47 @@ static std::vector<Mod> scan()
             if (dp->t == 4)
                 for (const J& a : dp->a)
                     if (a.t == 2) { const int v = atoi(a.s.c_str()); if (v >= 0 && v < 96) m.discover.push_back(v); }
+        if (const J* kj = j.get("karma_patches"))   /* [{"levels": ["Thug", ...], "find": "<hex>", "replace": "<hex>"}] */
+            if (kj->t == 4)
+                for (const J& e : kj->a) {
+                    auto hex = [](const J* h, std::vector<int>& out) {
+                        if (!h || h->t != 3) return false;
+                        auto dig = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+                        std::string t;
+                        for (char c : h->s) if (c != ' ') t += c;
+                        if (t.size() % 2) return false;
+                        for (size_t i = 0; i < t.size(); i += 2) {
+                            if (t[i] == '?' && t[i + 1] == '?') { out.push_back(-1); continue; }
+                            const int a = dig(t[i]), b = dig(t[i + 1]);
+                            if (a < 0 || b < 0) return false;
+                            out.push_back(a * 16 + b);
+                        }
+                        return true;
+                    };
+                    Mod::KarmaPatch kp;
+                    bool ok = e.t == 5;
+                    if (ok) {
+                        if (const J* lj = e.get("levels"))
+                            if (lj->t == 4)
+                                for (const J& a : lj->a)
+                                    for (int q = 0; q < 7; q++) if (a.t == 3 && ieq(a.s, kKarmaLevels[q])) kp.levels |= 1 << q;
+                        ok = kp.levels && hex(e.get("find"), kp.find) && hex(e.get("replace"), kp.rep) && kp.find.size() == kp.rep.size() &&
+                             kp.find.size() >= 16 && kp.find.size() <= 4096 && kp.find.size() % 4 == 0;
+                        bool key = false, any = false;
+                        for (size_t i = 0; ok && i < kp.find.size(); i++) {
+                            if (kp.rep[i] >= 0) { any = true; if (kp.find[i] < 0) ok = false; }   /* a replaced byte must be known */
+                            if (i % 4 == 0 && i + 8 <= kp.find.size()) {
+                                bool k8 = true;
+                                for (size_t q = i; q < i + 8; q++) if (kp.find[q] < 0 || kp.rep[q] >= 0) k8 = false;
+                                key = key || k8;
+                            }
+                        }
+                        ok = ok && any && key;
+                    }
+                    if (ok) m.kpatch.push_back(std::move(kp));
+                    else fprintf(stderr, "[mods] %s: a karma_patches entry is not used (it needs \"levels\", and \"find\" and \"replace\" "
+                                         "as hex of the same length, 16-4096 bytes, 8 known bytes in a row that replace leaves alone)\n", m.name.c_str());
+                }
         if (const J* ej = j.get("electric_dash")) {   /* true, or {"speed", "anim", "drain", "glow", "glowskip"} */
             if (ej->t == 1) m.ed = ej->s == "true";
             else if (ej->t == 5) {
@@ -2968,6 +3011,116 @@ static void live_discover()
     }
 }
 
+/* mod.json "karma_patches": [{"levels": ["Thug", "Neutral", ...], "find": "<hex>", "replace": "<hex>"}]. While
+ * a save is being played and Cole's karma level is one of "levels", the place in guest memory that holds "find"
+ * gets "replace"'s bytes; at the other levels it gets "find"'s bytes back. ?? in "find" is any byte (bytes the
+ * loader fills in: pointers, native calls); ?? in "replace" leaves that byte as it is. For a mod's own script or
+ * data that should behave differently with karma (Custom Powers: Lightning Bolt's head explosion only at Outlaw
+ * and Infamous). "find" must be unique to the mod's bytes; the place is looked for in either form, remembered,
+ * and checked again every half second (looked for again at most every 5 s while it is not found). */
+static std::atomic<bool> g_kp_any{false};   /* a mod in use has "karma_patches" (the worker ticks every half second) */
+struct KpPlace { std::vector<uint32_t> at; std::chrono::steady_clock::time_point next{}; int last = -2; };
+static std::map<std::string, KpPlace> g_kp;
+static void live_karma_patches()
+{
+    std::vector<std::pair<std::string, Mod::KarmaPatch>> want;
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        if (!g.use) return;
+        for (const Mod& m : g.list)
+            if (m.on && m.for_game && m.err.empty())
+                for (size_t i = 0; i < m.kpatch.size(); i++) want.push_back({ m.name + " #" + std::to_string(i + 1), m.kpatch[i] });
+    }
+    g_kp_any.store(!want.empty(), std::memory_order_relaxed);
+    if (want.empty() || !vm_base) return;
+    const HANDLE me = GetCurrentProcess();
+    uint8_t c[4];
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(me, vm_base + 0x00A6E9E4u, c, sizeof c, &got) || got != sizeof c || !be32(c)) return;
+    const int rank = live_karma_level();
+    if (rank < 0) return;
+    const auto now = std::chrono::steady_clock::now();
+    void (*const io)(uint32_t, uint32_t, int) = g_vm_host_io_hook;
+    for (auto& w : want) {
+        const Mod::KarmaPatch& p = w.second;
+        KpPlace& st = g_kp[w.first];
+        const size_t n = p.find.size();
+        auto form = [&](const uint8_t* b) {   /* 1: find's form, 2: replace's, 0: neither */
+            bool f = true, r = true;
+            for (size_t i = 0; i < n && (f || r); i++) {
+                if (p.find[i] >= 0 && b[i] != p.find[i]) f = false;
+                const int x = p.rep[i] >= 0 ? p.rep[i] : p.find[i];
+                if (x >= 0 && b[i] != x) r = false;
+            }
+            return f ? 1 : r ? 2 : 0;
+        };
+        std::vector<uint8_t> cur(n);
+        std::vector<uint32_t> keep;
+        for (uint32_t a : st.at)
+            if (ReadProcessMemory(me, vm_base + a, cur.data(), n, &got) && got == n && form(cur.data())) keep.push_back(a);
+        st.at.swap(keep);
+        if (st.at.empty()) {
+            if (now < st.next) continue;
+            st.next = now + std::chrono::seconds(5);
+            size_t k = 0;   /* 8 known bytes that are the same in both forms */
+            for (size_t i = 0; i + 8 <= n; i += 4) {
+                bool ok = true;
+                for (size_t q = i; q < i + 8; q++) if (p.find[q] < 0 || p.rep[q] >= 0) ok = false;
+                if (ok) { k = i; break; }
+            }
+            uint8_t key[8];
+            for (int q = 0; q < 8; q++) key[q] = (uint8_t)p.find[k + (size_t)q];
+            static const uint32_t kRegions[][2] = { { 0x30000000u, 0x50000000u }, { 0xC0000000u, 0xD0000000u } };
+            const size_t kChunk = 4u << 20;
+            std::vector<uint8_t> buf(kChunk + 8);
+            for (const auto& r : kRegions) {
+                uint64_t ea = r[0];
+                while (ea < r[1] && st.at.size() < 8) {
+                    MEMORY_BASIC_INFORMATION mbi;
+                    if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
+                    const uint64_t rb = (uint64_t)((uint8_t*)mbi.BaseAddress - vm_base), re = (std::min<uint64_t>)(rb + mbi.RegionSize, r[1]);
+                    const DWORD pr = mbi.Protect;
+                    const bool readable = mbi.State == MEM_COMMIT && !(pr & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                                          (pr & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE));
+                    if (readable)
+                        for (uint64_t cb = (std::max)(ea, rb); cb < re; cb += kChunk) {
+                            const size_t len = (size_t)(std::min<uint64_t>)(kChunk, re - cb);
+                            if (!ReadProcessMemory(me, vm_base + cb, buf.data(), len, &got) || got < 8) continue;
+                            for (size_t o = 0; o + 8 <= got; o += 4) {
+                                if (memcmp(buf.data() + o, key, 8)) continue;
+                                if (cb + o < k) continue;
+                                const uint64_t at = cb + o - k;
+                                if (at < r[0] || at + n > r[1]) continue;
+                                if (!ReadProcessMemory(me, vm_base + at, cur.data(), n, &got) || got != n || !form(cur.data())) continue;
+                                if (std::find(st.at.begin(), st.at.end(), (uint32_t)at) == st.at.end()) st.at.push_back((uint32_t)at);
+                            }
+                        }
+                    ea = re;
+                }
+            }
+            if (st.at.empty()) continue;
+            fprintf(stderr, "[mods] karma_patches: %s found at 0x%08X%s\n", w.first.c_str(), (unsigned)st.at[0],
+                    st.at.size() > 1 ? " (and more places)" : "");
+        }
+        const bool r = (p.levels >> rank) & 1;
+        for (uint32_t a : st.at) {
+            if (!ReadProcessMemory(me, vm_base + a, cur.data(), n, &got) || got != n) continue;
+            std::vector<uint8_t> t(cur);
+            for (size_t i = 0; i < n; i++) {
+                const int x = r && p.rep[i] >= 0 ? p.rep[i] : p.rep[i] >= 0 ? p.find[i] : -1;
+                if (x >= 0) t[i] = (uint8_t)x;
+            }
+            if (t == cur) continue;
+            if (io) io(a, (uint32_t)n, 0);
+            SIZE_T put = 0;
+            const bool ok = WriteProcessMemory(me, vm_base + a, t.data(), n, &put) && put == n;
+            if (io) io(a, (uint32_t)n, 1);
+            fprintf(stderr, "[mods] karma_patches: %s at 0x%08X -> %s (karma level %s)%s\n", w.first.c_str(), (unsigned)a,
+                    r ? "replace" : "find", kKarmaLevels[rank], ok ? "" : " (write failed)");
+        }
+    }
+}
+
 static void live_pass()
 {
     const auto t0 = std::chrono::steady_clock::now();
@@ -3136,6 +3289,8 @@ static void live_pass()
 #else
 static int live_karma_level() { return -1; }
 static void live_discover() {}
+static std::atomic<bool> g_kp_any{false};
+static void live_karma_patches() {}
 static void live_pass() {}
 #endif
 
@@ -3156,13 +3311,14 @@ static void live_worker()
             while (!lv.kick) {
                 const auto now = std::chrono::steady_clock::now();
                 if (now >= until) break;
-                bool lev = false;
+                bool lev = g_kp_any.load(std::memory_order_relaxed);   /* "karma_patches" are checked every half second too */
                 for (auto& kv : lv.mods) if (kv.second.want && kv.second.built && (!kv.second.var.empty() || (kv.second.dark & 0x7F))) lev = true;
                 const auto step = lev ? (std::min)(until, now + std::chrono::milliseconds(500)) : until;
                 lv.cv.wait_until(lk, step, [] { return lv.kick; });
                 if (lev && !lv.kick) {
                     lk.unlock();
                     const int r = live_karma_level();
+                    live_karma_patches();
                     lk.lock();
                     if (r >= 0 && r != lv.rank) { lv.rank = r; break; }
                 }
@@ -3237,6 +3393,7 @@ static void live_worker()
         live_pass();
         live_dark_update();
         live_discover();
+        live_karma_patches();
         if (build_one(false)) { std::lock_guard<std::mutex> lk(lv.mx); lv.kick = true; }   /* the next one soon */
     }
 }
@@ -3338,8 +3495,8 @@ static void init_body()
         }
         {
             bool any = false;
-            { std::lock_guard<std::mutex> lk(g.mx); for (const Mod& m : g.list) if (m.live || !m.discover.empty()) any = true; }
-            if (any) live_kick();   /* (the worker also finds "discover_powers" powers) */
+            { std::lock_guard<std::mutex> lk(g.mx); for (const Mod& m : g.list) if (m.live || !m.discover.empty() || !m.kpatch.empty()) any = true; }
+            if (any) live_kick();   /* (the worker also finds "discover_powers" powers and puts "karma_patches" in) */
         }
         test_start();
     }

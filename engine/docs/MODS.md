@@ -214,7 +214,8 @@ applied), and the new one waits for the old one to end.
 <mod>/mod.json        {"game": "inf2", "name": ..., "author": ..., "version": ...}
                       port only: "patch_for": [mods] (a merge patch, see Merging),
                       "discover_powers": [power numbers], "file_alias": {missing: stand-in}
-                      (see New powers), "electric_dash" (see Electric Dash)
+                      (see New powers), "electric_dash" (see Electric Dash),
+                      "karma_patches" (see Karma patches)
 <mod>/files/          .xpps files that replace the game's (by file name, any subfolder;
                       a mod with no files/ folder keeps them in the mod folder itself)
 <files>/texture_patches/<target>.xpps/[data]<OFFSET>_..._<W>x<H>_<DXTn>_m<mips>.dds
@@ -275,6 +276,40 @@ The worker reads the karma level every half second the way the game finds it
 `0x00745EC8` that holds it, else Neutral) and puts the level's bytes in when
 it changes. A level the mod does not name uses the mod's own `files/`, which
 is also what the Manager and older ports apply at load.
+
+### Karma patches
+
+A mod (live or not) can make some of its own bytes depend on Cole's karma
+level with `karma_patches`: at the listed levels the place in guest memory
+that holds `find` gets `replace`'s bytes, at the other levels it gets
+`find`'s bytes back.
+
+```json
+"karma_patches": [
+  { "levels": ["Thug", "Neutral", "Guardian", "Champion", "Hero"],
+    "find":    "1e070000 28000030 1f010000 01040400 00000009 ...",
+    "replace": "???????? ???????? ???????? ???????? 00000251 ..." }
+]
+```
+
+- `find` and `replace` are hex of the same length (16-4096 bytes, a multiple
+  of 4; spaces are ignored). `??` in `find` is any byte: use it for bytes the
+  game's loader fills in (pointers, native call and class words, which differ
+  from the file). `??` in `replace` leaves the byte as it is; a byte
+  `replace` sets must be known in `find`.
+- `find` must hold 8 known bytes in a row (at a multiple of 4) that `replace`
+  leaves alone; they are what is searched for. It must be unique to the mod's
+  bytes, or every place that matches is changed.
+- While a save is being played (Cole's character object at `0x00A6E9E4` is
+  set), the live-mods worker looks for the place in either form in guest main
+  memory and RSX local memory (again at most every 5 s while it is not
+  found), remembers it and checks the karma level every half second.
+
+Custom Powers uses it for Lightning Bolt's head explosion (Skull Bolt's
+headshot call, copied into its bolt's script): below Outlaw the call's
+character class check is pointed at a class no character has, so the call is
+skipped. Log lines start `[mods] karma_patches:`. The Manager and older ports
+ignore the key (the mod's bytes stay as its files have them).
 
 ### Black bolts
 
