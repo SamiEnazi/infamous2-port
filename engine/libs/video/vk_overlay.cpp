@@ -1802,6 +1802,145 @@ static void restart_confirm(void)
     ImGui::EndPopup();
 }
 
+/* ---- [modsui] conflicts: a mod turned on changes what another one that is on does ----
+ * The question lists every part of a game file both change (ps3_game_mods_conflicts):
+ * the ones they change in different bytes are merged on their own; for each other
+ * part the player picks whose version is used, and the rest of both mods is used
+ * together (ps3_game_mods_resolve). Live mods take it at once; any other mod needs a
+ * restart, which the question offers next. */
+static volatile int s_cf_ask;        /* 1 open the question, 2 showing */
+static volatile bool s_cf_cancel;    /* Esc / Circle on it */
+static int s_cf_mod = -1, s_cf_stage;   /* the mod; 0 pick the versions, 1 merged: restart? */
+static std::vector<ps3_game_mod_conflict> s_cf;
+static std::vector<int> s_cf_pick;
+static std::string s_cf_name, s_cf_others, s_cf_done;
+
+static void cf_others(void)
+{
+    std::vector<std::string> o;
+    for (const ps3_game_mod_conflict& c : s_cf)
+        if (std::find(o.begin(), o.end(), std::string(c.other_name)) == o.end()) o.push_back(c.other_name);
+    s_cf_others.clear();
+    for (size_t k = 0; k < o.size(); k++) s_cf_others += (k == 0 ? "" : k + 1 == o.size() ? " and " : ", ") + o[k];
+}
+
+/* After mod i was turned on (toggled), or from its "Resolve" row: ask if a part
+ * needs a choice; else, when it merged on its own and a restart is needed, say so. */
+static void mods_conflict_open(int i, bool toggled)
+{
+    ps3_game_mod m;
+    if (!ps3_game_mods_get(i, &m)) return;
+    const int n = ps3_game_mods_conflicts(i, NULL, 0);
+    if (n <= 0) return;
+    s_cf.assign((size_t)(n < 256 ? n : 256), ps3_game_mod_conflict());
+    const int got = ps3_game_mods_conflicts(i, s_cf.data(), (int)s_cf.size());
+    s_cf.resize((size_t)(got < (int)s_cf.size() ? got : (int)s_cf.size()));
+    s_cf_pick.assign(s_cf.size(), 0);
+    bool open = false, choose = false, live_only = true;
+    for (size_t k = 0; k < s_cf.size(); k++) {
+        const ps3_game_mod_conflict& c = s_cf[k];
+        if (!c.merges) { choose = true; if (c.winner < 0) open = true; }
+        s_cf_pick[k] = c.winner >= 0 ? c.winner : 0;   /* the mod just turned on, unless chosen before */
+        if (!c.live) live_only = false;
+    }
+    s_cf_mod = i;
+    s_cf_name = m.name;
+    cf_others();
+    if (open || (!toggled && choose)) { s_cf_stage = 0; s_cf_ask = 1; return; }
+    if (!toggled) return;
+    if (!live_only && ps3_game_mods_restart_needed()) {   /* merged on its own: the restart */
+        s_cf_done = s_cf_name + " is merged with " + s_cf_others + " (they change different bytes of the same files).";
+        if (ps3_host_can_restart()) { s_cf_stage = 1; s_cf_ask = 1; }
+        else notice_for((s_cf_done + " Restart the game to use it.").c_str(), 8.0);
+    }
+}
+
+static void conflict_dialog(void)
+{
+    if (s_cf_ask == 1) { ImGui::OpenPopup("###modconflict"); s_cf_ask = 2; }
+    if (s_cf_ask != 2) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal(s_cf_stage ? "Restart to use the merge?###modconflict" : "Mods conflict###modconflict", NULL,
+                                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+        s_cf_ask = 0; s_cf_cancel = false; return;
+    }
+    auto close = [] { s_cf_ask = 0; s_cf_cancel = false; ImGui::CloseCurrentPopup(); };
+    if (s_cf_stage == 1) {
+        ImGui::TextUnformatted(s_cf_done.c_str());
+        ImGui::TextUnformatted("The game has to restart to load the merged files. It comes back at the title screen:");
+        ImGui::TextUnformatted("choose Continue there to go on from your last save. Progress since that save is lost.");
+        ImGui::Spacing();
+        const bool go = ImGui::Button("Restart now");
+        ImGui::SameLine();
+        const bool later = ImGui::Button("Later");
+        ImGui::SetItemDefaultFocus();   /* Later: a stray Cross does not restart */
+        if (later || s_cf_cancel) {
+            close();
+            notice_for("The merge is used after a restart (F2 > Mods > Restart to apply).", 6.0);
+        } else if (go) {
+            close();
+            vk_overlay_restart_game("Mods: merged");
+        }
+        ImGui::EndPopup();
+        return;
+    }
+    ImGui::Text("%s changes the same parts of the game as %s.", s_cf_name.c_str(), s_cf_others.c_str());
+    ImGui::TextUnformatted("Pick whose version each part uses. Everything else of both mods is used together.");
+    ImGui::Spacing();
+    const float row = ImGui::GetFrameHeightWithSpacing();
+    const float h = (float)s_cf.size() * row * 1.1f;
+    const float hmax = io.DisplaySize.y * 0.5f;
+    ImGui::BeginChild("##cflist", ImVec2(0.0f, h < hmax ? h : hmax), ImGuiChildFlags_AutoResizeX);
+    for (size_t k = 0; k < s_cf.size(); k++) {
+        const ps3_game_mod_conflict& c = s_cf[k];
+        ImGui::PushID((int)k);
+        if (c.merges) ImGui::TextDisabled("%s: merged (they change different bytes)", c.what);
+        else {
+            ImGui::Text("%s:", c.what);
+            ImGui::SameLine();
+            if (ImGui::RadioButton(s_cf_name.c_str(), s_cf_pick[k] == 0)) s_cf_pick[k] = 0;
+            ImGui::SameLine();
+            if (ImGui::RadioButton(c.other_name, s_cf_pick[k] == 1)) s_cf_pick[k] = 1;
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    int choices = 0;
+    for (const ps3_game_mod_conflict& c : s_cf) if (!c.merges) choices++;
+    if (choices > 2) {
+        if (ImGui::SmallButton(("All " + s_cf_name).c_str())) for (size_t k = 0; k < s_cf.size(); k++) s_cf_pick[k] = 0;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("All the other mod's")) for (size_t k = 0; k < s_cf.size(); k++) s_cf_pick[k] = 1;
+    }
+    ImGui::Spacing();
+    const bool merge = ImGui::Button("Merge");
+    ImGui::SetItemDefaultFocus();
+    ImGui::SameLine();
+    const bool off = ImGui::Button(("Turn " + s_cf_name + " off").c_str());
+    ImGui::SameLine();
+    const bool later = ImGui::Button("Decide later");
+    if (later || s_cf_cancel) {
+        close();
+        notice_for((s_cf_name + " is left out until the conflict is resolved (F2 > Mods > Resolve).").c_str(), 6.0);
+    } else if (off) {
+        ps3_game_mods_set_on(s_cf_mod, 0);
+        close();
+    } else if (merge) {
+        std::vector<int> w(s_cf.size(), -1);
+        for (size_t k = 0; k < s_cf.size(); k++) if (!s_cf[k].merges) w[k] = s_cf_pick[k];
+        const int r = ps3_game_mods_resolve(s_cf_mod, w.data(), (int)w.size());
+        s_cf_done = "Merged: " + s_cf_name + " and " + s_cf_others + " are used together.";
+        if (r == 2 && ps3_host_can_restart()) { s_cf_stage = 1; s_cf_cancel = false; }   /* the same question, next page */
+        else {
+            close();
+            notice_for(r == 2 ? (s_cf_done + " Restart the game to use it.").c_str() : r == 1 ? (s_cf_done + " In use now.").c_str()
+                                                                                         : "Nothing to merge.", 6.0);
+        }
+    }
+    ImGui::EndPopup();
+}
+
 static void quit_confirm(void)
 {
     if (s_quit_ask == 1) { ImGui::OpenPopup("###quitask"); s_quit_ask = 2; }
