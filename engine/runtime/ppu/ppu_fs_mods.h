@@ -2120,12 +2120,35 @@ static void merge_used(std::vector<Mod>& fm, const std::vector<size_t>& used, co
             for (size_t q : { a, b }) { auto c = cover.find(q); if (c != cover.end()) sk.insert(c->second.begin(), c->second.end()); }
             std::vector<Clash> cl;
             clash_items(fm[a], fm[b], cl, &sk);
+            /* the packed files to combine, asked of pf_merge per file and preference at once
+               (it reads the game's file and both mods' once per call, not once per packed file) */
+            std::map<std::pair<std::string, int>, std::vector<int>> ask;   /* (target, prefer) -> packed files */
+            for (const Clash& k : cl) {
+                if (k.item.size() < 2 || k.item[0] != 'p') continue;
+                const int w = k.merges ? -1 : res_winner(fm[a], fm[b], k.target, k.item);
+                if (!k.merges && w < 0) continue;
+                ask[{ k.target, w }].push_back(atoi(k.item.c_str() + 1));
+            }
+            std::map<std::pair<std::string, int>, std::map<int, std::pair<bool, std::pair<std::string, int>>>> got;
+            for (const auto& q : ask) {
+                std::vector<char> ok;
+                std::vector<std::string> path;
+                std::vector<int> ov;
+                pf_merge(fm[a], fm[b], q.first.first, q.second, ok, &path, q.first.second, &ov);
+                for (size_t n = 0; n < q.second.size(); n++) got[q.first][q.second[n]] = { ok[n] != 0, { path[n], ov[n] } };
+            }
+            auto answer = [&](const std::string& t, int prefer, int i, std::vector<char>& ok, std::vector<std::string>& path, std::vector<int>& ov) {
+                const auto& r = got[{ t, prefer }][i];
+                ok.assign(1, r.first ? 1 : 0); path.assign(1, r.second.first); ov.assign(1, r.second.second);
+            };
             for (const Clash& k : cl) {
                 if (k.merges) {
+                    if (k.item.size() < 2 || k.item[0] != 'p') continue;   /* (a live mod's part: kept by both) */
                     const int i = atoi(k.item.c_str() + 1);
                     std::vector<char> ok;
                     std::vector<std::string> path;
-                    pf_merge(fm[a], fm[b], k.target, { i }, ok, &path);
+                    std::vector<int> ov0;
+                    answer(k.target, -1, i, ok, path, ov0);
                     if (!ok[0]) continue;
                     drop_item(fm[a], k.target, k.item);
                     drop_item(fm[b], k.target, k.item);
@@ -2143,7 +2166,7 @@ static void merge_used(std::vector<Mod>& fm, const std::vector<size_t>& used, co
                     std::vector<char> ok;
                     std::vector<std::string> path;
                     std::vector<int> ov;
-                    pf_merge(fm[a], fm[b], k.target, { i }, ok, &path, w, &ov);
+                    answer(k.target, w, i, ok, path, ov);
                     if (ok[0]) {
                         drop_item(fm[a], k.target, k.item);
                         drop_item(fm[b], k.target, k.item);
