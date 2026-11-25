@@ -266,8 +266,6 @@ std::atomic<uint32_t> s_krank_cole{0};
 /* L_'s patches: Black lightning (on/off), Static Thrusters flight / fast (choice index, 0 = off); what the
  * hooks saw (the page's status lines) */
 std::atomic<int> g_black{0}, g_tfly{0}, g_tfast{0};
-/* a live mod with "dark_bolts" on (runtime/ppu/ppu_fs_mods.h): the same arc swap as Black lightning */
-std::atomic<int> g_mods_dark{0};
 std::atomic<long long> s_bl_swaps{0}, s_bl_calls{0}, s_fly_frames{0}, s_fast_frames{0};
 std::atomic<int> s_thr_tier{-1};                 /* Cole's thruster upgrades seen by a hook: 0 none .. 3 all */
 /* Unlock all powers: the choice (0 off, 1 every upgrade, 2 every power), Karma powers of both sides; requests
@@ -277,13 +275,6 @@ std::atomic<int> s_pw_kick{0}, s_pw_slots{0};
 std::atomic<int> s_pw_owned{-1}, s_pw_given{0};
 
 void hooks_update();
-static void mods_dark(int on)
-{
-    const int v = on ? 1 : 0;
-    if (g_mods_dark.exchange(v) != v) hooks_update();
-}
-extern "C" void (*g_mods_dark_bolts_hook)(int on);   /* ppu_fs_mods.h calls it when its wish changes */
-static const bool s_mods_dark_reg = (g_mods_dark_bolts_hook = mods_dark, true);
 void spot_tick(struct ppu_context* ctx, uint32_t c);
 void krank_tick(struct ppu_context* ctx, uint32_t c);
 void power_tick(struct ppu_context* ctx, uint32_t c);
@@ -623,17 +614,14 @@ void power_dump(struct ppu_context* ctx, uint32_t c)
  * SubmitDraws does not read), so any guest thread may run it. */
 void hook_arc_draw(struct ppu_context* ctx, ppu_hook_body body)
 {
-    if ((g_black.load(std::memory_order_relaxed) || g_mods_dark.load(std::memory_order_relaxed)) &&
-        (uint32_t)ctx->lr == kLrArcSite) {
+    if (g_black.load(std::memory_order_relaxed) && (uint32_t)ctx->lr == kLrArcSite) {
         const long long call = s_bl_calls.fetch_add(1, std::memory_order_relaxed);
         const uint32_t def = vm_read32((uint32_t)ctx->gpr[3] + 0x14);
         const uint32_t ref = vm_read32(kEvilShaderRef);
         const uint32_t flag = gptr(def) ? vm_read32(def + kDefNoSwap) : 0xFFFFFFFFu;
         const uint32_t own5 = (uint32_t)ctx->gpr[5], own6 = (uint32_t)ctx->gpr[6], own7 = (uint32_t)ctx->gpr[7];
         uint32_t g = 0; int32_t n = -1;
-        /* every arc: L_'s patch also wanted def+0x11C == 0, but Cole's own bolts have it set (a game 2026-11-20:
-         * flag FFFFFFFF, "left as it is"); without that test they turn black too */
-        if (gptr(def) && gptr(ref)) {
+        if (gptr(def) && flag == 0 && gptr(ref)) {
             ppu_context x;
             memcpy(&x, ctx, sizeof x);
             x.gpr[3] = ref;
@@ -2035,7 +2023,7 @@ void hooks_update()
     ppu_hook_set(kFnPowerWord, (g_pw_both || g_pw) ? hook_power_word : nullptr);
     ppu_hook_set(kFnPowerKarmaOk, (g_pw_both || g_pw) ? hook_power_karma_ok : nullptr);
     /* L_'s patches: set only while switched on */
-    ppu_hook_set(kFnArcDraw, (g_black || g_mods_dark) ? hook_arc_draw : nullptr);
+    ppu_hook_set(kFnArcDraw, g_black ? hook_arc_draw : nullptr);
     ppu_hook_set(kFnThrustSpeed, g_tfast ? hook_thrust_speed : nullptr);
     ppu_hook_set(kFnThrustFloor, g_tfly ? hook_thrust_floor : nullptr);
     ppu_hook_set(kFnSetHealth, g_god ? hook_set_health : nullptr);
