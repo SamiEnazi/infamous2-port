@@ -1050,11 +1050,11 @@ static void test_hostile_pack()
         uint64_t budget = 100;
         const uint16_t ok[] = { 0x0002, 0x8003 };
         CHECK(xm::loc_decode(ok, 2, 10, budget, out) && out.size() == 4 && out[3] == 5 && budget == 96);
-        const uint16_t far[] = { 0x0000, 0xBFFF };
+        const uint16_t beyond[] = { 0x0000, 0xBFFF };
         budget = 100000;
-        CHECK(!xm::loc_decode(far, 2, 10, budget, out));                         /* past the data */
+        CHECK(!xm::loc_decode(beyond, 2, 10, budget, out));                         /* past the data */
         budget = 10;
-        CHECK(!xm::loc_decode(far, 2, 1u << 20, budget, out));                   /* past the budget */
+        CHECK(!xm::loc_decode(beyond, 2, 1u << 20, budget, out));                   /* past the budget */
         const uint16_t page[] = { 0xC3FF, 0x0001 };
         budget = 10;
         CHECK(!xm::loc_decode(page, 2, 1000, budget, out));
