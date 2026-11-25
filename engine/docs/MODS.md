@@ -212,8 +212,7 @@ applied), and the new one waits for the old one to end.
 
 ```
 <mod>/mod.json        {"game": "inf2", "name": ..., "author": ..., "version": ...}
-                      port only: "patch_for": [mods] (a merge patch, see Merging),
-                      "discover_powers": [power numbers] (see New powers)
+                      port only: "patch_for": [mods] (a merge patch, see Merging)
 <mod>/files/          .xpps files that replace the game's (by file name, any subfolder;
                       a mod with no files/ folder keeps them in the mod folder itself)
 <files>/texture_patches/<target>.xpps/[data]<OFFSET>_..._<W>x<H>_<DXTn>_m<mips>.dds
@@ -284,25 +283,6 @@ textures. It is the same draw swap as Cheats > Black lightning
 (`cheats/cheats.cpp`, `hook_arc_draw`), switched by the mod. Additive
 glows cannot be black (black adds no light), so a mod made for black
 bolts should give the glows' cores the outside colour instead.
-
-## New powers (port only)
-
-A mod that adds a power (a new slot in the Powers menu) can list it in
-`discover_powers`, so it shows as found in any save, not only in a new game:
-
-```json
-{ "game": "inf2", "name": "My Power", "version": "1.0", "discover_powers": [0, 9] }
-```
-
-A power is found at a story moment, which a save made before the mod never
-reaches again, so the menu would show it as "Undiscovered power". While the
-mod is on and a save is being played (Cole's character object at
-`0x00A6E9E4` is set), the live-mods worker checks every listed power's word
-(`0x00A64E60` + 4 x power: 1 found, 2 its requirement met, 4 bought, 0x20 new)
-every few seconds and gives one without the found bit `0x23`: found, ready to
-buy and marked new. The game saves it with the rest, so the power stays found
-if the mod is turned off later. The mod does not need `"live": true`. Log
-lines start `[mods] discover_powers:`.
 
 ## How it works
 
