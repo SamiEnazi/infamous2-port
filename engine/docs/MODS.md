@@ -94,7 +94,7 @@ Two mods that change the same file are both used when the port can merge them:
   carry the file with both mods' changes and say which mods it merges:
 
   ```
-  {"game": "inf2", "name": "Mod A + Mod B patch", "patch_for": ["Mod A", "Mod B"], ...}
+  {"game": "inf2", "name": "Lightning Bolt + Electric Dash patch", "patch_for": ["Lightning Bolt", "Electric Dash"], ...}
   ```
 
   Each name is a mod's folder or name. The patch is used only while every
@@ -212,7 +212,10 @@ applied), and the new one waits for the old one to end.
 
 ```
 <mod>/mod.json        {"game": "inf2", "name": ..., "author": ..., "version": ...}
-                      port only: "patch_for": [mods] (a merge patch, see Merging)
+                      port only: "patch_for": [mods] (a merge patch, see Merging),
+                      "discover_powers": [power numbers], "file_alias": {missing: stand-in}
+                      (see New powers), "electric_dash" (see Electric Dash),
+                      "karma_patches" (see Karma patches)
 <mod>/files/          .xpps files that replace the game's (by file name, any subfolder;
                       a mod with no files/ folder keeps them in the mod folder itself)
 <files>/texture_patches/<target>.xpps/[data]<OFFSET>_..._<W>x<H>_<DXTn>_m<mips>.dds
@@ -253,6 +256,137 @@ bytes. Every live mod's windows are made at start (a few seconds, on or off),
 then a pass every 4 s (`PS3_GAME_MODS_LIVE_SECS`; ~0.4 s over ~380 MB) also
 patches what the game loads later. The status line counts the places changed.
 Log lines start `[mods] live:`.
+
+### Karma levels
+
+A live mod can change with Cole's karma level. `karma_levels` names a folder
+for any of the seven levels (`Infamous`, `Outlaw`, `Thug`, `Neutral`,
+`Guardian`, `Champion`, `Hero`); each folder holds `files/` with patches, as
+the mod's own:
+
+```json
+{
+  "game": "inf2", "name": "Karma Lightning", "live": true,
+  "karma_levels": { "Infamous": "levels/infamous", "Hero": "levels/hero" }
+}
+```
+
+The worker reads the karma level every half second the way the game finds it
+(the karma float at `0x00A64E40`, the first of the seven ranges at
+`0x00745EC8` that holds it, else Neutral) and puts the level's bytes in when
+it changes. A level the mod does not name uses the mod's own `files/`, which
+is also what the Manager and older ports apply at load.
+
+### Karma patches
+
+A mod (live or not) can make some of its own bytes depend on Cole's karma
+level with `karma_patches`: at the listed levels the place in guest memory
+that holds `find` gets `replace`'s bytes, at the other levels it gets
+`find`'s bytes back.
+
+```json
+"karma_patches": [
+  { "levels": ["Thug", "Neutral", "Guardian", "Champion", "Hero"],
+    "find":    "1e070000 28000030 1f010000 01040400 00000009 ...",
+    "replace": "???????? ???????? ???????? ???????? 00000251 ..." }
+]
+```
+
+- `find` and `replace` are hex of the same length (16-4096 bytes, a multiple
+  of 4; spaces are ignored). `??` in `find` is any byte: use it for bytes the
+  game's loader fills in (pointers, native call and class words, which differ
+  from the file). `??` in `replace` leaves the byte as it is; a byte
+  `replace` sets must be known in `find`.
+- `find` must hold 8 known bytes in a row (at a multiple of 4) that `replace`
+  leaves alone; they are what is searched for. It must be unique to the mod's
+  bytes, or every place that matches is changed.
+- While a save is being played (Cole's character object at `0x00A6E9E4` is
+  set), the live-mods worker looks for the place in either form in guest main
+  memory and RSX local memory (again at most every 5 s while it is not
+  found), remembers it and checks the karma level every half second.
+
+Custom Powers uses it for Lightning Bolt's head explosion (Skull Bolt's
+headshot call, copied into its bolt's script): below Outlaw the call's
+character class check is pointed at a class no character has, so the call is
+skipped. Log lines start `[mods] karma_patches:`. The Manager and older ports
+ignore the key (the mod's bytes stay as its files have them).
+
+### Black bolts
+
+`"dark_bolts": true` (or a list of karma levels, e.g. `["Infamous", "Outlaw"]`)
+draws Cole's electric arcs with the game's own dark (evil) lightning shader
+while the mod is on: a black core with the outside colour of the evil bolt
+textures. It is the same draw swap as Cheats > Black lightning
+(`cheats/cheats.cpp`, `hook_arc_draw`), switched by the mod. Additive
+glows cannot be black (black adds no light), so a mod made for black
+bolts should give the glows' cores the outside colour instead.
+
+## New powers (port only)
+
+A mod that adds a power (a new slot in the Powers menu) can list it in
+`discover_powers`, so it shows as found in any save, not only in a new game:
+
+```json
+{ "game": "inf2", "name": "My Power", "version": "1.0", "discover_powers": [0, 9] }
+```
+
+A power is found at a story moment, which a save made before the mod never
+reaches again, so the menu would show it as "Undiscovered power". While the
+mod is on and a save is being played (Cole's character object at
+`0x00A6E9E4` is set), the live-mods worker checks every listed power's word
+(`0x00A64E60` + 4 x power: 1 found, 2 its requirement met, 4 bought, 0x20 new)
+every few seconds and gives one without the found bit `0x23`: found, ready to
+buy and marked new. The game saves it with the rest, so the power stays found
+if the mod is turned off later. The mod does not need `"live": true`. Log
+lines start `[mods] discover_powers:`.
+### Electric Dash
+
+`"electric_dash": true` (or an object with settings) turns on the engine side
+of a mod that adds a Misc power as power `0x30` (slot kind `0xB`, after
+Firebird Strike). The mod itself adds the power with `xpps_patches` (its
+definition, icon, menu entry); the engine side is in `cheats/cheats.cpp`
+(`ed_*`) and runs while that power is equipped and its button (R2) is held,
+Cole has energy and is not climbing:
+
+```json
+{
+  "game": "inf2", "name": "Electric Dash",
+  "electric_dash": { "speed": 2, "anim": 1.3, "drain": 15, "glow": true, "glowskip": 11000 }
+}
+```
+
+- `speed` (1-20, default 2): Cole moves that many times as far each frame, on
+  the ground and in the air (through the game's own SetWorldPosition and the
+  jump/fall controller's air speed). Jumps on the move keep their take-off
+  speed; the landing roll keeps the speed he landed with.
+- `anim` (0.1-10, default 1.3): his animations run that much faster on the
+  ground (1 leaves the animation update alone).
+- `drain` (0-1000, default 15): energy taken each second (the bar is 330);
+  none comes back while the button is held, and at 0 the dash stays off until
+  the button is let go.
+- `glow` (default true): the charged-body look of Overload while dashing; it
+  fades out once the button is let go (`glowskip` ticks are skipped, default
+  11000). While the game's own Overload runs (Bio Leech, Ionic Drain) it is
+  left alone, so that still refills the bar.
+
+The power is marked discovered in any save while the mod is used. The setting
+is read once at start, so turning the mod on or off needs a restart. Nothing
+is hooked unless a used mod asks for it. `PS3_ED_LOG=1` logs the steps.
+
+The Powers menu plays `movies/ui/powerk_<name>.bik` for the power under the
+cursor, where `<name>` is the power's entry in the game's power-name table
+(lower case), e.g. `powerk_bolt9.bik` for power 9 and `powerk_r2_8.bik` for
+power 0x30. A new power has no such movie, and one failed open leaves the
+menu's movie player blank for every power until the game restarts. List a
+stand-in in `file_alias` (paths under `USRDIR`; any game file can stand in):
+
+```json
+"file_alias": { "movies/ui/powerk_bolt9.bik": "movies/ui/powerk_fatbolt.bik" }
+```
+
+While the mod is on, a read of the first path that the game does not have
+reads the second instead (a file the game has is never replaced this way).
+The first read logs `[mods] movies/ui/powerk_bolt9.bik -> ... (file_alias of <mod>)`.
 
 ## How it works
 

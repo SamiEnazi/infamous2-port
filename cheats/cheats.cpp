@@ -116,6 +116,7 @@ static ppu_hook_body cheats_game_fn(uint32_t addr)
 #define func_0030EFF0 CHEATS_GAME_FN(0x0030EFF0u)
 #define func_00363E54 CHEATS_GAME_FN(0x00363E54u)
 #define func_004AE348 CHEATS_GAME_FN(0x004AE348u)
+#define func_004ABDFC CHEATS_GAME_FN(0x004ABDFCu)   /* SetWorldPosition(r3 object, v2 world target): Electric Dash */
 
 /* The in-game menu (libs/video/vk_overlay.cpp): 1 while F2's menu is open. The karma rank pick waits for 0. */
 extern "C" int vk_overlay_menu_open(void);
@@ -266,6 +267,8 @@ std::atomic<uint32_t> s_krank_cole{0};
 /* L_'s patches: Black lightning (on/off), Static Thrusters flight / fast (choice index, 0 = off); what the
  * hooks saw (the page's status lines) */
 std::atomic<int> g_black{0}, g_tfly{0}, g_tfast{0};
+/* a live mod with "dark_bolts" on (runtime/ppu/ppu_fs_mods.h): the same arc swap as Black lightning */
+std::atomic<int> g_mods_dark{0};
 std::atomic<long long> s_bl_swaps{0}, s_bl_calls{0}, s_fly_frames{0}, s_fast_frames{0};
 std::atomic<int> s_thr_tier{-1};                 /* Cole's thruster upgrades seen by a hook: 0 none .. 3 all */
 /* Unlock all powers: the choice (0 off, 1 every upgrade, 2 every power), Karma powers of both sides; requests
@@ -275,9 +278,22 @@ std::atomic<int> s_pw_kick{0}, s_pw_slots{0};
 std::atomic<int> s_pw_owned{-1}, s_pw_given{0};
 
 void hooks_update();
+void ed_anim_update(struct ppu_context* ctx);   /* Electric Dash, at the end */
+void ed_air_speed(uint32_t a, uint32_t c);
+bool ed_anim_redirect(uint32_t obj);
+void hook_set_fov_ed(struct ppu_context* ctx, ppu_hook_body body);
+static void mods_dark(int on)
+{
+    const int v = on ? 1 : 0;
+    if (g_mods_dark.exchange(v) != v) hooks_update();
+}
+extern "C" void (*g_mods_dark_bolts_hook)(int on);   /* ppu_fs_mods.h calls it when its wish changes */
+static const bool s_mods_dark_reg = (g_mods_dark_bolts_hook = mods_dark, true);
 void spot_tick(struct ppu_context* ctx, uint32_t c);
 void krank_tick(struct ppu_context* ctx, uint32_t c);
 void power_tick(struct ppu_context* ctx, uint32_t c);
+void ed_tick(struct ppu_context* ctx, uint32_t c);
+bool ed_wanted();
 
 /* ---- the hooks ----------------------------------------------------------------------- */
 void timeline_poll(struct ppu_context* ctx, uint32_t c);
@@ -343,6 +359,7 @@ void hook_cole_update(struct ppu_context* ctx, ppu_hook_body body)
         if (mx > 0.0f && rdf(c + kEnergy) < mx) wrf(c + kEnergy, mx);
     }
     if (g_ionic.load(std::memory_order_relaxed)) ionic_tick(ctx, c);
+    if (ed_wanted()) ed_tick(ctx, c);
     if (g_refill.exchange(0)) {
         const float mx = rdf(c + kHpMax);
         if (mx > 0.0f) wrf(c + kHp, mx);
@@ -416,6 +433,7 @@ void hook_battery_bonus(struct ppu_context* ctx, ppu_hook_body body)
  * state Float only) is scaled: he sinks 2x/4x/8x slower while R1 is held. Other fall states and
  * every other character keep the game's value; UpdateGravity sets it again on every air frame and
  * at every fall state change, so nothing is left over when the glide ends or the cheat goes off. */
+std::atomic<double> s_ed_grav_t{0.0};   /* Electric Dash: the last time Cole's jump/fall controller ran */
 uint32_t s_cole_a;   /* PS3_CHEATS_PROBE: Cole's jump/fall controller, seen in UpdateGravity */
 void hook_update_gravity(struct ppu_context* ctx, ppu_hook_body body)
 {
@@ -425,6 +443,7 @@ void hook_update_gravity(struct ppu_context* ctx, ppu_hook_body body)
     const uint32_t c = player();
     if (!c || vm_read32(a + kAOwner) != c) return;
     s_cole_a = a;
+    if (ed_wanted()) { s_ed_grav_t.store(now_s(), std::memory_order_relaxed); ed_air_speed(a, c); }
     const int k = g_glide.load(std::memory_order_relaxed);
     if (k <= 0 || k >= (int)(sizeof kGlideScale / sizeof kGlideScale[0])) return;
     if (vm_read32(a + kAFallState) != kFallFloat) return;
@@ -614,14 +633,17 @@ void power_dump(struct ppu_context* ctx, uint32_t c)
  * SubmitDraws does not read), so any guest thread may run it. */
 void hook_arc_draw(struct ppu_context* ctx, ppu_hook_body body)
 {
-    if (g_black.load(std::memory_order_relaxed) && (uint32_t)ctx->lr == kLrArcSite) {
+    if ((g_black.load(std::memory_order_relaxed) || g_mods_dark.load(std::memory_order_relaxed)) &&
+        (uint32_t)ctx->lr == kLrArcSite) {
         const long long call = s_bl_calls.fetch_add(1, std::memory_order_relaxed);
         const uint32_t def = vm_read32((uint32_t)ctx->gpr[3] + 0x14);
         const uint32_t ref = vm_read32(kEvilShaderRef);
         const uint32_t flag = gptr(def) ? vm_read32(def + kDefNoSwap) : 0xFFFFFFFFu;
         const uint32_t own5 = (uint32_t)ctx->gpr[5], own6 = (uint32_t)ctx->gpr[6], own7 = (uint32_t)ctx->gpr[7];
         uint32_t g = 0; int32_t n = -1;
-        if (gptr(def) && flag == 0 && gptr(ref)) {
+        /* every arc: L_'s patch also wanted def+0x11C == 0, but Cole's own bolts have it set (a game 2026-11-20:
+         * flag FFFFFFFF, "left as it is"); without that test they turn black too */
+        if (gptr(def) && gptr(ref)) {
             ppu_context x;
             memcpy(&x, ctx, sizeof x);
             x.gpr[3] = ref;
@@ -1552,7 +1574,14 @@ void fov_hooks_update()
     ppu_hook_set(kFnFovTarget, map || probe ? hook_fov_target : nullptr);
     ppu_hook_set(kFnCamUpdate, map || probe ? hook_cam_update : nullptr);
     ppu_hook_set(kFnCamCopy, map || probe ? hook_cam_copy : nullptr);
-    ppu_hook_set(kFnSetFov, probe ? hook_set_fov : nullptr);
+    ppu_hook_set(kFnSetFov, (probe || ed_wanted()) ? hook_set_fov_ed : nullptr);
+}
+/* SetFov's slot also carries the anim players' update while Electric Dash is used (ed_anim_install). */
+void hook_set_fov_ed(struct ppu_context* ctx, ppu_hook_body body)
+{
+    if (ed_anim_redirect((uint32_t)ctx->gpr[3])) { ed_anim_update(ctx); return; }
+    if (s_fov_hook && s_fov_probe) { hook_set_fov(ctx, body); return; }
+    ppu_hook_call(ctx, body);
 }
 
 /* ---- saved spots: "Save this spot" / "Go to saved spot" (2026-11-11; NOTES.md "Saved spots") --------------
@@ -2017,20 +2046,20 @@ void hooks_update()
     const bool tick = g_god || g_energy || g_ionic || g_xp_pending.load() != 0 || g_refill || s_probe || s_timeline ||
                       !s_env_done || g_karma_add.load() != 0 || g_recompute || s_snap_left > 0 ||
                       g_tp_pending.load() != 0 || s_settle_on.load() || g_krank_pending.load() != 0 ||
-                      g_pw.load() != 0 || s_pw_slots.load() != 0;
+                      g_pw.load() != 0 || s_pw_slots.load() != 0 || ed_wanted();
     ppu_hook_set(kFnColeUpdate, tick ? hook_cole_update : nullptr);
     /* Unlock all powers: Karma powers of both sides (read-only hooks, set only while on) */
     ppu_hook_set(kFnPowerWord, (g_pw_both || g_pw) ? hook_power_word : nullptr);
     ppu_hook_set(kFnPowerKarmaOk, (g_pw_both || g_pw) ? hook_power_karma_ok : nullptr);
     /* L_'s patches: set only while switched on */
-    ppu_hook_set(kFnArcDraw, g_black ? hook_arc_draw : nullptr);
+    ppu_hook_set(kFnArcDraw, (g_black || g_mods_dark) ? hook_arc_draw : nullptr);
     ppu_hook_set(kFnThrustSpeed, g_tfast ? hook_thrust_speed : nullptr);
     ppu_hook_set(kFnThrustFloor, g_tfly ? hook_thrust_floor : nullptr);
     ppu_hook_set(kFnSetHealth, g_god ? hook_set_health : nullptr);
     ppu_hook_set(kFnTakeDamage, (g_onehit || s_probe) ? hook_take_damage : nullptr);
     ppu_hook_set(kFnAddKarma, (g_kside || g_kmult > 1 || g_kxp > 0) ? hook_add_karma : nullptr);
     ppu_hook_set(kFnBatteryBonus, g_maxbat ? hook_battery_bonus : nullptr);
-    ppu_hook_set(kFnUpdateGravity, (g_glide > 0 || s_probe) ? hook_update_gravity : nullptr);
+    ppu_hook_set(kFnUpdateGravity, (g_glide > 0 || s_probe || ed_wanted()) ? hook_update_gravity : nullptr);
     ppu_hook_set(kFnRingMax, s_fix_ring ? hook_ring_max : nullptr);   /* the fix, always */
     /* [mouse] the mouse camera's direct mode: always (they write nothing while the mouse is still) */
     ppu_hook_set(kFnFreeCam, s_mouse_hook ? hook_free_cam : nullptr);
@@ -2602,4 +2631,232 @@ struct WorkersInit {
     }
 };
 WorkersInit s_workers_init;
+
+/* ---- Electric Dash (a mod's power: mod.json "electric_dash", docs/MODS.md) -------------------------------------
+ * A Misc power that a data mod adds as power 0x30 (slot kind 0xB). While it is equipped and its button (R2: 0x800 in
+ * the game's held-buttons word [0x009A4CC0]+0x1C) is held, and Cole has energy and is not climbing:
+ *  - he moves `speed` times as far each frame: from Cole's update, after the game's body, his horizontal step since
+ *    last frame is added (speed-1) more times through the game's own SetWorldPosition 0x004ABDFC (his movement starts
+ *    each frame from +0x90, so the extra distance sticks; height is left to the game). Steps over 1 m in a frame
+ *    (teleports, cutscene cuts) are never scaled. In the air nothing is added: the air speed below already does it
+ *    (both together made jumps far too fast and broke the landing);
+ *  - his jump/fall controller's air speed (+0x44, UpdateGravity) is `speed` times the game's, and the landing roll
+ *    keeps the speed he landed with (at most `speed` times);
+ *  - his animation players run `anim` times as fast on the ground (not in the air, nor 0.3 s after);
+ *  - he gets the charged-body look of Overload (C+0x1F20 = 1, its timer C+0x1F24 kept fresh), which starts to fade
+ *    the moment the button is let go (the timer is moved on by `glowskip` ticks), and gives no free energy then;
+ *    while the game's own Overload (Bio Leech, Ionic Drain) runs, it is left alone;
+ *  - `drain` energy points a second are taken (the bar is 330), and none come back while it is held; at 0 it stays
+ *    off until the button is let go.
+ * Climbing: a jump state that UpdateGravity does not run for (ledge grabs, shimmying) turns it off until Cole has
+ * been on the ground (or a rail) for 0.3 s. The power is marked discovered in any save while the mod is used.
+ * Nothing is hooked unless a mod that is used asks for it. PS3_ED_LOG=1 logs the steps. */
+extern "C" int ps3_game_mods_electric_dash(float* speed, float* anim, float* drain, int* glow, int* glowskip);
+constexpr uint32_t kEdPower = 0x30, kEdSlot = 0x0B, kEdButton = 0x800;
+constexpr uint32_t kColeMoveState = 0x46C;   /* 4 on the ground (also rails), 5 in the air (also climbing) */
+constexpr uint32_t kColeGlow = 0x1F20, kColeGlowT = 0x1F24, kColeClock = 0x234, kColeVel = 0x1570;
+struct EdSet { bool on = false; float speed = 2.0f, anim = 1.3f, drain = 15.0f; int glow = 1, glowskip = 11000; };
+static EdSet ed_set()
+{
+    static EdSet s; static bool got = false;
+    if (!got) {
+        got = true;
+        s.on = ps3_game_mods_electric_dash(&s.speed, &s.anim, &s.drain, &s.glow, &s.glowskip) != 0;
+        if (s.speed < 1.0f) s.speed = 1.0f; else if (s.speed > 20.0f) s.speed = 20.0f;
+        if (s.anim < 0.1f) s.anim = 0.1f; else if (s.anim > 10.0f) s.anim = 10.0f;
+        if (s.drain < 0.0f) s.drain = 0.0f; else if (s.drain > 1000.0f) s.drain = 1000.0f;
+        if (s.on) fprintf(stderr, "[ed] Electric Dash: speed x%.1f, animation x%.2f, drain %.0f/s, glow %d\n", s.speed, s.anim, s.drain, s.glow);
+    }
+    return s;
+}
+static bool ed_log() { static int l = -1; if (l < 0) { const char* e = getenv("PS3_ED_LOG"); l = e && *e == '1'; } return l != 0; }
+bool ed_wanted() { return ed_set().on; }
+extern std::atomic<double> s_ed_grav_t;
+static bool s_ed_climb = false;
+static void ed_climb_update(uint32_t c)
+{
+    static double t_air_nograv = -1, t_ground = -1;
+    const double now = now_s();
+    if (vm_read32(c + kColeMoveState) == 4) {
+        t_air_nograv = -1;
+        if (t_ground < 0) t_ground = now;
+        if (s_ed_climb && now - t_ground > 0.3) s_ed_climb = false;
+        return;
+    }
+    t_ground = -1;
+    if (now - s_ed_grav_t.load(std::memory_order_relaxed) < 0.15) { t_air_nograv = -1; return; }
+    if (t_air_nograv < 0) t_air_nograv = now;
+    if (!s_ed_climb && now - t_air_nograv > 0.15) s_ed_climb = true;
+}
+static bool ed_active(uint32_t c)
+{
+    if (!ed_set().on || s_ed_climb) return false;
+    if (vm_read32(kG + 0x1C0u + 4u * kEdSlot) != kEdPower) return false;
+    const uint32_t pad = vm_read32(kPadPtr);
+    const bool held = gptr(pad) && (vm_read32(pad + kPadHeld) & kEdButton);
+    static bool empty_lock = false;   /* out of energy: off until the button is let go */
+    if (!held) { empty_lock = false; return false; }
+    if (ed_set().drain > 0 && c && rdf(c + kEnergy) < 1.0f) empty_lock = true;
+    return !empty_lock;
+}
+constexpr uint32_t kGameDt = 0x00A2C508;   /* global time block 0x00A2C500: +8 the scaled dt the anim advance reads */
+constexpr uint32_t kAnimVt = 0x00935700, kAnimOpd = 0x009B4DC0, kFnAnimUpdate = 0x000323C8;
+#define func_000323C8 CHEATS_GAME_FN(0x000323C8u)   /* anim player update (r3 = player; Cole's are inside Cole) */
+/* The anim players' update has no hook slot of its own, so its OPD is pointed at SetFov's (ed_anim_install) and
+ * hook_set_fov_ed hands players (vtable 0x00935700) here. */
+bool ed_anim_redirect(uint32_t obj) { return gptr(obj) && vm_read32(obj) == kAnimVt; }
+void ed_anim_update(struct ppu_context* ctx)
+{
+    const uint32_t pl = (uint32_t)ctx->gpr[3];
+    const uint32_t c = player();
+    const bool mine = c && pl >= c && pl < c + 0x20000u;
+    const float k = ed_set().anim;
+    if (!mine || k == 1.0f || !ed_active(c)) { ppu_hook_call(ctx, func_000323C8); return; }
+    {   /* no faster animation in the air, during landings and rolls, or 0.3 s after: it stops the high-fall roll */
+        static double busy_t = 0;
+        const double t = now_s();
+        if (vm_read32(c + kColeMoveState) == 5 || t - s_ed_grav_t.load(std::memory_order_relaxed) < 0.15) busy_t = t;
+        if (t - busy_t < 0.3) { ppu_hook_call(ctx, func_000323C8); return; }
+    }
+    const float dt = rdf(kGameDt);
+    wrf(kGameDt, dt * k);
+    ppu_hook_call(ctx, func_000323C8);
+    wrf(kGameDt, dt);
+}
+void ed_air_speed(uint32_t a, uint32_t c)
+{
+    static uint32_t last_a = 0; static float base = 0.0f, wrote = -1.0f, mult = 1.0f;
+    static float air_v = 0.0f, air_base = 0.0f;   /* last air frame: Cole's horizontal speed, its phase's normal speed */
+    const float cur = rdf(a + 0x44);
+    const float kd = ed_set().speed;
+    if (a != last_a || cur != wrote) {   /* a new controller, or the game changed it (a new phase) */
+        const bool fresh = a != last_a, was_air = base >= 700.0f;
+        last_a = a; base = cur; wrote = -1.0f;
+        if (base >= 700.0f) mult = kd;    /* air phases */
+        else if (fresh || was_air) {      /* the landing roll: as fast as he landed, relative to that phase's normal */
+            const float r = air_base > 1.0f ? air_v / air_base : 1.0f;
+            mult = r < 1.0f ? 1.0f : (r > kd ? kd : r);
+        }
+    }
+    if (base >= 700.0f && vm_read32(c + kColeMoveState) == 5) { air_v = hypotf(rdf(c + kColeVel), rdf(c + kColeVel + 4)); air_base = base; }
+    if (ed_active(c) && base > 1.0f && base < 5000.0f) {
+        const float v = base * (base >= 700.0f ? kd : mult);
+        if (cur != v) wrf(a + 0x44, v);
+        wrote = v;
+    } else if (wrote >= 0.0f) { wrf(a + 0x44, base); wrote = -1.0f; }
+}
+
+static void ed_anim_install()
+{
+    static bool done = false;
+    if (done) return;
+    done = true;
+    if (ed_set().anim == 1.0f) return;
+    if (vm_read32(kAnimOpd) != kFnAnimUpdate || vm_read32(kAnimVt + 8) != kAnimOpd) { fprintf(stderr, "[ed] anim OPD not as expected: no animation speed\n"); return; }
+    ppu_hook_set(kFnSetFov, hook_set_fov_ed);
+    vm_write32(kAnimOpd, kFnSetFov);
+}
+void ed_tick(struct ppu_context* ctx, uint32_t c)
+{
+    static bool have = false; static float prev[3];
+    static float vh[8][2]; static unsigned vi = 0; static int fixing = 0, after = 0;
+    static float v0 = 0; static bool was_air = false; static double tprev = 0;
+    const EdSet S = ed_set();
+    float p[3], yaw;
+    ed_anim_install();
+    ed_climb_update(c);
+    {   /* discovered in every save while the mod is used */
+        static double t_chk = -10;
+        const double tn = now_s();
+        if (tn - t_chk > 2.0) {
+            t_chk = tn;
+            const uint32_t wa = kG + 0x40u + 4u * kEdPower, w = vm_read32(wa);
+            if (!(w & 1)) { vm_write32(wa, w | 0x21); fprintf(stderr, "[ed] Electric Dash marked discovered (power word %x -> %x)\n", w, w | 0x21); }
+        }
+    }
+    /* the charged-body look */
+    static bool glow_on = false, real_ovl = false, fade_ours = false;
+    static float e_rel = -1.0f; static double t_rel = 0;
+    static uint32_t glow_wrote = 0;
+    {
+        const bool st1 = vm_read32(c + kColeGlow) == 1;
+        const uint32_t tg = vm_read32(c + kColeGlowT);
+        if (!st1) { real_ovl = false; fade_ours = false; }
+        else if (!real_ovl) {
+            if (glow_on || fade_ours) { if (tg != glow_wrote) real_ovl = true; }   /* the game restarted the timer */
+            else real_ovl = true;                                                 /* state 1 that we did not set */
+            if (real_ovl) { fade_ours = false; e_rel = -1.0f; }
+        }
+    }
+    if (glow_on && !ed_active(c)) {
+        glow_on = false;
+        if (!real_ovl) {
+            if (vm_read32(c + kColeGlow) == 1) {
+                glow_wrote = vm_read32(c + kColeClock) - (uint32_t)S.glowskip;
+                vm_write32(c + kColeGlowT, glow_wrote); fade_ours = true;
+            }
+            if (S.drain > 0) { e_rel = rdf(c + kEnergy); t_rel = now_s(); }
+        }
+    }
+    if (e_rel >= 0.0f) {   /* no refill from our fading glow */
+        if (glow_on || vm_read32(c + kColeGlow) != 1 || now_s() - t_rel > 3.0) e_rel = -1.0f;
+        else { const float e = rdf(c + kEnergy); if (e > e_rel) wrf(c + kEnergy, e_rel); else e_rel = e; }
+    }
+    if (!ed_active(c) || !cole_world(c, p, &yaw) || vm_read8(c + kOOff)) { have = false; fixing = after = 0; vi = 0; was_air = false; return; }
+    if (S.glow) {
+        if (!real_ovl) { glow_wrote = vm_read32(c + kColeClock); vm_write32(c + kColeGlowT, glow_wrote); vm_write32(c + kColeGlow, 1); }
+        glow_on = true;
+    }
+    {   /* energy drain */
+        static float e_last = -1.0f; static double t_last = 0;
+        const double tn = now_s();
+        double dt = tn - t_last; t_last = tn;
+        if (dt > 0.1 || dt < 0) { dt = 0; e_last = -1.0f; }   /* a new hold */
+        float e = rdf(c + kEnergy);
+        if (e_last >= 0.0f && e > e_last && dt > 0) e = e_last;     /* no refill while held */
+        if (S.drain > 0 && !real_ovl) { e -= S.drain * (float)dt; if (e < 0.0f) e = 0.0f; wrf(c + kEnergy, e); e_last = e; }
+        else e_last = -1.0f;
+    }
+    if (have) {
+        const float dx = p[0] - prev[0], dy = p[1] - prev[1], dz = p[2] - prev[2];
+        const bool air = fabsf(dz) > 3.0f || vm_read32(c + kColeMoveState) == 5;
+        /* the game's landing steer: from its start until he is on the ground, nothing is added */
+        bool fixed = false;
+        const float vx = rdf(c + kColeVel), vy = rdf(c + kColeVel + 4);   /* cm/s */
+        vh[vi & 7][0] = vx; vh[vi & 7][1] = vy; vi++;
+        if (fixing == 0 && air && dz < -1.0f && vi > 8) {
+            const float* o = vh[(vi - 5) & 7];   /* 4 frames ago */
+            const float on = sqrtf(o[0] * o[0] + o[1] * o[1]);
+            const float along = on > 1.0f ? (vx * o[0] + vy * o[1]) / on : on;
+            if (on > 200.0f && along < 0.85f * on) fixing = 1;
+        }
+        if (fixing > 0) {
+            fixed = true;
+            if (++fixing > 25 || (!air && ++after >= 3)) { fixing = 0; after = 0; }
+        }
+        if (air) after = 0;
+        if (air && !was_air) {   /* take-off speed: the best of the last 8 frames, kept for the whole jump */
+            v0 = 0;
+            for (int i = 0; i < 8; i++) { const float v = sqrtf(vh[i][0] * vh[i][0] + vh[i][1] * vh[i][1]); if (v > v0) v0 = v; }
+        }
+        was_air = air;
+        const double tn = now_s(); const float fdt = (float)(tn - tprev); tprev = tn;
+        const float d2 = dx * dx + dy * dy;
+        if (ed_log()) fprintf(stderr, "[ed] %.3f step %.1f dz %.1f%s\n", tn, sqrtf(d2), dz, fixed ? " (landing)" : "");
+        if (d2 > 0.0001f && d2 < 100.0f * 100.0f && !fixed && !air) {
+            float m = S.speed - 1.0f;
+            if (air && v0 > 0.0f && fdt > 0.0f && fdt < 0.1f) {
+                const float want = v0 * fdt, sg = sqrtf(d2);
+                if (sg > 0.3f * want && sg < want) m = S.speed * want / sg - 1.0f;   /* not after a wall stop */
+            }
+            const float t[3] = { p[0] + m * dx, p[1] + m * dy, p[2] };
+            const uint32_t frame = ((uint32_t)ctx->gpr[1] & ~0xFu) - 0x100u;
+            if (fabsf(m) >= 0.001f) call_game(ctx, func_004ABDFC, [&](struct ppu_context* x) {
+                x->gpr[1] = frame; x->gpr[2] = kToc; x->gpr[3] = c; put_vr(&x->vr[2], t[0], t[1], t[2], 1.0f); });
+            float q[3];
+            if (cole_world(c, q, &yaw)) { p[0] = q[0]; p[1] = q[1]; p[2] = q[2]; }
+        }
+    }
+    prev[0] = p[0]; prev[1] = p[1]; prev[2] = p[2]; have = true;
+}
 } // namespace
