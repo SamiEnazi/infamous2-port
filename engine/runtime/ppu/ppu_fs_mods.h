@@ -818,8 +818,6 @@ struct Mod {
     int dark = 0;                        /* a live mod's "dark_bolts": bit r = karma level r, 0x80 = always */
     std::vector<std::string> patch_for;  /* "patch_for": a patch that makes these mods (folder or name) work together */
     std::vector<int> discover;           /* "discover_powers": powers (0-95) this mod adds, shown as discovered in any save */
-    std::vector<std::pair<std::string, std::string>> alias;   /* "file_alias": lower USRDIR path the game lacks -> the
-                                                                 game file read in its place (alias_redirect) */
     std::map<std::string, bool> res;     /* conflicts the player resolved: "<other folder>|<file>|<part>" (lower) -> this mod's
                                             version is used (mods.ini win / lose, res_winner) */
     bool ed = false;                     /* "electric_dash": the Electric Dash power's engine side (cheats.cpp ed_*) */
@@ -1336,17 +1334,6 @@ static std::vector<Mod> scan()
                 }
             }
         }
-        if (const J* aj = j.get("file_alias"))     /* {"movies/ui/powerk_bolt9.bik": "movies/ui/powerk_fatbolt.bik"}: a file
-                                                      * the game asks for and does not have, read from another of its files */
-            if (aj->t == 5)
-                for (size_t i = 0; i < aj->ok.size(); i++) {
-                    std::string from, to;
-                    if (aj->ov[i].t != 3 || !safe_rel(norm_rel(aj->ok[i]), from, nullptr) || !safe_rel(norm_rel(aj->ov[i].s), to, nullptr)) {
-                        fprintf(stderr, "[mods] %s: file_alias \"%s\" not used (not a path inside the game folder)\n", m.name.c_str(), aj->ok[i].c_str());
-                        continue;
-                    }
-                    m.alias.push_back({ lower(from), to });
-                }
         if (const J* pj = j.get("patch_for"))      /* the mods this patch merges: used only while all of them are */
             if (pj->t == 4)
                 for (const J& a : pj->a)
@@ -3359,47 +3346,15 @@ static std::string serve_key(const std::string& k)
     return lower(std::string("lang_") + g_lang.text + ".xpps");
 }
 
-/* mod.json "file_alias": a loose USRDIR file the game asks for and does not
- * have (out names no file) is read from the game file a mod in use names
- * instead. A power a mod adds has no preview movie (movies/ui/powerk_<its
- * name in the game's power table>.bik), and one failed open leaves the Powers
- * menu's movie player showing nothing for every power until a restart. */
-static void alias_redirect(const char* u, char* out, size_t cap)
-{
-    const std::string rel = lower(u + 8);   /* past "/USRDIR/" */
-    std::string to, by;
-    {
-        std::lock_guard<std::mutex> lk(g.mx);
-        if (!g.use) return;
-        for (const Mod& m : g.list) {
-            if (!m.on || !m.for_game || !m.err.empty()) continue;
-            for (const auto& a : m.alias) if (a.first == rel) { to = a.second; by = m.name; break; }
-            if (!to.empty()) break;
-        }
-    }
-    if (to.empty() || finfo(out).ok) return;   /* the game has the file: it is used */
-    const std::string o = out;
-    if (o.size() < rel.size() || lower(o.substr(o.size() - rel.size())) != rel) return;
-    const std::string host = o.substr(0, o.size() - rel.size()) + to;
-    const FInfo f = finfo(host);
-    if (!f.ok || f.dir || host.size() >= cap) {
-        log_once("alias-miss:" + rel, "file_alias of %s: %s -> %s, which the game does not have either; not used", by.c_str(), rel.c_str(), to.c_str());
-        return;
-    }
-    snprintf(out, cap, "%s", host.c_str());
-    log_once("alias:" + rel, "%s -> %s (file_alias of %s)", rel.c_str(), to.c_str(), by.c_str());
-}
-
 /* A guest open (read-only) or stat of a loose file under USRDIR whose name a
  * mod changes: the mod's file (or the build) instead. */
 static void redirect(const char* guest, char* out, size_t cap)
 {
     init();
+    if (!g.nserve.load(std::memory_order_acquire)) return;
     const char* u = nullptr;
     for (const char* p = guest; *p; p++) if (lang_ieq_n(p, "/USRDIR/", 8)) { u = p; break; }
     if (!u) return;
-    alias_redirect(u, out, cap);
-    if (!g.nserve.load(std::memory_order_acquire)) return;
     const char* b = strrchr(guest, '/');
     const std::string key = serve_key(lower(b + 1));
     std::string host, by;

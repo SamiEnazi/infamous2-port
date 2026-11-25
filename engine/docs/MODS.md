@@ -213,8 +213,8 @@ applied), and the new one waits for the old one to end.
 ```
 <mod>/mod.json        {"game": "inf2", "name": ..., "author": ..., "version": ...}
                       port only: "patch_for": [mods] (a merge patch, see Merging),
-                      "discover_powers": [power numbers], "file_alias": {missing: stand-in}
-                      (see New powers), "electric_dash" (see Electric Dash)
+                      "discover_powers": [power numbers] (see New powers)
+                      "electric_dash" (see Electric Dash)
 <mod>/files/          .xpps files that replace the game's (by file name, any subfolder;
                       a mod with no files/ folder keeps them in the mod folder itself)
 <files>/texture_patches/<target>.xpps/[data]<OFFSET>_..._<W>x<H>_<DXTn>_m<mips>.dds
@@ -337,21 +337,6 @@ Cole has energy and is not climbing:
 The power is marked discovered in any save while the mod is used. The setting
 is read once at start, so turning the mod on or off needs a restart. Nothing
 is hooked unless a used mod asks for it. `PS3_ED_LOG=1` logs the steps.
-
-The Powers menu plays `movies/ui/powerk_<name>.bik` for the power under the
-cursor, where `<name>` is the power's entry in the game's power-name table
-(lower case), e.g. `powerk_bolt9.bik` for power 9 and `powerk_r2_8.bik` for
-power 0x30. A new power has no such movie, and one failed open leaves the
-menu's movie player blank for every power until the game restarts. List a
-stand-in in `file_alias` (paths under `USRDIR`; any game file can stand in):
-
-```json
-"file_alias": { "movies/ui/powerk_bolt9.bik": "movies/ui/powerk_fatbolt.bik" }
-```
-
-While the mod is on, a read of the first path that the game does not have
-reads the second instead (a file the game has is never replaced this way).
-The first read logs `[mods] movies/ui/powerk_bolt9.bik -> ... (file_alias of <mod>)`.
 
 ## How it works
 
