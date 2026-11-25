@@ -1802,6 +1802,60 @@ static void restart_confirm(void)
     ImGui::EndPopup();
 }
 
+/* ---- [modsui] "Allow its code": a mod's plugin runs only after the player sees what it is ---- */
+static volatile int s_code_ask;      /* 1 open the question, 2 showing */
+static volatile bool s_code_cancel;  /* Esc / Circle on it */
+static int s_code_mod = -1;          /* the mod's index */
+static char s_code_name[96];
+static ps3_game_mod_code s_code_info;
+
+static void code_ask_open(int i, const char* name)
+{
+    memset(&s_code_info, 0, sizeof s_code_info);
+    if (!ps3_game_mods_code_info(i, &s_code_info)) return;
+    s_code_mod = i;
+    snprintf(s_code_name, sizeof s_code_name, "%s", name ? name : "");
+    s_code_cancel = false;
+    s_code_ask = 1;
+}
+
+static void code_confirm(void)
+{
+    if (s_code_ask == 1) { ImGui::OpenPopup("###codeask"); s_code_ask = 2; }
+    if (s_code_ask != 2) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("Let this mod run its own code?###codeask", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                                                                         ImGuiWindowFlags_NoSavedSettings)) {
+        s_code_ask = 0; s_code_cancel = false; return;
+    }
+    ImGui::Text("\"%s\" carries a program (a plugin) that runs inside the game, with the same access as the game.", s_code_name);
+    ImGui::TextUnformatted("Allow it only if you trust whoever made this mod.");
+    ImGui::Spacing();
+    ImGui::Text("File:    %s", s_code_info.file);
+    const unsigned long long sz = s_code_info.size;
+    if (sz >= 1024ull * 1024ull) ImGui::Text("Size:    %.1f MB (%llu bytes)", (double)sz / (1024.0 * 1024.0), sz);
+    else ImGui::Text("Size:    %.1f KB (%llu bytes)", (double)sz / 1024.0, sz);
+    ImGui::Text("SHA-256: %.32s", s_code_info.sha256);
+    ImGui::Text("         %s", s_code_info.sha256 + (strlen(s_code_info.sha256) > 32 ? 32 : strlen(s_code_info.sha256)));
+    if (s_code_info.signer[0]) ImGui::Text("Signed by: %s", s_code_info.signer);
+    else ImGui::TextUnformatted("Not signed: nothing says who made this file.");
+    ImGui::TextUnformatted("If the file changes later, the game asks again.");
+    ImGui::Spacing();
+    const bool go = ImGui::Button("Allow");
+    ImGui::SameLine();
+    const bool cancel = ImGui::Button("Not now");
+    ImGui::SetItemDefaultFocus();   /* Not now: a stray Cross does not allow it */
+    if (cancel || s_code_cancel) { s_code_ask = 0; s_code_cancel = false; ImGui::CloseCurrentPopup(); }
+    else if (go) {
+        s_code_ask = 0;
+        ImGui::CloseCurrentPopup();
+        if (!ps3_game_mods_allow_code(s_code_mod, 1, s_code_info.sha256))
+            notice_for("Its plugin file changed while you looked: not allowed. Try again.", 6.0);
+    }
+    ImGui::EndPopup();
+}
+
 /* ---- [modsui] conflicts: a mod turned on changes what another one that is on does ----
  * The question lists every part of a game file both change (ps3_game_mods_conflicts):
  * the ones they change in different bytes are merged on their own; for each other

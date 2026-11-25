@@ -97,11 +97,16 @@
 #include <vector>
 #include <ctype.h>
 #include "ps3emu/ps3_game_mods.h"
+#include "ps3emu/ps3_mod_plugin.h"   /* ps3_mod_row: a plugin's rows under its mod */
 #include "ppu_fs_xcombine.h"   /* format-aware combine of two mods' whole copies of one PACK file */
+#include "ppu_sha256.h"        /* a plugin file's hash: the player allows exactly that file */
 #ifdef _WIN32
 #include <direct.h>
 #include <shellapi.h>
 #include <commdlg.h>    /* OPENFILENAMEW: "Choose another file..." (comdlg32 is loaded when used) */
+#include <wincrypt.h>
+#include <wintrust.h>   /* the "Allow its code" dialog's signer (wintrust / crypt32 are loaded when used) */
+#include <softpub.h>
 #endif
 
 /* libs/system/cellSysutil.c: the test hook's "restart" step ends the session
@@ -824,6 +829,11 @@ struct Mod {
                                                                  game file read in its place (alias_redirect) */
     std::map<std::string, bool> res;     /* conflicts the player resolved: "<other folder>|<file>|<part>" (lower) -> this mod's
                                             version is used (mods.ini win / lose, res_winner) */
+    std::string plugin;                  /* "plugin": the mod's own code, a DLL in its folder (ps3_mod_plugin.h); host path */
+    std::string plugin_hash;             /* its file's SHA-256 (hex): the player allows exactly this file */
+    uint64_t plugin_size = 0;            /* its file's size in bytes (the consent dialog shows it) */
+    std::string plugin_err;              /* "plugin" names no usable file */
+    std::string code_ok;                 /* mods.ini "code": the plugin hash the player allowed ("" = not allowed) */
     std::vector<Module> modules;
     bool on = true;                      /* the saved choice */
     bool have_pick = false;
@@ -871,7 +881,13 @@ static struct {
     uint64_t gen = 0;                                /* bumped by every change of list (the plan is redone) */
     Plan plan;
     std::set<std::string> start_sig;                 /* mod_key of every mod this session uses */
+    std::map<std::string, std::string> code_loaded;  /* lower folder -> the hash of its plugin loaded in this session */
+    std::map<std::string, std::string> code_path;    /* lower folder -> the mod's folder the plugin was loaded for */
+    std::map<std::string, std::string> code_failed;  /* lower folder -> the hash of a plugin that did not load (not tried again) */
+    std::map<std::string, std::string> code_fail_msg; /* lower folder -> why that plugin did not load */
+    std::map<std::string, std::string> code_state;   /* lower folder -> why its plugin is not running ("" = it is, or off) */
     std::vector<std::string> zip_dirs;               /* folders "Choose another file" took a zip from (mods.ini [.zips]) */
+    bool code_on = false;                            /* "Mods may run code" (mods.ini [.code] allow = 1): off by default */
     std::map<std::string, StartInfo> start;          /* by lower(folder): what this session uses */
     std::map<std::string, std::string> serve;        /* lower file name -> host file the game gets */
     std::map<std::string, std::string> serve_mod;    /* lower file name -> the mod's name, for the log */
@@ -1162,7 +1178,8 @@ static void read_parts(Mod& m)
     for (const Part& p : m.files) m.targets.insert(p.target);
     for (const Tex& p : m.tex) m.targets.insert(p.target);
     for (const Xp& p : m.xp) m.targets.insert(p.target);
-    if (m.targets.empty()) m.err = "it has no .xpps files, texture patches or xpps patches (with these options)";
+    if (m.targets.empty() && m.plugin.empty() && m.plugin_err.empty())   /* a code-only mod (just "plugin") is fine */
+        m.err = "it has no .xpps files, texture patches or xpps patches (with these options)";
     if (m.live && m.err.empty()) {   /* live: bytes written over what the game loaded, so nothing may move */
         if (!m.files.empty()) m.err = "a live mod can only patch bytes (texture patches, xpps _offset_ patches), not replace whole files";
         for (const Xp& x : m.xp) if (m.err.empty() && !x.chunk) m.err = "a live mod cannot replace a packed file whole (" + x.name + "): only _offset_ patches";
@@ -1202,13 +1219,15 @@ static void read_parts(Mod& m)
  * ([.zips] can be no mod's folder: the scan skips dot folders.) Older builds
  * read the file as before: they skip the keys and the section they do not know. */
 struct Saved { bool have_on = false, on = true, have_pick = false, have_prio = false; int prio = 0; std::vector<std::string> pick;
-               std::map<std::string, bool> res; };
+               std::map<std::string, bool> res; std::string code; };
 
 static const char* const kZipSection = ".zips";
+static const char* const kCodeSection = ".code";   /* [.code] allow = 1: "Mods may run code" (no mod's folder: dot) */
 
-static std::map<std::string, Saved> state_read(std::vector<std::string>* zip_dirs = nullptr)
+static std::map<std::string, Saved> state_read(std::vector<std::string>* zip_dirs = nullptr, bool* code_on = nullptr)
 {
     std::map<std::string, Saved> st;
+    if (code_on) *code_on = false;   /* no [.code] allow = 1: mods may not run code */
     FILE* f = g.state_path.empty() ? nullptr : fopen(g.state_path.c_str(), "r");
     if (!f) return st;
     char line[2048];
@@ -1230,12 +1249,17 @@ static std::map<std::string, Saved> state_read(std::vector<std::string>* zip_dir
             if (k == "folder" && !v.empty() && zip_dirs && zip_dirs->size() < 8) zip_dirs->push_back(v);
             continue;
         }
+        if (cur == kCodeSection) {
+            if (k == "allow" && code_on) *code_on = v == "1";
+            continue;
+        }
         Saved& sv = st[cur];
         if (k == "priority") {
             const long p = strtol(v.c_str(), nullptr, 10);
             if (p >= 1) { sv.have_prio = true; sv.prio = p > 1000000 ? 1000000 : (int)p; }
         }
         else if (k == "on") { sv.have_on = true; sv.on = v != "0"; }
+        else if (k == "code") sv.code = lower(v);   /* the plugin file the player allowed (its hash) */
         else if (k == "win" || k == "lose") {   /* <other folder>|<file>|<part>: the file and part hold no '|' */
             const size_t b2 = v.rfind('|'), b1 = b2 == std::string::npos || b2 == 0 ? std::string::npos : v.rfind('|', b2 - 1);
             if (b1 != std::string::npos && b1 > 0 && b2 + 1 < v.size()) sv.res[lower(v)] = k == "win";
@@ -1259,7 +1283,7 @@ static void state_write_locked()
                       "# put first (F2 > Mods). A mod not listed here is on, with its default options, in\n"
                       "# folder order.\n";
     for (const Mod& m : g.list) {
-        if (m.on && !m.have_pick && !m.have_prio && m.res.empty()) continue;
+        if (m.on && !m.have_pick && !m.have_prio && m.res.empty() && m.code_ok.empty()) continue;
         out += "[" + m.folder + "]\n";
         if (!m.on) out += "on = 0\n";
         if (m.have_pick) {
@@ -1268,12 +1292,14 @@ static void state_write_locked()
             out += "\n";
         }
         if (m.have_prio) out += "priority = " + std::to_string(m.prio) + "\n";
+        if (!m.code_ok.empty()) out += "code = " + m.code_ok + "\n";
         for (const auto& r : m.res) out += (r.second ? "win = " : "lose = ") + r.first + "\n";
     }
     if (!g.zip_dirs.empty()) {
         out += std::string("[") + kZipSection + "]\n";
         for (const std::string& d : g.zip_dirs) out += "folder = " + d + "\n";
     }
+    if (g.code_on) out += std::string("[") + kCodeSection + "]\nallow = 1\n";
     Bytes b(out.begin(), out.end());
     if (!write_all(g.state_path, b)) fprintf(stderr, "[mods] could not save %s\n", g.state_path.c_str());
 }
@@ -1371,6 +1397,17 @@ static std::vector<Mod> scan()
                     }
                     m.alias.push_back({ lower(from), to });
                 }
+        if (const J* qj = j.get("plugin")) {       /* its own code: a DLL in the mod folder (ps3_mod_plugin.h) */
+            const std::string rel = qj->t == 3 ? slashes(qj->s) : std::string();
+            Bytes b;
+            if (rel.empty() || rel[0] == '/' || rel.find("..") != std::string::npos || rel.find(':') != std::string::npos)
+                m.plugin_err = "\"plugin\" must name a file in the mod's folder";
+            else if (!read_all(join(path, rel), b) || b.empty())
+                m.plugin_err = "its plugin (" + rel + ") could not be read";
+            else {
+                m.plugin = join(path, rel); m.plugin_hash = sha256::hex(b.data(), b.size()); m.plugin_size = b.size();
+            }
+        }
         if (const J* pj = j.get("patch_for"))      /* the mods this patch merges: used only while all of them are */
             if (pj->t == 4)
                 for (const J& a : pj->a)
@@ -1388,6 +1425,7 @@ static std::vector<Mod> scan()
             m.have_pick = it->second.have_pick; m.pick = it->second.pick;
             m.have_prio = it->second.have_prio; m.prio = it->second.prio;
             m.res = it->second.res;
+            m.code_ok = it->second.code;
         }
         if (!jerr.empty()) m.err = jerr;
         else if (m.for_game) { read_modules(m); read_parts(m); }
@@ -3391,11 +3429,23 @@ static void live_kick()
     lv.cv.notify_one();
 }
 
+static bool code_wanted(const Mod& m);
+/* a mod that carries only code (mod.json "plugin", no game files): on and off at once, like a live mod */
+static bool code_only(const Mod& m) { return (!m.plugin.empty() || !m.plugin_err.empty()) && m.files.empty() && m.tex.empty() && m.xp.empty(); }
+static std::string code_status_locked(const Mod& m)
+{
+    if (!m.on) return "Off";
+    const std::string f = lower(m.folder);
+    auto it = g.code_state.find(f);
+    if (it != g.code_state.end() && !it->second.empty()) return it->second;
+    return code_wanted(m) && g.code_loaded.count(f) ? "On: its code is running" : "On";
+}
 /* With g.mx held: the menu's line for a live mod. */
 static std::string live_status_locked(const Mod& m)
 {
     if (!m.err.empty()) return "Not used: " + m.err;
     if (!m.for_game) return "Made for " + std::string(game_label(m.game)) + ", not inFAMOUS 2";
+    if (code_only(m)) return code_status_locked(m);
     if (!use_next()) return "Not used: mods are off";
     std::lock_guard<std::mutex> lk(lv.mx);
     auto it = lv.mods.find(lower(m.folder));
@@ -3408,6 +3458,76 @@ static std::string live_status_locked(const Mod& m)
     if (!L->in_place) return "On" + lvl + ": waiting for the game to load what it changes";
     return "On now" + lvl + ": " + std::to_string(L->in_place) + " place(s) in memory changed" +
            (live_dark_for(*L, lv.rank) ? ", black bolts" : "");
+}
+
+/* ---- mods' own code: mod.json "plugin" (include/ps3emu/ps3_mod_plugin.h) ----------------------
+ * A mod can carry a native plugin (the host is ppu_mod_plugins.h, in the PPU loader: plugins chain
+ * onto the lift's hook slots). It runs only while "Mods may run code" is on (mods.ini [.code], off by
+ * default), the mod is on and the player allowed exactly that file after seeing its name, size, SHA-256
+ * and signer (mods.ini "code = <its SHA-256>", the Mods page's "Allow its code"). The host loads a
+ * verified copy (ps3_mod_plugin_load): loaded at start, or at once
+ * when that happens while the game runs; switched off, its hooks are taken out at once (and put back
+ * when it is on again). A loaded DLL stays loaded, so a new plugin file takes a restart. Code is live
+ * either way; the mod's files are used as its kind says (a live mod at once, others from a start). */
+extern "C" int ps3_mod_plugin_load(const char* dll_u8, const char* sha256_hex, const char* copy_dir_u8, const char* folder_u8,
+                                   const char* name_u8, const char* json_text, const char* data_dir_u8, char* err, size_t cap);
+extern "C" int ps3_mod_plugin_set_on(const char* folder_u8, int on);
+static bool code_wanted(const Mod& m)
+{
+    return !m.plugin.empty() && m.on && m.for_game && m.err.empty() && g.use && g.code_on && m.code_ok == m.plugin_hash;
+}
+/* With g.mx (or before the list is shared): every plugin as the choices say, now. */
+static void code_sync_locked(const std::vector<Mod>& mods)
+{
+    for (const auto& ld : g.code_loaded) {   /* a loaded plugin whose mod is gone from the folder: off */
+        bool seen = false;
+        for (const Mod& m : mods) if (lower(m.folder) == ld.first && !m.plugin.empty()) seen = true;
+        if (!seen) ps3_mod_plugin_set_on(g.code_path[ld.first].c_str(), 0);
+    }
+    for (const Mod& m : mods) {
+        if (m.plugin.empty() && m.plugin_err.empty()) continue;
+        const std::string f = lower(m.folder);
+        const bool want = code_wanted(m);
+        auto ld = g.code_loaded.find(f);
+        std::string st;
+        if (!m.plugin_err.empty()) st = m.plugin_err;
+        else if (ld != g.code_loaded.end()) {
+            ps3_mod_plugin_set_on(g.code_path[f].c_str(), want ? 1 : 0);
+            if (want && ld->second != m.plugin_hash) st = "its plugin file changed: the new one runs from the next start";
+        } else if (want && g.code_failed[f] == m.plugin_hash) {
+            st = g.code_fail_msg[f];
+        } else if (want) {
+            Bytes jb;
+            read_all(join(m.path, "mod.json"), jb);
+            const std::string jt(jb.begin(), jb.end());
+            char err[300] = { 0 };
+            const std::string dd = g.cache.empty() ? std::string() : join(g.cache, lower(m.folder));   /* its own files */
+            if (!dd.empty()) mkdirs(dd);
+            const std::string cd = g.cache.empty() ? std::string() : join(g.cache, "plugins");   /* verified copies */
+            if (!cd.empty()) mkdirs(cd);
+            if (ps3_mod_plugin_load(m.plugin.c_str(), m.plugin_hash.c_str(), cd.c_str(), m.path.c_str(), m.name.c_str(), jt.c_str(),
+                                    dd.c_str(), err, sizeof err)) {
+                g.code_loaded[f] = m.plugin_hash; g.code_path[f] = m.path;
+                fprintf(stderr, "[mods] plugin of \"%s\" loaded: %s\n", m.name.c_str(), m.plugin.c_str());
+            } else { st = std::string("its plugin was not loaded: ") + err; g.code_failed[f] = m.plugin_hash; g.code_fail_msg[f] = st; }
+        }
+        if (m.plugin_err.empty() && !want && m.on && !g.code_on && m.code_ok == m.plugin_hash)
+            st = "mods may not run code (F2 > Mods: Mods may run code)";
+        else if (m.plugin_err.empty() && !want && m.on && m.code_ok != m.plugin_hash)
+            st = m.code_ok.empty() ? "its code is not allowed yet (F2 > Mods: Allow its code)"
+                                   : "its plugin file changed since its code was allowed: allow it again";
+        if (!st.empty() && g.code_state[f] != st) fprintf(stderr, "[mods] plugin of \"%s\": %s\n", m.name.c_str(), st.c_str());
+        g.code_state[f] = st;
+    }
+}
+/* A plugin that would run differs from the one loaded: the next start uses the new file. */
+static bool code_restart_locked()
+{
+    for (const Mod& m : g.list) {
+        auto ld = g.code_loaded.find(lower(m.folder));
+        if (code_wanted(m) && ld != g.code_loaded.end() && ld->second != m.plugin_hash) return true;
+    }
+    return false;
 }
 
 static void init_body();
@@ -3441,9 +3561,11 @@ static void init_body()
         g.cache = c && *c ? slashes(c) : join(g.dir, ".port_cache");
         {
             std::vector<std::string> zd;
-            state_read(&zd);
+            bool con = false;
+            state_read(&zd, &con);
             std::lock_guard<std::mutex> lk(g.mx);
             g.zip_dirs = zd;
+            g.code_on = con;
         }
         std::vector<Mod> mods = scan();
         int n_for = 0;
@@ -3457,6 +3579,7 @@ static void init_body()
             if (!first.empty()) fprintf(stderr, "[mods] put first by the player: %s; then the rest by folder name\n", first.c_str());
         }
         if (g.use) resolve(mods);
+        code_sync_locked(mods);
         for (const Mod& m : mods) {
             const StartInfo si = g.start.count(lower(m.folder)) ? g.start[lower(m.folder)] : StartInfo();
             std::string t;
@@ -3699,6 +3822,7 @@ static std::string status_locked(size_t i, const std::string& changes)
 {
     const Mod& m = g.list[i];
     if (m.live) return live_status_locked(m);
+    if (code_only(m) && m.err.empty() && m.for_game) return code_status_locked(m);
     const Plan& P = g.plan;
     auto it = g.start.find(lower(m.folder));
     const bool active = it != g.start.end() && it->second.active;
@@ -4087,6 +4211,7 @@ static void rescan_now()
     g.list.swap(mods);
     g.gen++;
     if (live || lv.started) live_kick();
+    code_sync_locked(g.list);   /* a new mod's code (once allowed), a removed one's off */
 }
 
 /* ---- PS3_GAME_MODS_TEST: the menu's actions from a script (tests) ---------------- */
@@ -4262,6 +4387,138 @@ extern "C" int ps3_game_mods_get(int i, ps3_game_mod* o)
     o->conflicts = g.plan.unres[(size_t)i];
     snprintf(o->conflicts_with, sizeof o->conflicts_with, "%s", and_list(g.plan.unres_with[(size_t)i]).c_str());
     snprintf(o->merged_with, sizeof o->merged_with, "%s", and_list(g.plan.merged_with[(size_t)i]).c_str());
+    o->has_code = !m.plugin.empty() || !m.plugin_err.empty();
+    o->code_allowed = !m.plugin.empty() && m.code_ok == m.plugin_hash;
+    o->code_only = code_only(m) ? 1 : 0;
+    {
+        const std::string f = lower(m.folder);
+        auto cs = g.code_state.find(f);
+        const std::string why = cs != g.code_state.end() ? cs->second : std::string();
+        std::string t;
+        if (!m.plugin_err.empty()) t = "Its code can't be used: " + m.plugin_err;
+        else if (!g.code_on) t = "It carries its own code, which runs only once \"Mods may run code\" is on";
+        else if (!o->code_allowed) t = "It carries its own code: allow it to use the mod fully";
+        else if (!why.empty()) t = "Its code: " + why;
+        else if (code_wanted(m) && g.code_loaded.count(f)) t = "Its code is running";
+        else t = m.on ? "Its code is not running" : "Its code is off while the mod is off";
+        snprintf(o->code_msg, sizeof o->code_msg, "%s", t.c_str());
+    }
+    return 1;
+}
+
+/* "Allow its code": the mod's plugin file, exactly the one the player was shown (sha256_hex, from
+ * ps3_game_mods_code_info), may run. A file that changed since then is not allowed: 0. */
+extern "C" int ps3_game_mods_allow_code(int i, int allow, const char* sha256_hex)
+{
+    using namespace gmods;
+    init();
+    std::lock_guard<std::mutex> lk(g.mx);
+    if (i < 0 || i >= (int)g.list.size()) return 0;
+    Mod& m = g.list[(size_t)i];
+    if (m.plugin.empty()) return 0;
+    if (allow && (!sha256_hex || lower(sha256_hex) != m.plugin_hash)) {
+        fprintf(stderr, "[mods] \"%s\": its plugin file is not the one shown: not allowed\n", m.name.c_str());
+        return 0;
+    }
+    m.code_ok = allow ? m.plugin_hash : std::string();
+    fprintf(stderr, "[mods] \"%s\": its code %s\n", m.name.c_str(), allow ? "allowed" : "not allowed");
+    state_write_locked();
+    g.gen++;
+    code_sync_locked(g.list);   /* at once */
+    return 1;
+}
+
+/* "Mods may run code": the one switch over every mod's plugin (off by default). Off, no plugin is
+ * loaded and the loaded ones are switched off at once. */
+extern "C" int ps3_game_mods_code_enabled(void)
+{
+    using namespace gmods;
+    init();
+    std::lock_guard<std::mutex> lk(g.mx);
+    return g.code_on ? 1 : 0;
+}
+extern "C" void ps3_game_mods_set_code_enabled(int on)
+{
+    using namespace gmods;
+    init();
+    std::lock_guard<std::mutex> lk(g.mx);
+    if (g.code_on == (on != 0)) return;
+    g.code_on = on != 0;
+    fprintf(stderr, "[mods] mods may run code: %s\n", g.code_on ? "on" : "off");
+    state_write_locked();
+    g.gen++;
+    code_sync_locked(g.list);
+}
+
+#if defined(_WIN32)
+/* The name a valid Authenticode signature of the file is from ("" = not signed or not valid).
+ * wintrust and crypt32 are loaded from System32 when used, like comdlg32 below. */
+static std::string code_signer(const std::string& path_u8)
+{
+    typedef LONG (WINAPI *VerifyF)(HWND, GUID*, LPVOID);
+    typedef CRYPT_PROVIDER_DATA* (WINAPI *ProvF)(HANDLE);
+    typedef CRYPT_PROVIDER_SGNR* (WINAPI *SgnrF)(CRYPT_PROVIDER_DATA*, DWORD, BOOL, DWORD);
+    typedef CRYPT_PROVIDER_CERT* (WINAPI *CertF)(CRYPT_PROVIDER_SGNR*, DWORD);
+    typedef DWORD (WINAPI *NameF)(PCCERT_CONTEXT, DWORD, DWORD, void*, LPWSTR, DWORD);
+    HMODULE wt = LoadLibraryExW(L"wintrust.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    HMODULE cr = LoadLibraryExW(L"crypt32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    VerifyF verify = wt ? (VerifyF)(void*)GetProcAddress(wt, "WinVerifyTrust") : nullptr;
+    ProvF prov = wt ? (ProvF)(void*)GetProcAddress(wt, "WTHelperProvDataFromStateData") : nullptr;
+    SgnrF sgnr = wt ? (SgnrF)(void*)GetProcAddress(wt, "WTHelperGetProvSignerFromChain") : nullptr;
+    CertF certf = wt ? (CertF)(void*)GetProcAddress(wt, "WTHelperGetProvCertFromChain") : nullptr;
+    NameF name = cr ? (NameF)(void*)GetProcAddress(cr, "CertGetNameStringW") : nullptr;
+    std::string who;
+    const int n = MultiByteToWideChar(CP_UTF8, 0, path_u8.c_str(), -1, nullptr, 0);
+    if (verify && prov && sgnr && certf && name && n > 0) {
+        std::wstring w((size_t)n, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, path_u8.c_str(), -1, &w[0], n);
+        WINTRUST_FILE_INFO fi = {};
+        fi.cbStruct = sizeof fi; fi.pcwszFilePath = w.c_str();
+        GUID act = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        WINTRUST_DATA wd = {};
+        wd.cbStruct = sizeof wd; wd.dwUIChoice = WTD_UI_NONE; wd.fdwRevocationChecks = WTD_REVOKE_NONE;
+        wd.dwUnionChoice = WTD_CHOICE_FILE; wd.pFile = &fi; wd.dwStateAction = WTD_STATEACTION_VERIFY;
+        wd.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+        if (verify((HWND)INVALID_HANDLE_VALUE, &act, &wd) == ERROR_SUCCESS) {
+            CRYPT_PROVIDER_DATA* pd = prov(wd.hWVTStateData);
+            CRYPT_PROVIDER_SGNR* sg = pd ? sgnr(pd, 0, FALSE, 0) : nullptr;
+            CRYPT_PROVIDER_CERT* pc = sg ? certf(sg, 0) : nullptr;
+            wchar_t nm[256] = { 0 };
+            if (pc && pc->pCert && name(pc->pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, nm, 256) > 1) {
+                char u[512] = { 0 };
+                WideCharToMultiByte(CP_UTF8, 0, nm, -1, u, sizeof u, nullptr, nullptr);
+                who = u;
+            }
+        }
+        wd.dwStateAction = WTD_STATEACTION_CLOSE;
+        verify((HWND)INVALID_HANDLE_VALUE, &act, &wd);
+    }
+    return who;
+}
+#else
+static std::string code_signer(const std::string&) { return std::string(); }
+#endif
+
+/* What the "Allow its code" dialog shows: the plugin file's name, size, SHA-256 and signer. */
+extern "C" int ps3_game_mods_code_info(int i, ps3_game_mod_code* o)
+{
+    using namespace gmods;
+    init();
+    if (!o) return 0;
+    memset(o, 0, sizeof *o);
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        if (i < 0 || i >= (int)g.list.size()) return 0;
+        const Mod& m = g.list[(size_t)i];
+        if (m.plugin.empty()) return 0;
+        path = m.plugin;
+        const size_t sl = m.plugin.find_last_of('/');
+        snprintf(o->file, sizeof o->file, "%s", (sl == std::string::npos ? m.plugin : m.plugin.substr(sl + 1)).c_str());
+        snprintf(o->sha256, sizeof o->sha256, "%s", m.plugin_hash.c_str());
+        o->size = m.plugin_size;
+    }
+    snprintf(o->signer, sizeof o->signer, "%s", code_signer(path).c_str());   /* without the lock: it reads the file */
     return 1;
 }
 
@@ -4295,6 +4552,7 @@ extern "C" void ps3_game_mods_set_on(int i, int on)
     g.gen++;
     state_write_locked();
     if (g.list[(size_t)i].live) live_kick();   /* a live mod: on or off now */
+    code_sync_locked(g.list);                  /* its code: on or off now */
 }
 
 extern "C" void ps3_game_mods_pick(int i, int k, int on)
@@ -4434,7 +4692,7 @@ extern "C" int ps3_game_mods_restart_needed(void)
     if (g.dir.empty()) return 0;
     std::lock_guard<std::mutex> lk(g.mx);
     plan_locked();
-    return g.plan.sig != g.start_sig ? 1 : 0;
+    return g.plan.sig != g.start_sig || code_restart_locked() ? 1 : 0;
 }
 
 /* The mod's preview picture (image_path's rules), its host path. 1 = one to show. */
@@ -4560,6 +4818,36 @@ extern "C" unsigned ps3_game_mods_zip_seq(void)
 {
     std::lock_guard<std::mutex> lk(gmods::gz.mx);
     return (unsigned)gmods::gz.seq;
+}
+
+/* The rows a mod's plugin shows under it in the menu (ps3_mod_plugin.h "menu"), while it is on and runs */
+extern "C" int ps3_mod_plugin_rows(const char* folder_u8, ps3_mod_row* out, int cap);
+extern "C" void ps3_mod_plugin_press(const char* folder_u8, const char* id);
+extern "C" int ps3_game_mods_rows(int i, ps3_mod_row* out, int cap)
+{
+    using namespace gmods;
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        if (i < 0 || i >= (int)g.list.size()) return 0;
+        const Mod& m = g.list[(size_t)i];
+        if (!code_wanted(m) || !g.code_loaded.count(lower(m.folder))) return 0;
+        path = g.code_path[lower(m.folder)];
+    }
+    return ps3_mod_plugin_rows(path.c_str(), out, cap);   /* (not under g.mx: the plugin's own code) */
+}
+extern "C" void ps3_game_mods_row_press(int i, const char* id)
+{
+    using namespace gmods;
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        if (i < 0 || i >= (int)g.list.size()) return;
+        const Mod& m = g.list[(size_t)i];
+        if (!code_wanted(m) || !g.code_loaded.count(lower(m.folder))) return;
+        path = g.code_path[lower(m.folder)];
+    }
+    ps3_mod_plugin_press(path.c_str(), id);
 }
 
 #endif /* PPU_FS_MODS_H */

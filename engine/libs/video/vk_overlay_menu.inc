@@ -234,6 +234,7 @@ static void menu_escape(void)
 {
     if (s_quit_ask) { s_quit_cancel = true; return; }
     if (s_restart_ask) { s_restart_cancel = true; return; }
+    if (s_code_ask) { s_code_cancel = true; return; }
     if (s_cf_ask) { s_cf_cancel = true; return; }
     if (s_upd_ask) { s_upd_cancel = true; return; }
     if (remap_escape() || remap_capturing()) return;
@@ -708,6 +709,10 @@ static void page_mods(Rows& R)
       if (restart && ps3_host_can_restart())
           mrow_action(R, "restart", "Restart to apply", "Restart", [] { s_restart_ask = 1; })
               .d("Starts the game again with the mods as set (back at the title screen).").wh(WH_PENDING); }
+    { const bool code = have && !s_census && ps3_game_mods_code_enabled();
+      mrow_toggle(R, "modcode", "Mods may run code", code, [](bool on) { ps3_game_mods_set_code_enabled(on ? 1 : 0); })
+          .d("Some mods carry their own program code (a plugin). Off, no mod's code runs. On, each such mod still needs your OK first.")
+          .off(!have || s_census).wh(WH_INSTANT); }
     mrow_action(R, "folder", "Mods folder", "Open", [] {
 #ifdef _WIN32
                     ps3_game_mods_open_folder();
@@ -732,13 +737,22 @@ static void page_mods(Rows& R)
         const bool who = m.author[0] && strcmp(m.author, "unknown");
         std::string by = sfmt("%s%s%s%s", ver ? "v" : "", ver ? m.version : "", who ? (ver ? " by " : "By ") : "", who ? m.author : "");
         const bool good = m.active && m.on && m.next;
-        const bool bad = !m.for_game || !strncmp(m.status, "Not used", 8) || (m.on && !m.next && !m.live);
+        const bool bad = !m.for_game || !strncmp(m.status, "Not used", 8) || (m.on && !m.next && !m.live && !m.code_only);
         MRow& r = mrow_toggle(R, ("mod:" + std::string(m.folder)).c_str(), m.name, m.on != 0, [i](bool on) { ps3_game_mods_set_on(i, on ? 1 : 0); if (on) mods_conflict_open(i, true); });
         r.d(by.empty() ? sfmt("Folder: %s", m.folder) : by).st(m.status, bad).off(!m.for_game)
-         .wh(m.live ? WH_INSTANT : (m.on != 0) != (m.active != 0) ? WH_PENDING : WH_RESTART);
-        if (m.live) r.nt(sfmt("Live mod: %d texture patch(es), %d xpps patch(es), on and off at once", m.n_tex, m.n_xpps));
+         .wh(m.live || m.code_only ? WH_INSTANT : (m.on != 0) != (m.active != 0) ? WH_PENDING : WH_RESTART);
+        if (m.code_only) r.nt("Its own code only: on and off at once");
+        else if (m.live) r.nt(sfmt("Live mod: %d texture patch(es), %d xpps patch(es), on and off at once", m.n_tex, m.n_xpps));
         else r.nt(sfmt("%d file(s), %d texture patch(es), %d xpps patch(es)%s", m.n_files, m.n_tex, m.n_xpps, good ? ", in use now" : ""));
         r.pic = pic_for(i, m);
+        if (m.has_code && m.for_game) {   /* mod.json "plugin": its own code runs only once the player allows it */
+            const bool code_on = ps3_game_mods_code_enabled() != 0;
+            const std::string nm = m.name;
+            mrow_toggle(R, ("code:" + std::string(m.folder)).c_str(), "Allow its code", m.code_allowed != 0,
+                        [i, nm](bool on) { if (on) code_ask_open(i, nm.c_str()); else ps3_game_mods_allow_code(i, 0, nullptr); })
+                .d("This mod carries its own program code (a plugin) that runs inside the game. Allow it only for mods you trust.")
+                .st(m.code_msg, !m.code_allowed && m.on).ind().off(!code_on && !m.code_allowed).wh(WH_INSTANT);
+        }
         if (m.conflicts && m.on && m.for_game)
             mrow_action(R, ("conflict:" + std::string(m.folder)).c_str(), "Combine with the mods it conflicts with", "Combine",
                         [i] { mods_conflict_open(i, false); })
@@ -749,6 +763,25 @@ static void page_mods(Rows& R)
                         [i] { mods_conflict_open(i, false); })
                 .d(sfmt("Used together with %s. Change whose bytes are used where both change the same place.", m.merged_with)).ind()
                 .wh(m.live ? WH_INSTANT : WH_RESTART);
+        if (m.on && m.for_game && m.code_allowed) {   /* the rows its plugin shows (ps3_mod_plugin.h "menu") */
+            ps3_mod_row pr[24];
+            const int np = ps3_game_mods_rows(i, pr, 24);
+            for (int k = 0; k < np && k < 24; k++) {
+                const ps3_mod_row& q = pr[k];
+                const std::string rid = sfmt("plug:%s:%s", m.folder, q.id);
+                if (q.kind == 1) {   /* back to the title screen: the menu asks first */
+                    if (ps3_host_can_restart())
+                        mrow_action(R, rid.c_str(), q.label, q.button[0] ? q.button : "Restart", [] { s_restart_ask = 1; })
+                            .d(q.desc).ind().wh(WH_PENDING);
+                    continue;
+                }
+                if (q.kind == 2) { mrow_info(R, rid.c_str(), q.label, q.status).d(q.desc).ind(); continue; }
+                const std::string id = q.id;
+                MRow& pr_row = mrow_action(R, rid.c_str(), q.label, q.button, [i, id] { ps3_game_mods_row_press(i, id.c_str()); })
+                                   .d(q.desc).ind().off(q.disabled != 0);
+                if (q.status[0]) pr_row.st(q.status);
+            }
+        }
         if (m.clash && m.on)
             mrow_action(R, ("prefer:" + std::string(m.folder)).c_str(), "Use this one instead", "Use", [i] { ps3_game_mods_prefer(i); })
                 .d(m.prefer).ind().wh(WH_RESTART);
@@ -1058,7 +1091,7 @@ static void menu_census(void)
 /* ---- input ---------------------------------------------------------------------- */
 static bool menu_modal(void)
 {
-    return s_quit_ask || s_restart_ask || s_cf_ask || s_upd_ask || s_rm.state != RM_IDLE ||
+    return s_quit_ask || s_restart_ask || s_code_ask || s_cf_ask || s_upd_ask || s_rm.state != RM_IDLE ||
            ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
 }
 static bool kp(ImGuiKey k, bool rep = true) { return ImGui::IsKeyPressed(k, rep); }
@@ -1792,6 +1825,7 @@ static void draw_menu(double now)
 
     quit_confirm();
     restart_confirm();   /* [modsui] */
+    code_confirm();      /* [modsui] "Allow its code" */
     conflict_dialog();   /* [modsui] a mod turned on conflicts with another */
     update_confirm();    /* [update] */
     ImGui::End();

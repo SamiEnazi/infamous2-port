@@ -56,6 +56,10 @@ int  ppu_hook_set(uint32_t addr, ppu_hook_fn fn);                    /* 0: no su
 int  ppu_patch_lifted(int slot);
 void ppu_patch_set(int slot, int alternative);
 void ppu_hook_call(struct ppu_context* ctx, ppu_hook_body body);    /* the body and its trampoline drain */
+/* Chained hooks (mods' plugins, ps3_mod_plugin.h): any number per address, run before the one
+ * ppu_hook_set put there; each gets the rest of the chain as its body. */
+int  ppu_hook_add(uint32_t addr, ppu_hook_fn fn);
+int  ppu_hook_remove(uint32_t addr, ppu_hook_fn fn);
 
 #ifdef __cplusplus
 }

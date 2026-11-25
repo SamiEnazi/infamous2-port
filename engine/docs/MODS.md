@@ -214,8 +214,8 @@ applied), and the new one waits for the old one to end.
 <mod>/mod.json        {"game": "inf2", "name": ..., "author": ..., "version": ...}
                       port only: "patch_for": [mods] (a merge patch, see Merging),
                       "discover_powers": [power numbers], "file_alias": {missing: stand-in}
-                      (see New powers),
-                      "karma_patches" (see Karma patches)
+                      (see New powers), "karma_patches" (see Karma patches),
+                      "plugin": "plugin.dll" (the mod's own code, see Plugins)
 <mod>/files/          .xpps files that replace the game's (by file name, any subfolder;
                       a mod with no files/ folder keeps them in the mod folder itself)
 <files>/texture_patches/<target>.xpps/[data]<OFFSET>_..._<W>x<H>_<DXTn>_m<mips>.dds
@@ -354,6 +354,94 @@ stand-in in `file_alias` (paths under `USRDIR`; any game file can stand in):
 While the mod is on, a read of the first path that the game does not have
 reads the second instead (a file the game has is never replaced this way).
 The first read logs `[mods] movies/ui/powerk_bolt9.bik -> ... (file_alias of <mod>)`.
+
+## Plugins: a mod's own code (port only)
+
+A mod can carry code. `"plugin"` names a DLL in the mod's folder:
+
+```json
+{ "game": "inf2", "name": "Electric Dash", "plugin": "plugin.dll", "dash": { "speed": 2 } }
+```
+
+No mod's code runs until the player turns on **Mods may run code** on the Mods
+page (saved in `mods.ini` as `[.code]` `allow = 1`; off by default). Each such
+mod then shows an **Allow its code** switch under it. Turning that on opens a
+dialog that names the DLL and shows its size, its SHA-256 and who signed it
+(Authenticode), or that it is not signed; **Not now** is the default button.
+The plugin runs only after the player allows it there, and only that exact
+file: the SHA-256 the player saw is saved in `mods.ini` (`code = ...`), so a
+changed DLL is not loaded until it is allowed again.
+
+When it loads a plugin, the port:
+
+- reads the DLL through a handle that keeps it from being changed, checks its
+  SHA-256 against the allowed one, writes those bytes to
+  `.port_cache/plugins/<sha256>.dll`, and loads that copy while it holds it
+  locked and has checked it again, so the file that runs is the file that was
+  allowed;
+- refuses a DLL that imports (or delay-loads) any DLL other than a Windows
+  system DLL, so the consent covers all the code the plugin brings. A plugin
+  that needs more code links it in statically;
+- loads it with `LOAD_LIBRARY_SEARCH_SYSTEM32`, so its imports resolve only
+  from System32, never from the mod's or the game's folder.
+
+Turning on "Mods may run code", allowing a mod's code, and turning the mod on or
+off take effect at once: the plugin is loaded the first time it is wanted, its
+hooks come off when the mod is turned off and go back on when it is turned on.
+Only a new DLL file takes a restart (a loaded DLL is never unloaded). A mod may
+carry only a plugin, with no game files. The Manager ignores the key.
+
+A plugin is written against `engine/include/ps3emu/ps3_mod_plugin.h` and never
+links against the port. It exports `ps3_mod_plugin_init`, which gets a table
+of services, and may export `ps3_mod_plugin_enable(int on)`, called when its
+mod is turned off (0) or back on (1): undo there whatever the plugin wrote into
+the game's memory, since its hooks no longer run while it is off. The services: the log, the mod's own `mod.json` keys, guest memory,
+the registers of a hooked call, the game's own functions (`call_game`: a
+`setup` callback sets the arguments, a `result` callback reads `r3` / `f1`
+before the registers are put back), a check that a guest address range is
+mapped memory (`valid`), and hooks. A plugin can hook any game function that the port's lift gives a hook
+slot (`cheats/hooks.txt`). Hooks are chained, so any number of plugins (and
+the port's own cheats) can hook the same function:
+
+```cpp
+static const ps3_mod_host* H;
+static void on_cole_update(ps3_ctx* ctx, ps3_mod_next next)
+{
+    const uint32_t self = (uint32_t)H->gpr(ctx, 3);
+    next(ctx);                       // the rest of the chain, then the game's function
+    /* ... after Cole's update ... */
+}
+PS3_MOD_PLUGIN_EXPORT int ps3_mod_plugin_init(const ps3_mod_host* h)
+{
+    H = h;
+    return h->hook_add(h, 0x001578F8, on_cole_update);
+}
+PS3_MOD_PLUGIN_EXPORT void ps3_mod_plugin_enable(int on)
+{
+    if (!on) { /* put back what the plugin changed in guest memory */ }
+}
+```
+
+A plugin also gets:
+
+- `data_dir`: a folder of its own for files it keeps (the mods folder's
+  `.port_cache/<mod folder>`), kept across games and mod updates.
+- `on_save(h, read, write)`: called after each save file the game reads (with
+  its bytes, which the plugin may change before the game sees them) and after
+  each one it writes. A mod can change what a save loads with, without touching
+  the save on disk.
+- `menu(h, rows, press)`: rows of its own under the mod on the Mods page, shown
+  while the mod is on and its code runs. `rows` fills `ps3_mod_row`s (an id, a
+  label, a button, a description, a status line, disabled); `press(id)` is
+  called when the player presses one. A row of kind 1 is a "restart to the
+  title screen" row (the menu asks first), kind 2 is a line of text.
+
+The plugin's hooks, save callbacks and rows all stop while its mod is off.
+
+Build it as a 64-bit Windows DLL (for example
+`clang-cl /LD /O2 /std:c++17 plugin.cpp /Fe:plugin.dll`). The log shows
+`[mods] plugin of "<mod>" loaded`, and the plugin's own lines start with
+`[<mod name>]`.
 
 ## How it works
 

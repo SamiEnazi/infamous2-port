@@ -13,6 +13,7 @@
 #define PS3EMU_PS3_GAME_MODS_H
 
 #include <stddef.h>
+#include "ps3_mod_plugin.h"   /* ps3_mod_row */
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +41,10 @@ typedef struct {
     int  conflicts;       /* parts it and other mods that are on both change, not resolved (ps3_game_mods_conflicts) */
     char conflicts_with[200]; /* ... with whom ("Climbing Gloves and Karmic Logo Tshirt") */
     char merged_with[200];    /* the mods it is merged with: every part both change merges or was resolved */
+    int  has_code;        /* mod.json "plugin": it carries its own code (ps3_mod_plugin.h) */
+    int  code_allowed;    /* the player allowed this plugin file (mods.ini "code") */
+    char code_msg[200];   /* one line on its code: running, from the next start, not allowed, can't be used */
+    int  code_only;       /* it carries only code (no game files): on and off at once, like a live mod */
 } ps3_game_mod;
 
 /* A part of a game file that a mod and another mod that is on both change. */
@@ -93,6 +98,27 @@ int  ps3_game_mods_restart_needed(void);     /* the saved choices differ from wh
  * use now (live mods only), 2 saved: the game must restart to use it. */
 int  ps3_game_mods_conflicts(int i, ps3_game_mod_conflict* out, int cap);
 int  ps3_game_mods_resolve(int i, const int* winners, int n);
+/* A mod's plugin file, as the "Allow its code" dialog shows it. */
+typedef struct {
+    char file[160];       /* its file name (plugin.dll) */
+    unsigned long long size;
+    char sha256[65];      /* lower-case hex: what mods.ini "code" saves */
+    char signer[160];     /* who a valid Authenticode signature is from; "" = not signed */
+} ps3_game_mod_code;
+int  ps3_game_mods_code_info(int i, ps3_game_mod_code* out);
+/* A mod that carries code (has_code): allow its plugin file (1) or not (0), at once. Allowing needs the
+ * SHA-256 the player was shown (ps3_game_mods_code_info): a file that changed since is not allowed (0). */
+int  ps3_game_mods_allow_code(int i, int allow, const char* sha256_hex);
+/* "Mods may run code": one switch over every mod's plugin, saved in mods.ini, off by default. */
+int  ps3_game_mods_code_enabled(void);
+void ps3_game_mods_set_code_enabled(int on);
+/* cellSaveData (libs/system/cellSaveData.c) calls these when set: after each save file the game reads
+ * (its bytes, which may be changed), and after each one it writes (the plugin host sets them: ps3_mod_plugin.h) */
+extern void (*ps3_savedata_read_hook)(const char* file, unsigned char* buf, size_t got, unsigned long long off);
+extern void (*ps3_savedata_write_hook)(const char* file, const unsigned char* buf, size_t n, unsigned long long off);
+/* the rows a mod's plugin shows under it (ps3_mod_plugin.h "menu"), while it is on and its code runs: the count */
+int  ps3_game_mods_rows(int i, struct ps3_mod_row* out, int cap);
+void ps3_game_mods_row_press(int i, const char* id);
 int  ps3_game_mods_image(int i, char* out, size_t cap); /* the preview picture's path; 1 = one to show */
 unsigned ps3_game_mods_generation(void);     /* changes whenever the list or a choice changes */
 void ps3_game_mods_rescan(void);             /* re-read the folder for the menu */

@@ -22,6 +22,7 @@
  * have to be visible from here rather than 160 lines further down. */
 #include "../../include/ps3emu/log_first.h"   /* PS3_LOG_FIRST */
 #include <atomic>
+#include <mutex>
 #include "../memory/guest_mem_atomic.h"   /* gm_load8..64 and gm_store_bytes: plain __atomic
                                             * builtins, needed on Windows too (the LLE paths use them) */
 #ifndef _WIN32
@@ -2915,26 +2916,86 @@ extern "C" int ppu_native_memset(ppu_context* ctx)
  * uses (tools/ppu_fastpath.py). Neither file = nothing registers and these do nothing. */
 #include "../../include/ps3emu/ppu_hooks.h"
 extern "C" { PS3_MV_DEF(volatile uint8_t, g_ppu_patch, [256], ) }   /* (slim split) the game module's copy once bound: ps3_module_vars.h */
-enum { PPU_HOOK_MAX = 64 };
-static struct { uint32_t addr; ppu_hook_fn volatile* slot; } s_ppu_hooks[PPU_HOOK_MAX];
-static int s_ppu_hook_n;
+enum { PPU_HOOK_MAX = 128, PPU_CHAIN_MAX = 8 };
 static uint8_t s_ppu_patch_lifted[256];
-/* A hook set during static initialisation, before its chunk registered the slot
- * (the order of the TUs' initialisers is the linker's): kept until it does. Room for every
- * hook: with the game module (slim split) the lifted chunks register only when the engine binds
- * it, after ALL of the engine's initialisers, so every early set waits here (cheats.cpp sets
- * ~24; the old 16 dropped the [workers] hook, the sixth SPU job worker: city light views -8%). */
-static struct { uint32_t addr; ppu_hook_fn fn; } s_ppu_hook_pending[PPU_HOOK_MAX];
-static int s_ppu_hook_npend;
-/* Static initialisation of the lifted chunks (one thread): no lock. */
+/* One entry per hooked or hookable address: the lift's slot (registered before main, or -- slim
+ * split -- when the engine binds the game module, after every engine initialiser), the engine's
+ * own hook (ppu_hook_set: one per address, the cheats) and the chained hooks of mods' plugins
+ * (ppu_hook_add, ps3_mod_plugin.h). A hook set before its slot registered is kept here until it
+ * does. The slot holds the engine's hook alone, or a dispatcher (s_ppu_disp[i]) that runs the
+ * chain: plugin hooks in the order added, then the engine's hook, then the function. */
+struct PpuHookEntry {
+    uint32_t addr;
+    ppu_hook_fn volatile* slot;
+    ppu_hook_fn base;                    /* ppu_hook_set's */
+    ppu_hook_fn add[PPU_CHAIN_MAX];      /* ppu_hook_add's */
+    volatile int n;
+};
+static PpuHookEntry s_ppu_he[PPU_HOOK_MAX];
+static volatile int s_ppu_he_n;
+static int s_ppu_hook_nslot;
+static std::mutex& ppu_hook_mx() { static std::mutex m; return m; }
+
+static int ppu_hook_entry(uint32_t addr, bool make)
+{
+    for (int i = 0; i < s_ppu_he_n; i++) if (s_ppu_he[i].addr == addr) return i;
+    if (!make) return -1;
+    if (s_ppu_he_n >= PPU_HOOK_MAX) { fprintf(stderr, "[hook] more than %d hooked addresses: 0x%08X is lost\n", PPU_HOOK_MAX, addr); return -1; }
+    const int i = s_ppu_he_n;
+    s_ppu_he[i].addr = addr;
+    __atomic_store_n(&s_ppu_he_n, i + 1, __ATOMIC_RELEASE);
+    return i;
+}
+
+/* The chain, per guest thread: a frame per dispatched call (a hook may call game code that is hooked too). */
+struct PpuChainFrame { const PpuHookEntry* e; int pos; ppu_hook_body body; };
+static thread_local PpuChainFrame t_ppu_cf[32];
+static thread_local int t_ppu_cd;
+static void ppu_chain_next(ppu_context* ctx)
+{
+    PpuChainFrame& f = t_ppu_cf[t_ppu_cd - 1];
+    const int p = f.pos++;
+    const int n = __atomic_load_n(&f.e->n, __ATOMIC_ACQUIRE);
+    if (p < n) { const ppu_hook_fn h = f.e->add[p]; if (h) { h(ctx, ppu_chain_next); return; } ppu_chain_next(ctx); return; }
+    const ppu_hook_fn b = __atomic_load_n(&f.e->base, __ATOMIC_ACQUIRE);
+    if (b) b(ctx, f.body);
+    else ppu_hook_call(ctx, f.body);
+}
+template <int I>
+static void ppu_chain_disp(ppu_context* ctx, ppu_hook_body body)
+{
+    if (t_ppu_cd >= 32) {                /* far too deep: the engine's hook and the function only */
+        const ppu_hook_fn b = __atomic_load_n(&s_ppu_he[I].base, __ATOMIC_ACQUIRE);
+        if (b) b(ctx, body); else ppu_hook_call(ctx, body);
+        return;
+    }
+    t_ppu_cf[t_ppu_cd++] = PpuChainFrame{ &s_ppu_he[I], 0, body };
+    ppu_chain_next(ctx);
+    t_ppu_cd--;
+}
+template <int... I> struct PpuDispTab { static constexpr ppu_hook_fn fns[sizeof...(I)] = { &ppu_chain_disp<I>... }; };
+template <int N, int... I> struct PpuDispMake : PpuDispMake<N - 1, N - 1, I...> {};
+template <int... I> struct PpuDispMake<0, I...> { using T = PpuDispTab<I...>; };
+static const ppu_hook_fn* const s_ppu_disp = PpuDispMake<PPU_HOOK_MAX>::T::fns;
+
+/* What entry i's slot holds now. */
+static void ppu_hook_apply(int i)
+{
+    PpuHookEntry& e = s_ppu_he[i];
+    if (!e.slot) return;
+    const ppu_hook_fn fn = e.n > 0 ? s_ppu_disp[i] : e.base;
+    __atomic_store_n(e.slot, fn, __ATOMIC_RELEASE);
+}
+
+/* Static initialisation of the lifted chunks (one thread). */
 extern "C" int ppu_hook_register(uint32_t addr, ppu_hook_fn volatile* slot)
 {
-    if (s_ppu_hook_n >= PPU_HOOK_MAX) { fprintf(stderr, "[hook] more than %d hook slots: 0x%08X has none\n", PPU_HOOK_MAX, addr); return 0; }
-    s_ppu_hooks[s_ppu_hook_n].addr = addr;
-    s_ppu_hooks[s_ppu_hook_n].slot = slot;
-    for (int i = 0; i < s_ppu_hook_npend; i++)
-        if (s_ppu_hook_pending[i].addr == addr) *slot = s_ppu_hook_pending[i].fn;
-    return ++s_ppu_hook_n;
+    std::lock_guard<std::mutex> lk(ppu_hook_mx());
+    const int i = ppu_hook_entry(addr, true);
+    if (i < 0) { fprintf(stderr, "[hook] 0x%08X has no hook slot (table full)\n", addr); return 0; }
+    s_ppu_he[i].slot = slot;
+    ppu_hook_apply(i);
+    return ++s_ppu_hook_nslot;
 }
 extern "C" int ppu_patch_register(int slot)
 {
@@ -2943,22 +3004,46 @@ extern "C" int ppu_patch_register(int slot)
 }
 extern "C" int ppu_hook_exists(uint32_t addr)
 {
-    for (int i = 0; i < s_ppu_hook_n; i++) if (s_ppu_hooks[i].addr == addr) return 1;
-    return 0;
+    const int i = ppu_hook_entry(addr, false);
+    return i >= 0 && s_ppu_he[i].slot != nullptr;
 }
 extern "C" int ppu_hook_set(uint32_t addr, ppu_hook_fn fn)
 {
-    for (int i = 0; i < s_ppu_hook_n; i++)
-        if (s_ppu_hooks[i].addr == addr) { __atomic_store_n(s_ppu_hooks[i].slot, fn, __ATOMIC_RELEASE); return 1; }
-    int i = 0;                         /* not (yet) registered: remembered for ppu_hook_register */
-    while (i < s_ppu_hook_npend && s_ppu_hook_pending[i].addr != addr) i++;
-    if (i < PPU_HOOK_MAX) {
-        s_ppu_hook_pending[i].addr = addr;
-        s_ppu_hook_pending[i].fn = fn;
-        if (i == s_ppu_hook_npend) s_ppu_hook_npend++;
-    } else {
-        fprintf(stderr, "[hook] more than %d hooks set before their slots exist: 0x%08X is lost\n", PPU_HOOK_MAX, addr);
-    }
+    std::lock_guard<std::mutex> lk(ppu_hook_mx());
+    const int i = ppu_hook_entry(addr, fn != nullptr);
+    if (i < 0) return 0;
+    __atomic_store_n(&s_ppu_he[i].base, fn, __ATOMIC_RELEASE);
+    ppu_hook_apply(i);
+    return s_ppu_he[i].slot != nullptr;
+}
+extern "C" int ppu_hook_add(uint32_t addr, ppu_hook_fn fn)
+{
+    if (!fn) return 0;
+    std::lock_guard<std::mutex> lk(ppu_hook_mx());
+    const int i = ppu_hook_entry(addr, true);
+    if (i < 0) return 0;
+    PpuHookEntry& e = s_ppu_he[i];
+    for (int k = 0; k < e.n; k++) if (e.add[k] == fn) return 1;
+    if (e.n >= PPU_CHAIN_MAX) { fprintf(stderr, "[hook] 0x%08X: more than %d chained hooks\n", addr, PPU_CHAIN_MAX); return 0; }
+    e.add[e.n] = fn;
+    __atomic_store_n(&e.n, e.n + 1, __ATOMIC_RELEASE);
+    ppu_hook_apply(i);
+    return 1;
+}
+/* Takes a chained hook out (its slot keeps running the others). A guest thread inside it finishes. */
+extern "C" int ppu_hook_remove(uint32_t addr, ppu_hook_fn fn)
+{
+    std::lock_guard<std::mutex> lk(ppu_hook_mx());
+    const int i = ppu_hook_entry(addr, false);
+    if (i < 0) return 0;
+    PpuHookEntry& e = s_ppu_he[i];
+    for (int k = 0; k < e.n; k++)
+        if (e.add[k] == fn) {
+            for (int j = k; j + 1 < e.n; j++) __atomic_store_n(&e.add[j], e.add[j + 1], __ATOMIC_RELEASE);
+            __atomic_store_n(&e.n, e.n - 1, __ATOMIC_RELEASE);
+            ppu_hook_apply(i);
+            return 1;
+        }
     return 0;
 }
 extern "C" int ppu_patch_lifted(int slot)
@@ -2978,6 +3063,8 @@ extern "C" void ppu_hook_call(ppu_context* ctx, ppu_hook_body body)
         tf((void*)ctx);
     }
 }
+
+#include "ppu_mod_plugins.h"   /* mods' own code (mod.json "plugin"): chained onto the hooks above */
 
 /* Bridge the lifter-emitted function_table[] (declared in ppu_recomp.h) into the
  * address->function hash map. The host boot harness calls this once at startup. */

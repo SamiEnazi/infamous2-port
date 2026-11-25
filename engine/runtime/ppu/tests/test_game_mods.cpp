@@ -53,7 +53,34 @@ extern "C" void ps3_host_restart(const char*) { g_restarts++; }
 #include "../ppu_fs_mods.h"
 /* the live mods' guest-memory hooks, which the game provides (unused here) */
 extern "C" { uint8_t* vm_base = nullptr; void (*g_vm_host_io_hook)(uint32_t, uint32_t, int) = nullptr; }
+/* the plugin host (ppu_mod_plugins.h, in the PPU loader): here it records what it was asked to load */
+static std::vector<std::string> g_plug_loaded;
+static std::map<std::string, int> g_plug_on;   /* mod folder -> on */
+static std::string g_plug_json, g_plug_dir, g_plug_pressed, g_plug_sha, g_plug_copy;
+extern "C" int ps3_mod_plugin_load(const char* dll, const char* sha, const char* copy_dir, const char* folder, const char*,
+                                   const char* json_text, const char* data_dir, char* err, size_t cap)
+{
+    g_plug_loaded.push_back(dll); g_plug_json = json_text ? json_text : ""; g_plug_dir = data_dir ? data_dir : "";
+    g_plug_sha = sha ? sha : ""; g_plug_copy = copy_dir ? copy_dir : "";
+    if (strstr(dll, "bad")) { snprintf(err, cap, "it has no ps3_mod_plugin_init"); return 0; }
+    g_plug_on[folder] = 1;
+    return 1;
+}
+extern "C" int ps3_mod_plugin_set_on(const char* folder, int on)
+{
+    if (!g_plug_on.count(folder)) return 0;
+    g_plug_on[folder] = on;
+    return 1;
+}
+extern "C" int ps3_mod_plugin_rows(const char* folder, ps3_mod_row* out, int cap)   /* one row while it is on */
+{
+    if (!g_plug_on.count(folder) || !g_plug_on[folder] || cap < 1) return 0;
+    snprintf(out[0].id, sizeof out[0].id, "go"); snprintf(out[0].label, sizeof out[0].label, "Go");
+    return 1;
+}
+extern "C" void ps3_mod_plugin_press(const char* folder, const char* id) { g_plug_pressed = std::string(folder) + "|" + id; }
 #include "../../../libs/video/mod_preview.h"
+#include "../ppu_mod_pe.h"
 
 using namespace gmods;
 
@@ -86,6 +113,12 @@ static void wipe(const std::string& p)   /* the test's own folders only */
     if (!(a & FILE_ATTRIBUTE_DIRECTORY)) { DeleteFileA(p.c_str()); return; }
     for (const std::string& n : list_dir(p)) wipe(join(p, n));
     RemoveDirectoryA(p.c_str());
+#else
+    struct stat st;
+    if (lstat(p.c_str(), &st) != 0) return;
+    if (!S_ISDIR(st.st_mode)) { unlink(p.c_str()); return; }   /* a file or a link: never followed */
+    for (const std::string& n : list_dir(p)) wipe(join(p, n));
+    rmdir(p.c_str());
 #endif
 }
 
@@ -974,6 +1007,196 @@ static void test_conflicts()
     { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf_arcs = Arcs(); g_pf.clear(); g_bm.clear(); }
 }
 
+/* ---- mod.json "plugin": a mod's own code runs only once the player allowed that very file, and goes on
+ * and off with the mod at once ---------------------------------------------------------------------- */
+static void test_plugins()
+{
+    const std::string d = join(W, "plug");
+    wipe(d);
+    put_file(join(d, "Dash/mod.json"), "{\"game\": \"inf2\", \"name\": \"Dash\", \"plugin\": \"plugin.dll\", \"dash\": {\"speed\": 2}}");
+    put_file(join(d, "Dash/plugin.dll"), "MZ one");
+    put_file(join(d, "Dash/files/x.xpps"), "x");
+    put_file(join(d, "Out/mod.json"), "{\"game\": \"inf2\", \"name\": \"Out\", \"plugin\": \"../Dash/plugin.dll\"}");
+    put_file(join(d, "Gone/mod.json"), "{\"game\": \"inf2\", \"name\": \"Gone\", \"plugin\": \"none.dll\"}");
+    put_file(join(d, "Bad/mod.json"), "{\"game\": \"inf2\", \"name\": \"Bad\", \"plugin\": \"bad.dll\"}");
+    put_file(join(d, "Bad/bad.dll"), "MZ bad");
+    put_file(join(d, "Only/mod.json"), "{\"game\": \"inf2\", \"name\": \"Only\", \"plugin\": \"plugin.dll\"}");   /* code only */
+    put_file(join(d, "Only/plugin.dll"), "MZ only");
+    g.dir = d; g.state_path = join(W, "plug_state.ini"); g.use = true; g.cache = join(d, ".port_cache"); g.code_on = false;
+    remove(g.state_path.c_str());
+    g_plug_loaded.clear(); g_plug_on.clear();
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.code_loaded.clear(); g.code_path.clear(); g.code_state.clear(); g.code_failed.clear(); g.code_fail_msg.clear(); g.start.clear();
+        g.list = scan(); g.gen++;
+    }
+    auto idx = [](const char* f) { for (size_t i = 0; i < g.list.size(); i++) if (g.list[i].folder == f) return (int)i; return -1; };
+    const int ia = idx("Dash"), io = idx("Out"), ig = idx("Gone"), ib = idx("Bad");
+    CHECK(ia >= 0 && io >= 0 && ig >= 0 && ib >= 0);
+    if (ia < 0 || io < 0 || ig < 0 || ib < 0) return;
+    const std::string dash = g.list[(size_t)ia].path;
+    CHECK(!g.list[(size_t)ia].plugin.empty() && g.list[(size_t)ia].plugin_hash == sha256::hex("MZ one", 6));
+    auto allow = [](int i) {   /* as the dialog does: the hash it showed */
+        ps3_game_mod_code c;
+        return ps3_game_mods_code_info(i, &c) && ps3_game_mods_allow_code(i, 1, c.sha256);
+    };
+    {
+        ps3_game_mod_code c;
+        CHECK(ps3_game_mods_code_info(ia, &c) && !strcmp(c.file, "plugin.dll") && c.size == 6 && strlen(c.sha256) == 64 && !c.signer[0]);
+        CHECK(!ps3_game_mods_code_info(io, &c));
+    }
+    CHECK(g.list[(size_t)io].plugin.empty() && !g.list[(size_t)io].plugin_err.empty());   /* out of its folder: refused */
+    CHECK(g.list[(size_t)ig].plugin.empty() && !g.list[(size_t)ig].plugin_err.empty());   /* no such file */
+    { std::lock_guard<std::mutex> lk(g.mx); code_sync_locked(g.list); }
+    CHECK(g_plug_loaded.empty());                                               /* nothing allowed: nothing loaded */
+    CHECK(g.code_state["dash"].find("not allowed") != std::string::npos);
+    CHECK(!ps3_game_mods_code_enabled());                                       /* "Mods may run code": off by default */
+    CHECK(!ps3_game_mods_allow_code(ia, 1, nullptr));                           /* no hash shown: not allowed */
+    CHECK(!ps3_game_mods_allow_code(ia, 1, std::string(64, '0').c_str()));      /* another file's hash: not allowed */
+    CHECK(g.list[(size_t)ia].code_ok.empty());
+    CHECK(allow(ia));                                                           /* allowed, but code may not run yet */
+    CHECK(g_plug_loaded.empty() && g.code_state["dash"].find("may not run code") != std::string::npos);
+    {
+        ps3_game_mod m;
+        CHECK(ps3_game_mods_get(ia, &m) && m.code_allowed && strstr(m.code_msg, "Mods may run code"));
+    }
+    ps3_game_mods_set_code_enabled(1);                                          /* loaded at once */
+    CHECK(g_plug_loaded.size() == 1 && g_plug_on[dash] == 1 && g.code_loaded.count("dash"));
+    CHECK(g_plug_sha == g.list[(size_t)ia].plugin_hash && g_plug_copy == join(g.cache, "plugins") && is_dir(g_plug_copy));
+    {   /* saved in mods.ini, read back */
+        std::vector<std::string> zd;
+        bool con = false;
+        state_read(&zd, &con);
+        CHECK(con);
+    }
+    ps3_game_mods_set_code_enabled(0);                                          /* the switch off: every plugin off at once */
+    CHECK(g_plug_on[dash] == 0 && g_plug_loaded.size() == 1);
+    {
+        std::vector<std::string> zd;
+        bool con = true;
+        state_read(&zd, &con);
+        CHECK(!con);
+    }
+    ps3_game_mods_set_code_enabled(1);
+    CHECK(g_plug_on[dash] == 1 && g_plug_loaded.size() == 1);
+    CHECK(g_plug_json.find("\"dash\"") != std::string::npos);                 /* the plugin gets its mod.json */
+    {
+        ps3_game_mod m;
+        CHECK(ps3_game_mods_get(ia, &m) && m.has_code && m.code_allowed && strstr(m.code_msg, "running"));
+    }
+    ps3_game_mods_set_on(ia, 0);                                                /* off at once, not unloaded */
+    CHECK(g_plug_on[dash] == 0 && g_plug_loaded.size() == 1);
+    ps3_game_mods_set_on(ia, 1);                                                /* on again: not loaded twice */
+    CHECK(g_plug_on[dash] == 1 && g_plug_loaded.size() == 1);
+    {   /* saved: a new start reads the allowed hash */
+        std::vector<Mod> L = scan();
+        for (const Mod& m : L) if (m.folder == "Dash") CHECK(m.code_ok == m.plugin_hash);
+    }
+    ps3_game_mods_allow_code(ia, 0, nullptr);                                   /* not allowed: off at once */
+    CHECK(g_plug_on[dash] == 0);
+    CHECK(allow(ia));
+    CHECK(g_plug_on[dash] == 1);
+    {   /* a changed file: the loaded one keeps running until a restart; allowed again, the next start uses it */
+        put_file(join(d, "Dash/plugin.dll"), "MZ two");
+        ps3_game_mods_rescan();
+        CHECK(g.code_state["dash"].find("not allowed") != std::string::npos || g.code_state["dash"].find("allow it again") != std::string::npos);
+        CHECK(g_plug_on[dash] == 0);
+        CHECK(!ps3_game_mods_allow_code(idx("Dash"), 1, sha256::hex("MZ one", 6).c_str()));   /* the old file's hash */
+        CHECK(allow(idx("Dash")));
+        CHECK(g_plug_on[dash] == 1 && g.code_state["dash"].find("next start") != std::string::npos && g_plug_loaded.size() == 1);
+    }
+    {   /* a plugin that does not set up: logged */
+        CHECK(allow(idx("Bad")));
+        CHECK(g.code_state["bad"].find("no ps3_mod_plugin_init") != std::string::npos);
+        const size_t tries = g_plug_loaded.size();
+        ps3_game_mods_set_on(idx("Bad"), 0); ps3_game_mods_set_on(idx("Bad"), 1);   /* not tried again */
+        CHECK(g_plug_loaded.size() == tries && g.code_state["bad"].find("no ps3_mod_plugin_init") != std::string::npos);
+    }
+    {   /* code only: a mod of its own (no files needed), on and off at once; its own data folder; its menu rows */
+        const int iy = idx("Only");
+        CHECK(iy >= 0 && g.list[(size_t)iy].err.empty());
+        ps3_game_mod m;
+        CHECK(ps3_game_mods_get(iy, &m) && m.code_only && strstr(m.status, "not allowed"));
+        ps3_mod_row rows[4];
+        CHECK(ps3_game_mods_rows(iy, rows, 4) == 0);                            /* not allowed: no rows */
+        CHECK(allow(iy));
+        const std::string only = g.list[(size_t)iy].path;
+        CHECK(g_plug_on[only] == 1 && g_plug_dir == join(g.cache, "only") && is_dir(g_plug_dir));
+        CHECK(ps3_game_mods_get(iy, &m) && strstr(m.status, "running"));
+        CHECK(ps3_game_mods_rows(iy, rows, 4) == 1 && !strcmp(rows[0].id, "go"));
+        ps3_game_mods_row_press(iy, "go");
+        CHECK(g_plug_pressed == only + "|go");
+        ps3_game_mods_set_on(iy, 0);
+        CHECK(g_plug_on[only] == 0 && ps3_game_mods_rows(iy, rows, 4) == 0 && ps3_game_mods_get(iy, &m) && !strcmp(m.status, "Off"));
+        g_plug_pressed.clear();
+        ps3_game_mods_row_press(iy, "go");                                      /* off: not passed on */
+        CHECK(g_plug_pressed.empty());
+    }
+    {   /* its mod gone from the folder: off */
+        wipe(join(d, "Dash"));
+        ps3_game_mods_rescan();
+        CHECK(g_plug_on[dash] == 0);
+    }
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.list.clear(); g.start.clear(); g.code_loaded.clear(); g.code_path.clear(); g.code_state.clear(); g.code_failed.clear(); g.code_fail_msg.clear(); g.gen++;
+        g.code_on = false;
+    }
+}
+
+/* ---- the plugin host's own checks: SHA-256, and the DLLs a plugin imports (ppu_mod_pe.h) ---- */
+static Bytes tiny_pe(const char* imp, const char* delay, uint16_t machine = 0x8664)
+{
+    Bytes b(0x400, 0);
+    auto w16 = [&](size_t o, uint32_t v) { b[o] = (uint8_t)v; b[o + 1] = (uint8_t)(v >> 8); };
+    auto w32 = [&](size_t o, uint32_t v) { for (int k = 0; k < 4; k++) b[o + k] = (uint8_t)(v >> (8 * k)); };
+    b[0] = 'M'; b[1] = 'Z'; w32(0x3C, 0x40);
+    b[0x40] = 'P'; b[0x41] = 'E';
+    w16(0x44, machine); w16(0x46, 1); w16(0x54, 240);           /* x64, one section, PE32+ optional header */
+    const size_t opt = 0x58;
+    w16(opt, 0x20B); w32(opt + 108, 16);
+    if (imp) { w32(opt + 112 + 8, 0x1000); w32(opt + 112 + 12, 40); }
+    if (delay) { w32(opt + 112 + 8 * 13, 0x1040); w32(opt + 112 + 8 * 13 + 4, 64); }
+    const size_t sec = opt + 240;
+    w32(sec + 8, 0x200); w32(sec + 12, 0x1000); w32(sec + 16, 0x200); w32(sec + 20, 0x200);
+    if (imp) { w32(0x200 + 12, 0x1100); memcpy(&b[0x300], imp, strlen(imp)); }
+    if (delay) { w32(0x240 + 4, 0x1120); memcpy(&b[0x320], delay, strlen(delay)); }
+    return b;
+}
+static void test_plugin_checks()
+{
+    CHECK(sha256::hex("abc", 3) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    CHECK(sha256::hex("", 0) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    {
+        const char* m = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        CHECK(sha256::hex(m, strlen(m)) == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+        const std::string a(1000000, 'a');
+        CHECK(sha256::hex(a.data(), a.size()) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    }
+    std::vector<std::string> nm;
+    std::string err;
+    Bytes p = tiny_pe("KERNEL32.dll", "local.dll");
+    CHECK(modpe::imports(p.data(), p.size(), nm, err) && nm.size() == 2 && nm[0] == "KERNEL32.dll" && nm[1] == "local.dll");
+    p = tiny_pe(nullptr, nullptr);
+    CHECK(modpe::imports(p.data(), p.size(), nm, err) && nm.empty());
+    p = tiny_pe("KERNEL32.dll", nullptr, 0x14C);
+    CHECK(!modpe::imports(p.data(), p.size(), nm, err) && has(err, "64-bit"));
+    p = tiny_pe("KERNEL32.dll", nullptr);
+    CHECK(!modpe::imports(p.data(), 0x210, nm, err));                          /* cut short */
+    p[0x200 + 12] = 0xF0; p[0x200 + 13] = 0xFF;                                 /* a name outside the file */
+    CHECK(!modpe::imports(p.data(), p.size(), nm, err) && has(err, "import table"));
+    p = tiny_pe("KERNEL32.dll", nullptr);
+    for (size_t k = 0x300; k < 0x400; k++) p[k] = 'A';                          /* a name with no end */
+    CHECK(!modpe::imports(p.data(), p.size(), nm, err));
+    p = tiny_pe("KERNEL32.dll", nullptr);
+    p[0x46] = 200;                                                              /* 200 sections */
+    CHECK(!modpe::imports(p.data(), p.size(), nm, err));
+    const uint8_t junk[8] = { 'M', 'Z', 1, 2, 3 };
+    CHECK(!modpe::imports(junk, sizeof junk, nm, err));
+    CHECK(modpe::plain_name("user32.dll") && !modpe::plain_name("..\\x.dll") && !modpe::plain_name("C:/x.dll") && !modpe::plain_name(""));
+    CHECK(modpe::api_set("API-MS-Win-Core-Synch-L1-2-0.dll") && modpe::api_set("ext-ms-win-x.dll") && !modpe::api_set("apims.dll"));
+}
+
 /* mod.json "file_alias": a USRDIR file the game lacks is read from another of
  * its files while the mod is on; never when the game has the file, never a
  * path out of the game folder. */
@@ -1079,6 +1302,9 @@ int main(int argc, char** argv)
     fprintf(stderr, "+conflicts: %d ok, %d failed\n", g_pass, g_fail);
     test_hostile_pack();
     fprintf(stderr, "+hostile files: %d ok, %d failed\n", g_pass, g_fail);
+    test_plugins();
+    test_plugin_checks();
+    fprintf(stderr, "+plugins: %d ok, %d failed\n", g_pass, g_fail);
     test_alias();
     fprintf(stderr, "+file_alias: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 6) test_images(slashes(argv[4]), slashes(argv[5]));

@@ -9,6 +9,7 @@
 #include "ps3emu/guest_call.h"
 #include "ps3emu/ps3_savedlg.h"   /* the system's list dialog (vk_overlay_saves.cpp) */
 #include "ps3emu/ps3_achievements.h"   /* a save loaded: RecompLauncher's Ranked rules */
+#include "ps3emu/ps3_game_mods.h"   /* the save hooks mods' plugins use (ps3_mod_plugin.h "on_save") */
 #include "../../runtime/ppu/ppu_memory.h"
 #include "../../runtime/memory/vm.h"
 #include <stdio.h>
@@ -730,6 +731,11 @@ static int savedata_strict_buf(void)
     return v;
 }
 
+/* after each save file the game reads (its bytes, which a hook may change) and writes: the mods' plugins see the
+ * game's saves (set by the plugin host, runtime/ppu/ppu_mod_plugins.h; include/ps3emu/ps3_mod_plugin.h "on_save") */
+void (*ps3_savedata_read_hook)(const char* file, unsigned char* buf, size_t got, unsigned long long off) = 0;
+void (*ps3_savedata_write_hook)(const char* file, const unsigned char* buf, size_t n, unsigned long long off) = 0;
+
 /* Execute file callback: read/write/delete files in the save directory */
 static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
 {
@@ -798,6 +804,7 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
         size_t got = read_size ? fread(set->fileBuf, 1, read_size, fp) : 0;
         int failed = ferror(fp);
         if (fclose(fp) != 0) failed = 1;
+        if (!failed && got && ps3_savedata_read_hook) ps3_savedata_read_hook(name, set->fileBuf, got, (unsigned long long)set->fileOffset);
         return failed ? CELL_SAVEDATA_ERROR_ACCESS_ERROR : (s32)got;
     }
 
@@ -832,6 +839,8 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
         if (fclose(fp) != 0) failed = 1;
         if (!failed && set->fileType == CELL_SAVEDATA_FILETYPE_SECUREFILE)
             pfd_add(save_path, name);
+        if (!failed && ps3_savedata_write_hook)
+            ps3_savedata_write_hook(name, (const unsigned char*)set->fileBuf, write_size, (unsigned long long)set->fileOffset);
         return failed ? CELL_SAVEDATA_ERROR_ACCESS_ERROR : (s32)wrote;
     }
 
