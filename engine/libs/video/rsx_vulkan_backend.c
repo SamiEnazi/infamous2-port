@@ -1725,6 +1725,8 @@ static VkSamplerAddressMode vk_gcm_wrap(u32 w)
     case 1:  return VK_SAMPLER_ADDRESS_MODE_REPEAT;
     case 2:  return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
     case 4:  return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    case 9:  case 10:                       /* vk_eng_wrap_border's opaque black / white BORDER */
+             return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;      /* 3, 5..8, unset */
     }
 }
@@ -7553,11 +7555,38 @@ static int vk_eng_ensure_indices(VkDeviceSize bytes)
     return s_e2.indices.coherent ? 0 : -1;
 }
 
+/* A BORDER wrap (code 4) with the unit's SET_TEXTURE_BORDER_COLOR as
+ * rsx_be_sampler_desc.border says it (the Metal backend's rule): 0 keeps
+ * transparent black, 1 and 2 become the codes 9 and 10 (border opaque black,
+ * opaque white), 3 -- a colour no core Vulkan border can say -- clamps to the
+ * edge texel instead. The result is still one nibble, so it keys the sampler
+ * where the raw code did. Every other wrap passes through unchanged.
+ * (GitHub #134) inFAMOUS 2's Bink movies sample their U and V planes (B8,
+ * half size) with BORDER on S and T and a 0x80808080 border, neutral chroma.
+ * Read as transparent black, a filtered tap past the edge pulled U and V
+ * towards 0, which the YUV combine turns green: the green line along the
+ * top and the right of every FMV. */
+static u32 vk_eng_wrap_border(u32 w, u8 border)
+{
+    w &= 0xFu;
+    if (w != 4u) return w;
+    switch (border & 3u) {
+    case 1:  return 9u;
+    case 2:  return 10u;
+    case 3:  return 3u;
+    default: return 4u;
+    }
+}
+
 /* rsx_be_sampler_desc is the registers decoded the D3D12 way; the wrap codes
- * stay the guest's 1..8, which vk_gcm_wrap already translates. */
+ * stay the guest's 1..8, which vk_gcm_wrap already translates (after
+ * vk_eng_wrap_border has applied the border colour to code 4). */
 static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
 {
     u32 lo, hi;
+    const u32 ws = vk_eng_wrap_border(d->wrap_s, d->border);
+    const u32 wt = vk_eng_wrap_border(d->wrap_t, d->border);
+    const u32 wr = vk_eng_wrap_border(d->wrap_r, d->border);
     memcpy(&lo, &d->min_lod, 4); memcpy(&hi, &d->max_lod, 4);
     /* [postfx] PS3RECOMP_ANISO: only a linear minification through mipmaps */
     const u32 aniso = (u32)vk_postfx_sampler_aniso(d->min_linear, d->mip_present) & 0x1Fu;
@@ -7578,8 +7607,8 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
     if (bias < -lodb_max) bias = -lodb_max;
     const int bias32 = (int)(bias * 32.0f);
     const u64 key = (u64)d->min_linear | ((u64)d->mag_linear << 1) | ((u64)d->mip_linear << 2)
-                  | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
-                  | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
+                  | ((u64)d->mip_present << 3) | ((u64)ws << 4)
+                  | ((u64)wt << 8) | ((u64)wr << 12)
                   | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32)
                   | ((u64)aniso << 48)     /* [postfx] a new level keys new samplers */
                   | ((u64)((u32)bias32 & 0x7FFu) << 53);   /* [aa] */
@@ -7600,11 +7629,14 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
         .magFilter = d->mag_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
         .minFilter = d->min_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
         .mipmapMode = d->mip_linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        .addressModeU = vk_gcm_wrap(d->wrap_s), .addressModeV = vk_gcm_wrap(d->wrap_t),
-        .addressModeW = vk_gcm_wrap(d->wrap_r),
+        .addressModeU = vk_gcm_wrap(ws), .addressModeV = vk_gcm_wrap(wt),
+        .addressModeW = vk_gcm_wrap(wr),
         .minLod = min_lod, .maxLod = max_lod, .mipLodBias = (float)bias32 / 32.0f,   /* [aa] 0 unless asked */
         .anisotropyEnable = aniso > 1 ? VK_TRUE : VK_FALSE, .maxAnisotropy = aniso > 1 ? (float)aniso : 1.0f,
-        .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
+        /* one border colour per sampler: the axes share d->border */
+        .borderColor = (ws == 10u || wt == 10u || wr == 10u) ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
+                     : (ws == 9u  || wt == 9u  || wr == 9u)  ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK
+                                                             : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
     VkSampler smp;
     if (pvkCreateSampler(s_vk.device, &sci, NULL, &smp) != VK_SUCCESS) return s_vk.sampler;
     s_esamp[s_esamp_count].key = key;
