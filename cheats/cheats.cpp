@@ -1203,9 +1203,316 @@ void hook_cam_rate(struct ppu_context* ctx, ppu_hook_body body)
     if ((s_mt_cam == CAM_FREE && lr == kLrFreeRate) || (s_mt_cam == CAM_AIM && lr == kLrAimRate)) s_mt_rate = true;
 }
 
+/* ---- [map] World Map panning (the menu's Controls page; 2026-11-21) ----------------------------------------
+ * How the World Map pans (static, EBOOT v1.04): the map is a map display widget (SMapDisplayData; its
+ * properties at 0x0095D24C..: VIEW_CENTER +0x320 (vector), VIEW_RADIUS +0x330 (the zoom), VIEW_HEADING
+ * +0x334, MAP_DISPLAY_KIND +0x34C, IS_MINIMAP = kind == 1; the World Map is kind 0). Nothing native moves the
+ * view: the only writers of VIEW_CENTER / VIEW_RADIUS are their property setters func_0049EA80 (stvx v2 ->
+ * +0x320) / func_004A0AAC (f1, held in the game's limits -> +0x330), which native code calls only to frame a
+ * mission (0x45C5E0..0x45C830); every other change is the game's own script through the property table (an
+ * indirect call). The script reads the stick through the joystick object's properties: X func_00196C08
+ * (pad+0x04), Y func_00196C14 (pad+0x08), the left stick's magnitude func_00196C20 (pad+0x0C); the keys
+ * (WASD) drive the same left stick in cellPad.
+ * With no hook slot (no new lift) the engine's indirect-call registry (ppu_register_function) takes a wrapper
+ * for each of the five:
+ *   "the big map is up": a display that is not the minimap moved in the last 0.5 s, or moved after the last
+ *     free-camera frame and no free-camera frame since (the game stands still under the map);
+ *   while it is, the stick reads come back x PS3_MAP_SPEED (a controller) or x PS3_MAP_KEY_SPEED (the keys
+ *     moved the left stick: cellPad_host_left_keys), 0.05 .. 4;
+ *   PS3_MAP_ALT_MK=1 ("Alternate Mouse & Keyboard Map Panning"): cellPad gives the map the mouse
+ *     (cellPad_host_map_claim / _take: no right stick, no wheel buttons while it is up), and the view moves
+ *     directly -- no smoothing, no acceleration: VIEW_CENTER is written here from the mouse motion (540 px =
+ *     one view radius x PS3_MAP_MOUSE_SPEED) and the keys (one radius a second x PS3_MAP_KEY_SPEED); the
+ *     script sees the keys centred, and its own small centre moves are dropped (it keeps its centre near Cole
+ *     and sends it again every frame; a jump against its previous value -- a waypoint, the map opening --
+ *     still goes through). The wheel zooms: each notch x0.85 (up = in) on the radius the script asked for;
+ *     back to the game's own zoom when the map closes.
+ *   Shift held with the keys: their speed x2 (both modes); on the map Shift presses nothing else (cellPad).
+ * Nothing is installed while all is default. PS3_MAP_SPEED_LOG=1: a [map] line a second. */
+typedef void (*map_fn)(struct ppu_context*);
+extern "C" void ppu_register_function(uint64_t addr, map_fn fn);   /* runtime/ppu/ppu_loader.cpp */
+extern "C" void cellPad_host_map_claim(int on);                     /* libs/input/cellPad.c [map] */
+extern "C" int  cellPad_host_map_take(float* dx, float* dy, float* wheel);
+extern "C" int  cellPad_host_left_keys(void);
+extern "C" void cellPad_host_map_up(int on);                        /* Shift = x2 on the map, and nothing else */
+extern "C" int  cellPad_host_map_shift(void);
+extern "C" int  cellPad_host_left_keys_dir(float* x, float* y);   /* the keys' left stick, -1..1 (y + = down) */
+constexpr uint32_t kFnMapCenterSet = 0x0049EA80, kFnMapRadiusSet = 0x004A0AAC;
+constexpr uint32_t kFnJoyX = 0x00196C08, kFnJoyY = 0x00196C14, kFnJoyMag = 0x00196C20;
+constexpr uint32_t kMapRadius = 0x330, kMapKind = 0x34C;
+std::atomic<float> s_map_k{1.0f}, s_map_kkey{1.0f}, s_map_kmouse{1.0f};
+std::atomic<bool> s_map_alt{false};
+std::atomic<bool> s_map_game{false};      /* a guest hook has run: the game module is in and registered */
+std::atomic<bool> s_map_in{false};        /* the wrappers are in the registry */
+std::atomic<double> s_map_seen{-10.0};    /* when a big map last moved (now_s) */
+std::atomic<double> s_map_play{-10.0};    /* the last free-camera frame (now_s) */
+std::atomic<uint32_t> s_map_disp{0};      /* that big map's display */
+map_fn s_map_orig[5];
+int s_map_log;
+bool s_map_was_up;
+float s_map_slx, s_map_sly; uint32_t s_map_sdisp;   /* the script's own last centre (0: none since the map opened) */
+float s_map_sg[2] = { 1.0f, 1.0f };       /* the follow stick's sign per screen axis (flipped if the script ran away) */
+int s_map_rise[2]; float s_map_elast[2];  /* frames its error grew with no input, the last error */
+bool s_map_input;                         /* the direct pan moved the view this frame */
+bool s_map_pad_moving;                    /* a controller stick moves the map (alt mode: the script pans) */
+float s_map_zoom = 1.0f, s_map_rscript;   /* the wheel's zoom on the script's radius; the script's last radius */
+constexpr uint32_t kMapCenter = 0x320, kMapHeading = 0x334;
+constexpr float kMapKeyRate = 1.0f;       /* WASD at 100%: the view radius per second */
+constexpr float kMapPxRef = 540.0f;       /* mouse at 100%: this many px move the view by its radius */
+double s_map_mt;                          /* its last take */
+std::atomic<long long> s_map_n_set{0}, s_map_n_read{0}, s_map_n_scaled{0};
+
+bool map_defaults() { return s_map_k.load() == 1.0f && s_map_kkey.load() == 1.0f && !s_map_alt.load(); }
+
+bool map_up()
+{
+    const double t = now_s(), seen = s_map_seen.load(std::memory_order_relaxed), play = s_map_play.load(std::memory_order_relaxed);
+    return t - seen < 0.5 || (seen > play && t - play > 0.25);
+}
+
+void map_tick_log()
+{
+    static double last;
+    if (s_map_log != 1) return;
+    const double t = now_s();
+    if (t - last < 1.0) return;
+    last = t;
+    fprintf(stderr, "[map] t=%.2f pad x%.2f keys x%.2f mouse x%.2f alt %d zoom %.2f big map %s: %lld view moves, %lld stick reads, %lld scaled\n",
+            t, (double)s_map_k.load(), (double)s_map_kkey.load(), (double)s_map_kmouse.load(), s_map_alt.load() ? 1 : 0,
+            (double)s_map_zoom, map_up() ? "up" : "not up", s_map_n_set.exchange(0), s_map_n_read.exchange(0), s_map_n_scaled.exchange(0));
+}
+
+void map_radius_write(struct ppu_context* live, uint32_t disp, float r)   /* through the game's setter (its limits) */
+{
+    if (!gptr(disp) || !s_map_orig[1] || !live) return;
+    struct ppu_context c = *live;   /* a leaf: r3, f1, and the caller's r1 / r2 */
+    c.gpr[3] = disp; c.fpr[1] = (double)r;
+    s_map_orig[1](&c);
+}
+
+/* Once a frame-ish (the X read; at most every 4 ms): open/close, the mouse, the wheel. */
+void map_frame(struct ppu_context* ctx)
+{
+    const bool up = map_up();
+    const bool alt = s_map_alt.load(std::memory_order_relaxed);
+    const uint32_t disp = s_map_disp.load(std::memory_order_relaxed);
+    if (up != s_map_was_up) {
+        s_map_was_up = up;
+        fprintf(stderr, "[map] the World Map is %s\n", up ? "up" : "closed");
+        if (!up) {
+            if (s_map_zoom != 1.0f && s_map_rscript > 0.0f) map_radius_write(ctx, disp, s_map_rscript);
+            s_map_zoom = 1.0f;
+            cellPad_host_map_claim(0);
+            cellPad_host_map_up(0);
+            s_map_sdisp = 0;
+            s_map_sg[0] = s_map_sg[1] = 1.0f; s_map_rise[0] = s_map_rise[1] = 0;
+        }
+    }
+    if (up) cellPad_host_map_up(1);
+    if (!up || !alt) { if (!alt && s_map_zoom != 1.0f) { map_radius_write(ctx, disp, s_map_rscript); s_map_zoom = 1.0f; } return; }
+    const double t = now_s();
+    if (t - s_map_mt < 0.004) return;
+    float dt = (float)((t - s_map_mt) * 1000.0);
+    s_map_mt = t;
+    if (dt > 100.0f) dt = 100.0f;
+    cellPad_host_map_claim(1);
+    float dx = 0, dy = 0, w = 0;
+    cellPad_host_map_take(&dx, &dy, &w);
+    /* the direct pan (Anthony 2026-11-21: no smoothing, no acceleration): the mouse moves the view by
+     * how far it moved, the keys at a steady rate; written into VIEW_CENTER ourselves, the script's own stick
+     * reads see the keys as centred (map_stick_read) */
+    float kx = 0.0f, ky = 0.0f;
+    const bool keys = cellPad_host_left_keys_dir(&kx, &ky) != 0;
+    s_map_input = false;
+    if (gptr(disp) && (dx != 0.0f || dy != 0.0f || keys)) {
+        const float r = rdf(disp + kMapRadius);
+        if (r > 0.0f) {
+            const float um = r / kMapPxRef * s_map_kmouse.load(std::memory_order_relaxed);
+            const float uk = r * kMapKeyRate * s_map_kkey.load(std::memory_order_relaxed) * (cellPad_host_map_shift() ? 2.0f : 1.0f) * dt / 1000.0f;
+            const float sx = dx * um + kx * uk, sy = -dy * um - ky * uk;   /* screen right / up */
+            const float h = rdf(disp + kMapHeading);
+            const float c = cosf(h), sn = sinf(h);
+            const float wx = sx * sn + sy * c, wy = -sx * c + sy * sn;   /* Anthony's tests 2026-11-21 (heading pi/2): screen right = world +x, up = +y */
+            wrf(disp + kMapCenter, rdf(disp + kMapCenter) + wx);
+            wrf(disp + kMapCenter + 4, rdf(disp + kMapCenter + 4) + wy);
+            s_map_input = true;
+            static int said;
+            if (said++ < 3)
+                fprintf(stderr, "[map] direct pan: centre (%g, %g, %g) radius %g heading %g, moved (%g, %g)\n",
+                        (double)rdf(disp + kMapCenter), (double)rdf(disp + kMapCenter + 4), (double)rdf(disp + kMapCenter + 8),
+                        (double)r, (double)h, (double)wx, (double)wy);
+        }
+    }
+    if (w != 0.0f && gptr(disp) && s_map_rscript > 0.0f) {
+        float z = s_map_zoom * powf(0.85f, w);
+        z = z < 0.05f ? 0.05f : z > 20.0f ? 20.0f : z;
+        map_radius_write(ctx, disp, s_map_rscript * z);
+        const float got = rdf(disp + kMapRadius);           /* the game's limits may have held it */
+        if (got > 0.0f) z = got / s_map_rscript;
+        s_map_zoom = z;
+    }
+}
+
+void map_center_set(struct ppu_context* ctx)   /* func_0049EA80: r3 the display, v2 the new centre */
+{
+    const uint32_t disp = (uint32_t)ctx->gpr[3];
+    if (gptr(disp)) {
+        const int32_t kind = (int32_t)vm_read32(disp + kMapKind);
+        if (kind != 1) {
+            s_map_seen.store(now_s(), std::memory_order_relaxed);
+            s_map_disp.store(disp, std::memory_order_relaxed);
+            if (s_map_rscript <= 0.0f) s_map_rscript = rdf(disp + kMapRadius);
+            s_map_n_set.fetch_add(1, std::memory_order_relaxed);
+            static int32_t said[4] = { 1, 1, 1, 1 };   /* each display kind once (1, the minimap, never) */
+            for (int i = 0; i < 4; i++) {
+                if (said[i] == kind) break;
+                if (said[i] == 1) { said[i] = kind; fprintf(stderr, "[map] a map view moved: display %08X, kind %d\n", disp, kind); break; }
+            }
+        }
+    }
+    if (s_map_alt.load(std::memory_order_relaxed) && s_map_was_up && gptr(disp) && disp == s_map_disp.load(std::memory_order_relaxed) &&
+        !s_map_pad_moving) {
+        /* the direct pan owns the view: the script's small moves (its momentum, an old target) are dropped;
+         * a jump (a waypoint, the map opening on Cole) still goes through */
+        uint32_t vb[4]; memcpy(vb, &ctx->vr[2], 16);
+        const float r = rdf(disp + kMapRadius);
+        float nx, ny; { uint32_t u = __builtin_bswap32(vb[0]); memcpy(&nx, &u, 4); u = __builtin_bswap32(vb[1]); memcpy(&ny, &u, 4); }
+        /* against the script's OWN last centre, not the view: it keeps its own (near Cole) and sends it again and
+         * again, which once the view had gone far looked like a jump and snapped it back (Anthony 2026-11-21) */
+        float& lx = s_map_slx; float& ly = s_map_sly; uint32_t& ldisp = s_map_sdisp;
+        const bool first = ldisp != disp;
+        const float ddx = nx - lx, ddy = ny - ly;
+        lx = nx; ly = ny; ldisp = disp;
+        if (!first && r > 0.0f && ddx * ddx + ddy * ddy < 0.25f * r * r) { map_tick_log(); return; }
+    }
+    s_map_orig[0](ctx);
+    map_tick_log();
+}
+
+void map_radius_set(struct ppu_context* ctx)   /* func_004A0AAC: r3 the display, f1 the radius the script wants */
+{
+    const uint32_t disp = (uint32_t)ctx->gpr[3];
+    if (gptr(disp) && (int32_t)vm_read32(disp + kMapKind) != 1) {
+        s_map_rscript = (float)ctx->fpr[1];
+        if (s_map_zoom != 1.0f) ctx->fpr[1] = (double)(float)(s_map_rscript * s_map_zoom);
+    }
+    s_map_orig[1](ctx);
+}
+
+template <int I> void map_stick_read(struct ppu_context* ctx)   /* the joystick's X / Y / magnitude -> f1 */
+{
+    s_map_orig[I](ctx);
+    if (I == 2) map_frame(ctx);
+    if (!s_map_was_up) return;
+    s_map_n_read.fetch_add(1, std::memory_order_relaxed);
+    const bool keys = cellPad_host_left_keys() != 0;
+    const float k = (keys ? s_map_kkey : s_map_k).load(std::memory_order_relaxed) * (keys && cellPad_host_map_shift() ? 2.0f : 1.0f) *
+                    (s_map_alt.load(std::memory_order_relaxed) ? s_map_zoom : 1.0f);
+    const float v = (float)ctx->fpr[1];
+    float out = v * k;
+    if (s_map_alt.load(std::memory_order_relaxed)) {
+        if (I == 2) s_map_pad_moving = !keys && v != 0.0f;
+        if (!s_map_pad_moving) {
+            /* The follow stick (Anthony 2026-11-21: markers went to Cole). The script keeps its own centre -- its
+             * cursor, where a marker goes -- and moves it only by the stick, so it is steered after the view: the
+             * stick it reads points from its centre (its last send) to the view's, full past a quarter of the
+             * radius, proportional below, nothing within 0.2%. The view stays the direct pan's (no smoothing);
+             * the script's cursor catches up a moment after the mouse or the keys stop. */
+            out = 0.0f;
+            const uint32_t disp = s_map_disp.load(std::memory_order_relaxed);
+            const float r = gptr(disp) ? rdf(disp + kMapRadius) : 0.0f;
+            if (r > 0.0f && s_map_sdisp == disp) {
+                const float ex = rdf(disp + kMapCenter) - s_map_slx, ey = rdf(disp + kMapCenter + 4) - s_map_sly;
+                const float h = rdf(disp + kMapHeading), c = cosf(h), sn = sinf(h);
+                float sx = (ex * sn - ey * c), sy = (ex * c + ey * sn);   /* world -> screen (the pan's inverse) */
+                if (I == 2) {   /* once a frame: a script that runs away from the view has that axis backwards */
+                    const float e[2] = { sx, sy };
+                    for (int a = 0; a < 2; a++) {
+                        const float m = fabsf(e[a]);
+                        if (!s_map_input && m > r * 0.01f && m > s_map_elast[a] * 1.01f) {
+                            if (++s_map_rise[a] >= 10) {
+                                s_map_sg[a] = -s_map_sg[a]; s_map_rise[a] = 0;
+                                fprintf(stderr, "[map] follow stick: screen axis %c flipped (the script moved away)\n", a ? 'y' : 'x');
+                            }
+                        } else if (m < s_map_elast[a]) s_map_rise[a] = 0;
+                        s_map_elast[a] = m;
+                    }
+                }
+                const float g = 4.0f / r;
+                sx *= g * s_map_sg[0]; sy *= g * s_map_sg[1];
+                if (fabsf(ex) < r * 0.002f && fabsf(ey) < r * 0.002f) sx = sy = 0.0f;
+                const float m = sqrtf(sx * sx + sy * sy);
+                if (m > 1.0f) { sx /= m; sy /= m; }
+                out = I == 2 ? sx : I == 3 ? sy : (m > 1.0f ? 1.0f : m);
+            }
+        }
+    }
+    if (out == v) return;
+    ctx->fpr[1] = (double)out;
+    if (s_map_n_scaled.fetch_add(1, std::memory_order_relaxed) == 0) {
+        static bool said;
+        if (!said) { said = true; fprintf(stderr, "[map] the map's stick reads now scaled (first: %s %g -> %g)\n", I == 2 ? "X" : I == 3 ? "Y" : "magnitude", (double)v, (double)out); }
+    }
+}
+
+void map_install()   /* once, after a guest hook ran; only when something is not default */
+{
+    if (s_map_in.load() || !s_map_game.load() || map_defaults()) return;
+    static std::mutex mu;
+    std::lock_guard<std::mutex> g(mu);
+    if (s_map_in.load()) return;
+    const uint32_t addr[5] = { kFnMapCenterSet, kFnMapRadiusSet, kFnJoyX, kFnJoyY, kFnJoyMag };
+    for (int i = 0; i < 5; i++) {
+        s_map_orig[i] = (map_fn)ps3_module_ppu_fn(addr[i]);
+        if (!s_map_orig[i]) { fprintf(stderr, "[map] the game has no function at 0x%08X: map panning options off\n", addr[i]); return; }
+    }
+    ppu_register_function(kFnMapCenterSet, map_center_set);
+    ppu_register_function(kFnMapRadiusSet, map_radius_set);
+    ppu_register_function(kFnJoyX, map_stick_read<2>);
+    ppu_register_function(kFnJoyY, map_stick_read<3>);
+    ppu_register_function(kFnJoyMag, map_stick_read<4>);
+    s_map_in.store(true);
+    fprintf(stderr, "[map] World Map panning options in\n");
+}
+
+float map_k_parse(const char* v)
+{
+    float k = v && v[0] ? (float)atof(v) : 1.0f;
+    if (!(k > 0.0f)) k = 1.0f;
+    return k < 0.05f ? 0.05f : k > 4.0f ? 4.0f : k;
+}
+int map_speed_apply(const char* v) { s_map_k.store(map_k_parse(v)); fprintf(stderr, "[map] controller map speed x%.2f\n", (double)s_map_k.load()); map_install(); return 1; }
+int map_key_speed_apply(const char* v) { s_map_kkey.store(map_k_parse(v)); fprintf(stderr, "[map] WASD map speed x%.2f\n", (double)s_map_kkey.load()); map_install(); return 1; }
+int map_mouse_speed_apply(const char* v) { s_map_kmouse.store(map_k_parse(v)); fprintf(stderr, "[map] mouse map speed x%.2f\n", (double)s_map_kmouse.load()); return 1; }
+int map_alt_apply(const char* v)
+{
+    s_map_alt.store(v && v[0] == '1');
+    if (!s_map_alt.load()) cellPad_host_map_claim(0);
+    fprintf(stderr, "[map] alternate mouse & keyboard map panning %s\n", s_map_alt.load() ? "on" : "off");
+    map_install();
+    return 1;
+}
+
+void map_game_ran(struct ppu_context* ctx, bool free_frame)   /* from the gameplay hooks: the module is in */
+{
+    static bool env;
+    if (!env) {
+        env = true;
+        s_map_log = getenv("PS3_MAP_SPEED_LOG") ? atoi(getenv("PS3_MAP_SPEED_LOG")) : 0;
+        if (const char* e = getenv("PS3_MAP_SPEED")) s_map_k.store(map_k_parse(e));
+        if (const char* e = getenv("PS3_MAP_KEY_SPEED")) s_map_kkey.store(map_k_parse(e));
+        if (const char* e = getenv("PS3_MAP_MOUSE_SPEED")) s_map_kmouse.store(map_k_parse(e));
+        if (const char* e = getenv("PS3_MAP_ALT_MK")) s_map_alt.store(e[0] == '1');
+    }
+    if (free_frame) { s_map_play.store(now_s(), std::memory_order_relaxed); if (s_map_was_up && s_map_in.load()) map_frame(ctx); }
+    if (!s_map_game.load(std::memory_order_relaxed)) s_map_game.store(true);
+    if (!s_map_in.load(std::memory_order_relaxed) && !map_defaults()) map_install();
+}
+
 /* func_0019609C, the camera stick (r4 = 1 the right stick; r5, r6 = where x|x|, y|y| go). */
 void hook_cam_stick(struct ppu_context* ctx, ppu_hook_body body)
 {
+    map_game_ran(ctx, false);   /* [map] */
     const uint32_t lr = (uint32_t)ctx->lr, which = (uint32_t)ctx->gpr[4];
     const uint32_t px = (uint32_t)ctx->gpr[5], py = (uint32_t)ctx->gpr[6];
     ppu_hook_call(ctx, body);
@@ -1481,6 +1788,7 @@ template <int M> void hook_mode_start(struct ppu_context* ctx, ppu_hook_body bod
  * PS3_MOUSE_LOG's line with what came in and what the view did -- counts in, yaw out, in the same frame. */
 void hook_free_frame(struct ppu_context* ctx, ppu_hook_body body)
 {
+    map_game_ran(ctx, true);   /* [map] */
     const uint32_t d = (uint32_t)ctx->gpr[3];
     { static bool read; if (!read) { read = true; mouse_env(); } }
     s_in_free_frame = true;
@@ -2538,6 +2846,10 @@ struct Init {
         if (const char* e = getenv("PS3_FOV_HOOK")) s_fov_hook = e[0] != '0';             /* [fov] */
         s_fov_probe = getenv("PS3_FOV_PROBE") ? atoi(getenv("PS3_FOV_PROBE")) : 0;
         ps3_setting_register("PS3_FOV", fov_apply);   /* the menu's Display page > Camera (PS3_FOV is read after main) */
+        ps3_setting_register("PS3_MAP_SPEED", map_speed_apply);   /* [map] the menu's Controls page > Map speed */
+        ps3_setting_register("PS3_MAP_KEY_SPEED", map_key_speed_apply);
+        ps3_setting_register("PS3_MAP_MOUSE_SPEED", map_mouse_speed_apply);
+        ps3_setting_register("PS3_MAP_ALT_MK", map_alt_apply);
         if (!getenv("PS3_CHEATS")) s_env_done = true;
         hooks_update();
         if (s_probe || s_timeline || !s_env_done)
