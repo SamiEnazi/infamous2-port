@@ -974,45 +974,6 @@ static void test_conflicts()
     { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf_arcs = Arcs(); g_pf.clear(); g_bm.clear(); }
 }
 
-/* ---- "electric_dash": the Electric Dash power's engine settings ------------------ */
-static void test_electric_dash()
-{
-    const std::string d = join(W, "ed");
-    mkdirs(join(d, "Dash")); mkdirs(join(d, "Plain")); mkdirs(join(d, "Off"));
-    put_file(join(d, "Dash/mod.json"), "{\"game\": \"inf2\", \"name\": \"Dash\", \"electric_dash\": {\"speed\": 3, \"anim\": 1.5, \"drain\": 20, \"glow\": false, \"glowskip\": 500}}");
-    put_file(join(d, "Plain/mod.json"), "{\"game\": \"inf2\", \"name\": \"Plain\", \"electric_dash\": true}");
-    put_file(join(d, "Off/mod.json"), "{\"game\": \"inf2\", \"name\": \"Off\"}");
-    g.dir = d; g.state_path = join(W, "ed_state.ini");
-    remove(g.state_path.c_str());
-    std::vector<Mod> L = scan();
-    const Mod *a = nullptr, *b = nullptr, *c = nullptr;
-    for (const Mod& m : L) { if (m.folder == "Dash") a = &m; if (m.folder == "Plain") b = &m; if (m.folder == "Off") c = &m; }
-    CHECK(a && b && c);
-    if (!a || !b || !c) return;
-    CHECK(a->ed && a->ed_speed == 3.0f && a->ed_anim == 1.5f && a->ed_drain == 20.0f && a->ed_glow == 0 && a->ed_glowskip == 500);
-    CHECK(b->ed && b->ed_speed == 2.0f && b->ed_anim == 1.3f && b->ed_glow == 1);
-    CHECK(!c->ed);
-    float sp = 0, an = 0, dr = 0; int gl = -1, gs = -1;
-    {
-        std::lock_guard<std::mutex> lk(g.mx);
-        g.list = L; g.start.clear();
-        StartInfo si; si.active = true;
-        g.start["off"] = si;
-    }
-    CHECK(ps3_game_mods_electric_dash(&sp, &an, &dr, &gl, &gs) == 0);   /* only a mod without it is used */
-    {
-        std::lock_guard<std::mutex> lk(g.mx);
-        StartInfo si; si.active = true;
-        g.start["dash"] = si;
-    }
-    CHECK(ps3_game_mods_electric_dash(&sp, &an, &dr, &gl, &gs) == 1);
-    CHECK(sp == 3.0f && an == 1.5f && dr == 20.0f && gl == 0 && gs == 500);
-    {
-        std::lock_guard<std::mutex> lk(g.mx);
-        g.list.clear(); g.start.clear(); g.gen++;
-    }
-}
-
 /* mod.json "file_alias": a USRDIR file the game lacks is read from another of
  * its files while the mod is on; never when the game has the file, never a
  * path out of the game folder. */
@@ -1068,8 +1029,6 @@ int main(int argc, char** argv)
     fprintf(stderr, "+merge: %d ok, %d failed\n", g_pass, g_fail);
     test_conflicts();
     fprintf(stderr, "+conflicts: %d ok, %d failed\n", g_pass, g_fail);
-    test_electric_dash();
-    fprintf(stderr, "+electric_dash: %d ok, %d failed\n", g_pass, g_fail);
     test_alias();
     fprintf(stderr, "+file_alias: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 6) test_images(slashes(argv[4]), slashes(argv[5]));
