@@ -270,6 +270,15 @@
       "defaults": { "PS3RECOMP_FX_RES": "full" }
     },
     {
+      "id": "dof_res", "label": "Depth of field resolution", "group": "Lighting and effects",
+      "help": "The background blur. The PS3 made it from small pictures, blocky at high resolutions; Render res makes them at the picture's size, with the same amount of blur.",
+      "choices": [
+        { "label": "Render res", "set": { "PS3RECOMP_DOF_RES": "1" } },
+        { "label": "As on PS3", "set": { "PS3RECOMP_DOF_RES": "0" } }
+      ],
+      "defaults": { "PS3RECOMP_DOF_RES": "0" }
+    },
+    {
       "id": "button_icons", "label": "Button icons", "group": "Controls",
       "help": "The buttons the game shows. Automatic follows what you play with: Xbox glyphs for an Xbox-style pad, the PlayStation ones for a DualShock, DualSense or Switch pad, your keys for the keyboard.",
       "choices": [

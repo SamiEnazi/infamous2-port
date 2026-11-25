@@ -246,6 +246,11 @@ int rsx_fp_apply_alpha_aa(char* hlsl, u32 out_size, u32 func, int no_cov);
  * calls); a no-op without `_rsx_alod`. 1 applied, 0 nothing to do, -1 no room
  * (the text is unchanged: the caller must not build it). */
 int rsx_fp_alpha_aa_lod(char* hlsl, u32 out_size);
+/* (dofres) PS3RECOMP_DOF_RES: every 2D Sample of the units in `units` reads
+ * the average of the texels that make up one guest texel (gw[u] x gh[u]: the
+ * size the guest gave that texture) round its tap. 1 applied, 0 nothing to
+ * do, -1 no room (the text is unchanged). */
+int rsx_fp_prefilter(char* hlsl, u32 out_size, u32 units, const u16* gw, const u16* gh);
 
 /* Plan one 256-byte-aligned allocation in a fence-retired PS constant ring.
  * Returns 1 when it fits, 0 when the caller must submit/wait/reset first, and

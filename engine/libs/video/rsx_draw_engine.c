@@ -1388,14 +1388,123 @@ static void eng_glow_init(void)
 }
 /* 1: a colour target of this guest size is made at that size whatever the
  * internal resolution (PS3RECOMP_FX_GLOW on and the size on the list). */
+static int eng_dofc_keep_off(u32 offset, u32 w, u32 h);   /* (dofres) below */
 static u32 eng_glow_keep(u32 offset, u32 w, u32 h)
 {
+    if (__builtin_expect(eng_dofc_keep_off(offset, w, h), 0)) return 0u;   /* (dofres) */
     int m = __atomic_load_n(&s_glow_mode, __ATOMIC_RELAXED);
     if (__builtin_expect(m < 0, 0)) { eng_glow_init(); m = __atomic_load_n(&s_glow_mode, __ATOMIC_RELAXED); }
     if (m == 0) return 0u;
     for (u32 i = 0; i < s_glow_n; i++)
         if (s_glow_t[i].w == w && s_glow_t[i].h == h && (s_glow_t[i].off == ~0u || s_glow_t[i].off == offset)) return 1u;
     return 0u;
+}
+
+/* ---- (dofres) the depth of field at the render resolution (PS3RECOMP_DOF_RES)
+ * GitHub issue #136: the depth of field looks low-res and blocky. The pass
+ * (ENG_DOF_BLEND_FP) blends the sharp scene with two quarter pictures, Q and
+ * B (units 2 and 3), made by the chain above: 1280x720 -> 1280x180 -> 320x180,
+ * then a blur. Their sizes are the glow chain's, so PS3RECOMP_FX_GLOW keeps
+ * them at the PS3's 320x180 at every internal resolution, and at 4K the blend
+ * stretches them twelve times.
+ *
+ *   PS3RECOMP_DOF_RES (live)  0 / unset = as the PS3 (the old path exactly);
+ *       1 = the depth of field's own targets follow the internal resolution
+ *       (the glow chain keeps its PS3RECOMP_FX_GLOW setting).
+ *
+ * Which targets: learned, never guessed by size alone (the glow chain has the
+ * same sizes, maybe the same memory). A draw of the blend names the targets
+ * its units 2 and 3 read; a draw into a named target names the 1280x180 or
+ * 320x180 targets it reads (the chain, one step a frame, back to the scene,
+ * which is not one of those sizes). eng_glow_keep then answers "not kept" for
+ * them, so they are made again at the internal resolution (the keep is part
+ * of a target's identity, eng_surface_get_kq). Up to ENG_DOFC_MAX, each one
+ * logged once. PS3RECOMP_DOF_RES_TARGETS=<list> (read once; tests, and a
+ * stand-in if a build ever stops finding them): "0xOFFSET:WxH" entries,
+ * comma separated, named from the start (local memory).
+ *
+ * Why not only that: the chain's taps are constants in the PS3's texels (the
+ * downsample's taps +-1/1280, the blur's +4.0 .. -3.3 texels of 320). Drawn
+ * k times larger, those same fractions of the picture land k texels apart:
+ * the 4:1 downsample would read one texel in 4k^2, the blur would leave gaps
+ * (the doubled, shimmering look PS3RECOMP_FX_GLOW was made for). So every
+ * draw INTO a named target reads its render-target inputs through
+ * rsx_fp_prefilter: each tap is the average of the k x k texels that make up
+ * one PS3 texel around it (k from the image's own size over the size the
+ * guest gave it, so 1x is the plain tap). The taps then weigh in what they
+ * weigh on a PS3, the blur keeps its strength, and only the grid it lands on
+ * is finer: what the blend upsamples is k times sharper-edged, not blurrier
+ * or weaker. The blend itself reads Q and B as they are (bilinear). */
+#define ENG_DOFC_MAX 8u
+static volatile int s_dofres = -1;   /* 1 on, 0 off, -1 not read yet */
+static struct { u32 loc, off, w, h; } s_dofc[ENG_DOFC_MAX];
+static volatile u32 s_dofc_n;
+/* the draw being bound: which units go through the prefilter (eng_pipeline_get's key) */
+static struct { u32 mask; u16 gw[16], gh[16]; } s_dofpf;
+static int eng_dofres_apply(const char* v)
+{
+    const int on = v && (!strcmp(v, "1") || !strcmp(v, "render") || !strcmp(v, "full"));
+    const int was = __atomic_exchange_n(&s_dofres, on, __ATOMIC_RELAXED);
+    if (on != was && !(was == -1 && !on))
+        fprintf(stderr, "[dofres] depth of field %s\n", on ? "at the render resolution" : "at the PS3's size");
+    return 1;
+}
+static void eng_dofc_seed(void);
+static int eng_dofres_on(void)
+{
+    int m = __atomic_load_n(&s_dofres, __ATOMIC_RELAXED);
+    if (__builtin_expect(m < 0, 0)) {
+        eng_dofc_seed();
+        eng_dofres_apply(getenv("PS3RECOMP_DOF_RES"));
+        m = __atomic_load_n(&s_dofres, __ATOMIC_RELAXED);
+    }
+    return m;
+}
+/* the chain's sizes: the 1280x180 strip and the 320x180 quarter pictures */
+static int eng_dofc_size(u32 w, u32 h) { return h == 180u && (w == 1280u || w == 320u); }
+static int eng_dofc_find(u32 loc, u32 off, u32 w, u32 h)
+{
+    const u32 n = __atomic_load_n(&s_dofc_n, __ATOMIC_ACQUIRE);
+    for (u32 i = 0; i < n; i++)
+        if (s_dofc[i].off == off && s_dofc[i].w == w && s_dofc[i].h == h && (loc == ~0u || s_dofc[i].loc == loc)) return (int)i;
+    return -1;
+}
+/* RSX thread only (sink_bind_textures) */
+static void eng_dofc_add(u32 loc, u32 off, u32 w, u32 h, const char* why)
+{
+    if (eng_dofc_find(loc, off, w, h) >= 0) return;
+    const u32 n = s_dofc_n;
+    if (n >= ENG_DOFC_MAX) { static int said; if (!said++) fprintf(stderr, "[dofres] more than %u depth-of-field targets: the rest stay at the PS3's size\n", ENG_DOFC_MAX); return; }
+    s_dofc[n].loc = loc; s_dofc[n].off = off; s_dofc[n].w = w; s_dofc[n].h = h;
+    __atomic_store_n(&s_dofc_n, n + 1u, __ATOMIC_RELEASE);
+    fprintf(stderr, "[dofres] depth-of-field target %u:0x%08X %ux%u (%s): at the render resolution from the next frame\n",
+            loc, off, w, h, why);
+}
+/* PS3RECOMP_DOF_RES_TARGETS: the list named from the start (eng_fxres_init's syntax, the offset required) */
+static void eng_dofc_seed(void)
+{
+    static int done;
+    if (done) return;
+    done = 1;
+    const char* t = getenv("PS3RECOMP_DOF_RES_TARGETS");
+    while (t && *t) {
+        while (*t == ',' || *t == ' ') t++;
+        if (!*t) break;
+        char* e;
+        const unsigned long a = strtoul(t, &e, 0);
+        if (*e != ':') break;
+        const u32 w = (u32)strtoul(e + 1, &e, 10);
+        if (*e != 'x' && *e != 'X') break;
+        const u32 h = (u32)strtoul(e + 1, &e, 10);
+        if (w && h) eng_dofc_add(RSX_LOCATION_LOCAL, (u32)a, w, h, "PS3RECOMP_DOF_RES_TARGETS");
+        t = e;
+    }
+}
+/* eng_glow_keep: a depth-of-field target is never kept while the setting is on */
+static int eng_dofc_keep_off(u32 offset, u32 w, u32 h)
+{
+    if (!__atomic_load_n(&s_dofc_n, __ATOMIC_RELAXED) || !eng_dofc_size(w, h)) return 0;
+    return eng_dofres_on() > 0 && eng_dofc_find(~0u, offset, w, h) >= 0;
 }
 
 /* The colour target for this (location, offset), created or reallocated when
@@ -4422,6 +4531,7 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
         u64 vp_hash, fp_struct;
         u32 fp_ctrl_key, cube_mask, vol_mask, vtex_mask, layout_mask, layout_stride, rt_count;
         u32 shadow_mask, srgb_output, gamma_units, expand_units, ucp, dbz, shade_bf, fx_off;
+        u32 dof_pf; u16 dof_gw[16], dof_gh[16];   /* (dofres) */
         u32 fbf_cand; u8 fbf_att[16]; u8 fbf_sel[16][4];
         u8 gamma_masks[RSX_DSP_NUM_TEXTURES];
         u8 expand_masks[RSX_DSP_NUM_TEXTURES];
@@ -4465,6 +4575,9 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
     const u32 fx_off = (!fixed && in_fp == ENG_DOF_BLEND_FP)
                      ? (u32)(!__atomic_load_n(&s_fx_dof, __ATOMIC_RELAXED)) |
                        (u32)(!__atomic_load_n(&s_fx_edge, __ATOMIC_RELAXED)) << 1 : 0u;
+    /* (dofres) PS3RECOMP_DOF_RES: the units sink_bind_textures sends through
+     * the prefilter, and the guest's size of each (its text has them) */
+    const u32 dof_pf = fixed ? 0u : s_dofpf.mask;
     u64 key;
     if (kmemo.valid && kmemo.fixed == fixed && kmemo.vp_hash == in_vp && kmemo.fp_struct == in_fp &&
         kmemo.fp_ctrl_key == fp_ctrl_key && kmemo.cube_mask == cube_mask && kmemo.vol_mask == vol_mask &&
@@ -4479,7 +4592,9 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
                    : !memcmp(&kmemo.rs, rs, sizeof *rs)) &&
         kmemo.shadow_mask == shadow_mask && kmemo.srgb_output == srgb_output &&
         kmemo.gamma_units == gamma_units && kmemo.ucp == ucp && kmemo.dbz == dbz &&
-        kmemo.shade_bf == shade_bf && kmemo.fx_off == fx_off &&
+        kmemo.shade_bf == shade_bf && kmemo.fx_off == fx_off && kmemo.dof_pf == dof_pf &&
+        (!dof_pf || (!memcmp(kmemo.dof_gw, s_dofpf.gw, sizeof kmemo.dof_gw) &&
+                     !memcmp(kmemo.dof_gh, s_dofpf.gh, sizeof kmemo.dof_gh))) &&
         (!gamma_units || !memcmp(kmemo.gamma_masks, gamma_masks, sizeof gamma_masks)) &&
         kmemo.expand_units == expand_units &&
         (!expand_units || !memcmp(kmemo.expand_masks, expand_masks, sizeof expand_masks)) &&
@@ -4525,6 +4640,12 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
         if (dbz) { const u32 tag = 0x5A424400u | dbz; ENG_KH(&tag, sizeof tag); }
         if (shade_bf) { const u32 tag = 0x53424631u; ENG_KH(&tag, sizeof tag); }   /* "SBF1" */
         if (fx_off) { const u32 tag = 0x46584F00u | fx_off; ENG_KH(&tag, sizeof tag); }   /* "FXO" */
+        if (dof_pf) {   /* (dofres) */
+            const u32 tag = 0x444F4650u; ENG_KH(&tag, sizeof tag);   /* "DOFP" */
+            ENG_KH(&dof_pf, sizeof dof_pf);
+            ENG_KH(s_dofpf.gw, sizeof s_dofpf.gw);
+            ENG_KH(s_dofpf.gh, sizeof s_dofpf.gh);
+        }
     }
     ENG_KH(&layout->mask, sizeof layout->mask);
     ENG_KH(&layout->stride, sizeof layout->stride);
@@ -4548,6 +4669,7 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
     kmemo.srgb_output = srgb_output;
     kmemo.gamma_units = gamma_units; kmemo.expand_units = expand_units; kmemo.ucp = ucp; kmemo.dbz = dbz;
     kmemo.shade_bf = shade_bf; kmemo.fx_off = fx_off;
+    kmemo.dof_pf = dof_pf; memcpy(kmemo.dof_gw, s_dofpf.gw, sizeof kmemo.dof_gw); memcpy(kmemo.dof_gh, s_dofpf.gh, sizeof kmemo.dof_gh);
     memcpy(kmemo.expand_masks, expand_masks, sizeof expand_masks); memcpy(kmemo.gamma_masks, gamma_masks, sizeof gamma_masks);
     kmemo.fbf_cand = s_fbf.cand; memcpy(kmemo.fbf_att, s_fbf.att, sizeof s_fbf.att); memcpy(kmemo.fbf_sel, s_fbf.sel, sizeof s_fbf.sel);
     kmemo.key = key;
@@ -4714,6 +4836,15 @@ key_done:;
             fprintf(stderr, "[rsx engine] game post fx: depth of field %s, edge blur %s (fp %016llx)%s\n",
                     (fx_off & 1u) ? "OFF" : "on", (fx_off & 2u) ? "OFF" : "on", (unsigned long long)in_fp,
                     ok_dof && ok_edge ? "" : ": NOT applied (unexpected text)");
+    }
+    /* (dofres) PS3RECOMP_DOF_RES: a draw into a depth-of-field target reads
+     * its scaled inputs one PS3 texel at a time (rsx_fp_prefilter). */
+    if (fi > 0 && dof_pf) {
+        const int r = rsx_fp_prefilter(s_ps_hlsl, sizeof s_ps_hlsl, dof_pf, s_dofpf.gw, s_dofpf.gh);
+        static u32 said;
+        if (said++ < 8)
+            fprintf(stderr, "[dofres] fp %016llx: units 0x%X read %s\n", (unsigned long long)in_fp, dof_pf,
+                    r > 0 ? "through the prefilter" : r == 0 ? "as they are (no 2D sample of them)" : "as they are (NOT applied: no room)");
     }
     /* PS3RECOMP_ENG_FBFETCH: the units that read their own target. */
     u32 fbf_applied = 0;
@@ -6753,6 +6884,20 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
     s_fbf.cand = 0; s_fbf.applied = 0;
     s_tex_volatile = 0;   /* (rnd1) PS3RECOMP_ENG_DELTA: set below by every state-dependent path */
     eng_cube_draw_begin();   /* PS3RECOMP_ENG_CUBE_GUEST / _CUBELOG */
+    /* (dofres) PS3RECOMP_DOF_RES: is this the blend (it names the chain's
+     * targets) or a draw into one of them (it names its inputs, and reads
+     * them through the prefilter)? Volatile either way: what it binds and
+     * which pipeline it takes follow the setting and the list. */
+    s_dofpf.mask = 0;
+    int dof_blend = 0, dof_into = 0;
+    if (__builtin_expect(eng_dofres_on() > 0, 0)) {
+        dof_blend = eng_current_fp_structural() == ENG_DOF_BLEND_FP;
+        if (n_targets && target_slots[0] != ENG_INVALID) {
+            const eng_surface* ts = &g.surfaces[target_slots[0]];
+            dof_into = eng_dofc_size(ts->w, ts->h) && eng_dofc_find(ts->location, ts->offset, ts->w, ts->h) >= 0;
+        }
+        if (dof_blend || dof_into) s_tex_volatile = 1;
+    }
     const u32 fp_reads = eng_bind_unread() ? 0xFFFFu : eng_fp_tex_mask();
     const rsx_dsp_texture* units = eng_draw_textures();
     for (u32 u = 0; u < RSX_BE_MAX_TEXTURES; u++) {
@@ -6940,6 +7085,16 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
         }
         if (sampled >= 0) {
             u32 src = g.surfaces[sampled].handle;
+            if (__builtin_expect(dof_blend | dof_into, 0)) {   /* (dofres) */
+                const eng_surface* ss = &g.surfaces[sampled];
+                if (eng_dofc_size(ss->w, ss->h) && (dof_into || u == 2u || u == 3u))
+                    eng_dofc_add(ss->location, ss->offset, ss->w, ss->h,
+                                 dof_into ? "the chain reads it" : u == 2u ? "the blend's first picture" : "the blend's second picture");
+                if (dof_into && !ss->keep && !t.cubemap && t.dimension != 3 && t.width && t.height && t.width < 65536u && t.height < 65536u) {
+                    s_dofpf.mask |= 1u << u;
+                    s_dofpf.gw[u] = (u16)t.width; s_dofpf.gh[u] = (u16)t.height;
+                }
+            }
             /* (fx12) PS3RECOMP_FX_GLOW=1: a draw into a target kept at the
              * guest's size reads a larger one (the lit picture at the
              * internal resolution, the particles at PS3RECOMP_FX_RES) through
@@ -8774,6 +8929,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
     ps3_setting_register("PS3RECOMP_SHADOW_RES", eng_shres_apply);    /* [shadow] Lighting page, live */
     eng_glow_init();                                                  /* (fx12) */
     ps3_setting_register("PS3RECOMP_FX_GLOW", eng_glow_apply);
+    eng_dofres_on();                                                  /* (dofres) */
+    ps3_setting_register("PS3RECOMP_DOF_RES", eng_dofres_apply);
     eng_texpack_register();
     eng_fbf_init();                                                   /* (lowend) PS3RECOMP_ENG_FBFETCH: a setting too */
     s_tex_bytes = 0;                                                  /* (lowend) g starts empty */

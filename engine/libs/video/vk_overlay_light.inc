@@ -16,9 +16,11 @@
 static struct {
     bool comparing;                       /* F3: the PS3 look shown, the choice kept here */
     char saved[PS3_LFX_COUNT][16];
-    char fx_saved[2][16];                 /* [menu-e] PS3RECOMP_FX_RES, PS3RECOMP_FX_GLOW */
+    char fx_saved[3][16];                 /* [menu-e] PS3RECOMP_FX_RES, PS3RECOMP_FX_GLOW, (dofres) PS3RECOMP_DOF_RES */
 } s_lfx;
-static const char* const kLfxFx[2][2] = { { "PS3RECOMP_FX_RES", "1" }, { "PS3RECOMP_FX_GLOW", "2" } };   /* name, the PS3's */
+/* name, the PS3's, the value when unset */
+static const char* const kLfxFx[3][3] = { { "PS3RECOMP_FX_RES", "1", "1" }, { "PS3RECOMP_FX_GLOW", "2", "1" },
+                                          { "PS3RECOMP_DOF_RES", "0", "0" } };
 
 static const char* lfx_off_value(int id) { return id == PS3_LFX_SSAO_STRENGTH ? "100" : "0"; }
 
@@ -40,21 +42,21 @@ static bool lfx_compare_toggle(void)
             snprintf(s_lfx.saved[id], sizeof s_lfx.saved[id], "%d", ps3_lightfx_get(id));
             any = any || strcmp(s_lfx.saved[id], lfx_off_value(id)) != 0;
         }
-        for (int k = 0; k < 2; k++) {
+        for (int k = 0; k < 3; k++) {
             const char* e = getenv(kLfxFx[k][0]);
             snprintf(s_lfx.fx_saved[k], sizeof s_lfx.fx_saved[k], "%s", e ? e : "");
-            any = any || strcmp(e && *e ? e : "1", kLfxFx[k][1]) != 0;
+            any = any || strcmp(e && *e ? e : kLfxFx[k][2], kLfxFx[k][1]) != 0;
         }
         if (!any) { vk_overlay_notice("All lighting and effects options are the PS3's -- nothing to compare"); return false; }
         for (int id = 0; id < PS3_LFX_COUNT; id++) ps3_setting_apply(ps3_lightfx_name(id), lfx_off_value(id));
-        for (int k = 0; k < 2; k++) ps3_setting_apply(kLfxFx[k][0], kLfxFx[k][1]);
+        for (int k = 0; k < 3; k++) ps3_setting_apply(kLfxFx[k][0], kLfxFx[k][1]);
         shadow_quality_compare(true);   /* [shadow] the PS3's 1024x1024 maps too */
         s_lfx.comparing = true;
         vk_overlay_notice("PS3 look: lighting and effects (F3 = your settings)");
         fprintf(stderr, "[overlay] F3: the PS3 look (lighting + effects)\n");
     } else {
         for (int id = 0; id < PS3_LFX_COUNT; id++) ps3_setting_apply(ps3_lightfx_name(id), s_lfx.saved[id]);
-        for (int k = 0; k < 2; k++) ps3_setting_apply(kLfxFx[k][0], s_lfx.fx_saved[k]);
+        for (int k = 0; k < 3; k++) ps3_setting_apply(kLfxFx[k][0], s_lfx.fx_saved[k]);
         shadow_quality_compare(false);   /* [shadow] */
         s_lfx.comparing = false;
         vk_overlay_notice("Your settings (F3 = PS3 look)");
