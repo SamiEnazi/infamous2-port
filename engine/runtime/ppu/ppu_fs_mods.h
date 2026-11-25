@@ -807,14 +807,11 @@ struct Part { std::string path, target; std::set<int> drop; };      /* a mod fil
                                                                       drop: packed files of it left out (conflicts the player resolved) */
 struct Tex : Part { uint32_t off = 0; int w = 0, h = 0, mips = 0; std::string fmt, name; };
 struct Xp : Part { int index = 0; uint32_t abs = 0, choff = 0, len = 0; bool chunk = false; std::string name; };
-/* Cole's karma levels, as the game orders them (its rank table, live_karma_level) */
-static const char* const kKarmaLevels[7] = { "Infamous", "Outlaw", "Thug", "Neutral", "Guardian", "Champion", "Hero" };
 struct Mod {
     std::string folder, path, name, author, version, game, err;
     std::string image;                   /* mod.json "image", as written (image_path checks it) */
     bool for_game = false;
     bool live = false;                   /* mod.json "live": true -- patched in memory, on and off at once (live_*) */
-    std::vector<std::pair<int, std::string>> levels;   /* a live mod's "karma_levels": karma level (0-6) -> its folder */
     std::vector<std::string> patch_for;  /* "patch_for": a patch that makes these mods (folder or name) work together */
     std::map<std::string, bool> res;     /* conflicts the player resolved: "<other folder>|<file>|<part>" (lower) -> this mod's
                                             version is used (mods.ini win / lose, res_winner) */
@@ -1272,17 +1269,6 @@ static void state_write_locked()
     if (!write_all(g.state_path, b)) fprintf(stderr, "[mods] could not save %s\n", g.state_path.c_str());
 }
 
-/* A live mod's karma level: its patches, out of <mod>/<folder> (files/ in it, as a mod's). */
-static Mod live_level_mod(const Mod& m, const std::string& folder)
-{
-    Mod x = m;
-    x.path = join(m.path, folder);
-    x.modules.clear(); x.levels.clear();
-    if (folder.find("..") != std::string::npos || !is_dir(x.path)) { x.err = "its folder (" + folder + ") is not in the mod"; return x; }
-    read_parts(x);
-    return x;
-}
-
 /* The mod folders: <dir>/<x>/mod.json, or <dir>/<x>/<y>/mod.json (a zip
  * unpacked into a folder of its own name). Dot folders are skipped. */
 static std::vector<Mod> scan()
@@ -1303,11 +1289,6 @@ static std::vector<Mod> scan()
         m.for_game = m.game == "inf2";
         m.image = j.str("image");
         if (const J* lj = j.get("live")) m.live = lj->t == 1 ? lj->s == "true" : (lj->t == 2 && lj->s != "0");
-        if (const J* kj = j.get("karma_levels"))
-            if (kj->t == 5)
-                for (size_t i = 0; i < kj->ok.size(); i++)
-                    for (int q = 0; q < 7; q++)
-                        if (ieq(kj->ok[i], kKarmaLevels[q]) && kj->ov[i].t == 3 && !kj->ov[i].s.empty()) m.levels.push_back({ q, kj->ov[i].s });
         if (const J* pj = j.get("patch_for"))      /* the mods this patch merges: used only while all of them are */
             if (pj->t == 4)
                 for (const J& a : pj->a)
@@ -1321,12 +1302,6 @@ static std::vector<Mod> scan()
         }
         if (!jerr.empty()) m.err = jerr;
         else if (m.for_game) { read_modules(m); read_parts(m); }
-        if (m.live && !m.levels.empty() && m.err.empty())
-            for (const auto& l : m.levels) {   /* every level's patches must read; their files are part of the mod's key */
-                const Mod x = live_level_mod(m, l.second);
-                if (!x.err.empty()) { m.err = std::string("karma level ") + kKarmaLevels[l.first] + ": " + x.err; break; }
-                m.stamp = (m.stamp ^ x.stamp) * 1099511628211ull + (uint64_t)l.first;
-            }
         out.push_back(std::move(m));
     };
     for (const std::string& n : list_dir(g.dir)) {
@@ -2595,11 +2570,6 @@ static std::string settings_dir()
  *   PS3_GAME_MODS_LIVE_SECS    seconds between passes (default 4; a pass
  *                              takes longer apart from that when one pass
  *                              is slow: at most ~5% of a core)
- * mod.json "karma_levels": { "Hero": "<folder>", ... } (the 7 levels:
- * Infamous, Outlaw, Thug, Neutral, Guardian, Champion, Hero) gives a live mod
- * other patches for each of Cole's karma levels, in <mod>/<folder>/files as a
- * mod's own; the worker reads the karma level every half second and puts the
- * level's bytes in when it changes (a level not named uses the mod's own).
  * Log lines start "[mods] live:". */
 
 extern "C" { extern uint8_t* vm_base; extern void (*g_vm_host_io_hook)(uint32_t ea, uint32_t len, int end); }
@@ -2615,7 +2585,6 @@ struct LivePair { std::vector<Bytes> v; std::vector<uint32_t> k; std::vector<cha
 struct LiveMod {
     std::string key, name;
     std::vector<LivePair> pairs;
-    std::vector<int> var;               /* "karma_levels": karma level (0-6) -> variant; empty: one variant (1) */
     bool want = false, built = false, building = false;
     int revert = 0;                     /* passes left that write the originals back */
     int target = 0;                     /* the variant the last pass put in (0: the game's own) */
@@ -2630,7 +2599,6 @@ static struct {
     std::map<std::string, LiveMod> mods;   /* lower(folder) */
     std::vector<LiveMod> retired;          /* an old build of a mod (options or files changed), still to undo */
     bool started = false, kick = false;
-    int rank = -1;                         /* Cole's karma level as last read (-1: not known) */
 } lv;
 
 /* Too plain to look for: fewer than 4 different byte values in the whole window (a black or zeroed run of
@@ -2717,22 +2685,10 @@ static void live_windows(const Bytes& o, const std::vector<bool>& dm, const std:
     }
 }
 
-/* A live mod's windows: variant 1 is the mod's own patches; a mod with
- * "karma_levels" adds one variant per level (var: level -> variant; a level
- * it does not name uses variant 1). */
-static bool live_build(const Mod& m, std::vector<LivePair>& out, std::vector<int>& var, std::string& err)
+/* A live mod's windows: variant 1 is the mod's own patches (v[0]: the game's). */
+static bool live_build(const Mod& m, std::vector<LivePair>& out, std::string& err)
 {
     std::vector<Mod> vm(1, m);
-    var.clear();
-    if (!m.levels.empty()) {
-        var.assign(7, 1);
-        for (const auto& l : m.levels) {
-            Mod x = live_level_mod(m, l.second);
-            if (!x.err.empty()) { err = std::string("karma level ") + kKarmaLevels[l.first] + ": " + x.err; return false; }
-            var[(size_t)l.first] = (int)vm.size() + 1;   /* vm[i] is variant i + 1 (v[0]: the game's) */
-            vm.push_back(std::move(x));
-        }
-    }
     std::set<std::string> targets;
     for (const Mod& x : vm) targets.insert(x.targets.begin(), x.targets.end());
     Arcs arcs;
@@ -2848,24 +2804,6 @@ static void live_sync_locked()
 #ifdef _WIN32
 struct LiveEnt { LivePair* p; LiveMod* m; int from, to; };   /* v[from] -> v[to]; from == to: count only (in place) */
 
-/* Cole's karma level (0-6) as the game finds it: the first of its 7 ranges
- * (0x00745EC8, (min, max) big-endian floats) that holds the karma
- * (0x00A64E40), else Neutral; -1 when it cannot be read. */
-static int live_karma_level()
-{
-    uint8_t t[56], k[4];
-    SIZE_T g1 = 0, g2 = 0;
-    const HANDLE me = GetCurrentProcess();
-    if (!vm_base || !ReadProcessMemory(me, vm_base + 0x00745EC8u, t, sizeof t, &g1) || g1 != sizeof t) return -1;
-    if (!ReadProcessMemory(me, vm_base + 0x00A64E40u, k, sizeof k, &g2) || g2 != sizeof k) return -1;
-    auto f = [](const uint8_t* p) { const uint32_t u = be32(p); float x; memcpy(&x, &u, 4); return x; };
-    const float kv = f(k);
-    if (kv != kv) return -1;
-    for (int i = 0; i < 7; i++) if (!(f(t + 8 * i) <= f(t + 8 * i + 4))) return -1;   /* not the table (yet) */
-    for (int i = 0; i < 7; i++) if (f(t + 8 * i) <= kv && kv <= f(t + 8 * i + 4)) return i;
-    return 3;
-}
-
 static void live_pass()
 {
     const auto t0 = std::chrono::steady_clock::now();
@@ -2892,7 +2830,7 @@ static void live_pass()
         m->tmp = 0;
         if (m->pairs.empty()) continue;
         int t;
-        if (m->want) t = m->var.empty() ? 1 : lv.rank >= 0 ? m->var[(size_t)lv.rank] : m->target > 0 ? m->target : 1;
+        if (m->want) t = 1;
         else if (m->revert > 0) t = 0;
         else continue;
         m->target = t;
@@ -3032,7 +2970,6 @@ static void live_pass()
     g_live_last_ms = ms_;
 }
 #else
-static int live_karma_level() { return -1; }
 static void live_pass() {}
 #endif
 
@@ -3045,28 +2982,11 @@ static void live_worker()
     const double secs = s && atof(s) > 0.2 ? atof(s) : 4.0;
     for (;;) {
         {
-            /* a mod with karma levels on: the karma level is read every half second,
-             * and a change is put in at once */
             const double wait = (std::max)(secs, g_live_last_ms * 20.0 / 1000.0);
-            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds((int64_t)(wait * 1000));
             std::unique_lock<std::mutex> lk(lv.mx);
-            while (!lv.kick) {
-                const auto now = std::chrono::steady_clock::now();
-                if (now >= until) break;
-                bool lev = false;
-                for (auto& kv : lv.mods) if (kv.second.want && kv.second.built && !kv.second.var.empty()) lev = true;
-                const auto step = lev ? (std::min)(until, now + std::chrono::milliseconds(500)) : until;
-                lv.cv.wait_until(lk, step, [] { return lv.kick; });
-                if (lev && !lv.kick) {
-                    lk.unlock();
-                    const int r = live_karma_level();
-                    lk.lock();
-                    if (r >= 0 && r != lv.rank) { lv.rank = r; break; }
-                }
-            }
+            lv.cv.wait_for(lk, std::chrono::milliseconds((int64_t)(wait * 1000)), [] { return lv.kick; });
             lv.kick = false;
         }
-        { const int r = live_karma_level(); if (r >= 0) { std::lock_guard<std::mutex> lk(lv.mx); lv.rank = r; } }
         { std::lock_guard<std::mutex> lk(g.mx); live_sync_locked(); }
         /* builds: every live mod's pairs, once, on or off (reading the archives takes a few
          * seconds each). The mods switched on are built first and put in by a pass at once;
@@ -3103,11 +3023,10 @@ static void live_worker()
                     }
             }
             std::vector<LivePair> pairs;
-            std::vector<int> var;
             std::string err;
             bool ok = false;
             if (found) {
-                try { ok = live_build(m, pairs, var, err); }
+                try { ok = live_build(m, pairs, err); }
                 catch (const std::exception& e) { err = std::string("could not be read (") + e.what() + ")"; }
             }
             std::lock_guard<std::mutex> lk(lv.mx);
@@ -3118,12 +3037,10 @@ static void live_worker()
             L.built = true;
             if (ok) {
                 L.pairs.swap(pairs);
-                L.var.swap(var);
                 L.err.clear();
                 size_t bytes = 0;
                 for (const LivePair& p : L.pairs) bytes += p.v[0].size();
-                fprintf(stderr, "[mods] live: \"%s\" ready: %zu place(s) to find (%zu bytes)%s\n", L.name.c_str(), L.pairs.size(), bytes,
-                        L.var.empty() ? "" : ", with karma levels");
+                fprintf(stderr, "[mods] live: \"%s\" ready: %zu place(s) to find (%zu bytes)\n", L.name.c_str(), L.pairs.size(), bytes);
             } else {
                 L.err = found ? err : "it changed while it was read";
                 fprintf(stderr, "[mods] live: \"%s\" not used: %s\n", L.name.c_str(), L.err.c_str());
@@ -3160,10 +3077,8 @@ static std::string live_status_locked(const Mod& m)
     if (!m.on) return L && L->revert ? "Off: putting the game's own back" : "Off. A live mod: it changes the game at once, no restart";
     if (!L || !L->built) return "On: getting ready (a few seconds after the game starts)";
     if (!L->err.empty()) return "Not used: " + L->err;
-    std::string lvl;
-    if (!L->var.empty()) lvl = lv.rank >= 0 ? std::string(" (karma level: ") + kKarmaLevels[lv.rank] + ")" : " (karma level not known yet)";
-    if (!L->in_place) return "On" + lvl + ": waiting for the game to load what it changes";
-    return "On now" + lvl + ": " + std::to_string(L->in_place) + " place(s) in memory changed";
+    if (!L->in_place) return "On: waiting for the game to load what it changes";
+    return "On now: " + std::to_string(L->in_place) + " place(s) in memory changed";
 }
 
 static void init_body();
