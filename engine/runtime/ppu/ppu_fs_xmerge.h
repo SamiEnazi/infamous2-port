@@ -46,24 +46,31 @@ static inline void wr32(uint8_t* p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1
 static inline void put32(Bytes& b, uint32_t v) { b.push_back((uint8_t)(v >> 24)); b.push_back((uint8_t)(v >> 16)); b.push_back((uint8_t)(v >> 8)); b.push_back((uint8_t)v); }
 static inline void put16(Bytes& b, uint16_t v) { b.push_back((uint8_t)(v >> 8)); b.push_back((uint8_t)v); }
 
-/* ---- ILNK / CID location lists (word indexes), as the game stores them ---- */
-static std::vector<uint32_t> loc_decode(const uint16_t* t, size_t n)
+/* ---- ILNK / CID location lists (word indexes), as the game stores them ----
+ * Mod files are untrusted: every location must be a word of the data (< words), and the
+ * whole file may decode to at most `budget` locations (shared by all its lists, counted
+ * down), so a run token (up to 16383 locations from 2 bytes) can't blow up. */
+static bool loc_decode(const uint16_t* t, size_t n, uint64_t words, uint64_t& budget, std::vector<uint32_t>& out)
 {
-    std::vector<uint32_t> out;
-    uint32_t page = 0, last = 0;
+    out.clear();
+    uint64_t page = 0, last = 0;
     for (size_t i = 0; i < n; i++) {
         const uint16_t x = t[i];
         if (x >= 0xC000) { page = x & 0x3FFF; continue; }
         if (x >= 0x8000) {
             const uint32_t r = x & 0x3FFF;
-            for (uint32_t k = 1; k <= r; k++) out.push_back(last + k);
+            if (last + r >= words || r > budget) return false;
+            budget -= r;
+            for (uint32_t k = 1; k <= r; k++) out.push_back((uint32_t)(last + k));
             last += r;
             continue;
         }
         last = (page << 15) | x;
-        out.push_back(last);
+        if (last >= words || !budget) return false;
+        budget--;
+        out.push_back((uint32_t)last);
     }
-    return out;
+    return true;
 }
 /* sorted, unique locations -> tokens (runs of 2 or more as one token) */
 static std::vector<uint16_t> loc_encode(const std::vector<uint32_t>& locs)
@@ -111,6 +118,7 @@ struct LinkFile { uint32_t file; std::vector<Block> blocks; };
 struct Arc {
     Bytes head;                        /* the file up to the data (header, tables, anything between) */
     uint32_t tab = 0, dof = 0, nc = 0, nf = 0, ntrail = 0, f0 = 0;
+    uint64_t loc_budget = 0;           /* load: link locations left to decode (see loc_decode) */
     std::vector<std::array<uint32_t, 7>> chunks;   /* type, size, off, ?, ?, first file, files */
     std::vector<std::array<uint32_t, 4>> files;    /* type, size, off, 0 */
     std::vector<std::array<uint32_t, 4>> trail;
@@ -137,8 +145,9 @@ struct Arc {
     std::vector<uint32_t> all_ptr_locs() const;   /* every ILNK location (word index), sorted */
 };
 
-static bool parse_link(const Arc& A, uint32_t fi, LinkFile& L, std::string& err)
+static bool parse_link(const Arc& A, uint32_t fi, LinkFile& L, std::string& err, uint64_t& budget)
 {
+    const uint64_t words = A.data.size() / 4;
     L.file = fi;
     const uint32_t off = A.files[fi][2], sz = A.files[fi][1];
     if ((uint64_t)off + sz > A.data.size()) { err = "a link file is out of range"; return false; }
@@ -167,7 +176,7 @@ static bool parse_link(const Arc& A, uint32_t fi, LinkFile& L, std::string& err)
                 s.toks.resize(nt);
                 for (uint32_t i = 0; i < nt; i++) s.toks[i] = rd16(q + t + 2 * i);
                 t += 2ull * nt;
-                s.locs = loc_decode(s.toks.data(), s.toks.size());
+                if (!loc_decode(s.toks.data(), s.toks.size(), words, budget, s.locs)) { err = "an ILNK list is out of range"; return false; }
                 b.secs.push_back(std::move(s));
             }
         } else if (b.magic == "CID ") {
@@ -176,7 +185,7 @@ static bool parse_link(const Arc& A, uint32_t fi, LinkFile& L, std::string& err)
             if (!need(4 + 2ull * n)) return false;
             b.cid_toks.resize(n);
             for (uint32_t i = 0; i < n; i++) b.cid_toks[i] = rd16(q + 4 + 2 * i);
-            b.cid = loc_decode(b.cid_toks.data(), n);
+            if (!loc_decode(b.cid_toks.data(), n, words, budget, b.cid)) { err = "a CID list is out of range"; return false; }
         } else if (b.magic == "OTYP") {
             if (!need(4)) return false;
             const uint32_t n = rd32(q);
@@ -279,13 +288,17 @@ inline bool Arc::load(const Bytes& d)
 {
     err.clear();
     if (d.size() < 48 || memcmp(d.data(), "PACK", 4)) { err = "not a PACK file"; return false; }
+    /* mod files are untrusted: every size and count is checked against the file (in 64 bits) before use */
     tab = rd32(&d[24]); dof = rd32(&d[40]);
     const uint32_t dsize = rd32(&d[44]);
-    if ((uint64_t)tab + 24 > d.size() || (uint64_t)dof + dsize > d.size() || dof < tab) { err = "its header is out of range"; return false; }
+    if (tab < 24 || dof < 48 || (uint64_t)tab + 24 > d.size() || (uint64_t)dof + dsize > d.size() || dof < (uint64_t)tab + 24) {
+        err = "its header is out of range"; return false;
+    }
     nc = rd32(&d[tab + 4]); nf = rd32(&d[tab + 12]); ntrail = rd32(&d[tab + 20]);
-    f0 = tab + 24 + 28 * nc;
-    const uint64_t te = (uint64_t)f0 + 16ull * nf + 16ull * ntrail;
-    if (te > dof) { err = "its tables run into the data"; return false; }
+    const uint64_t f0w = (uint64_t)tab + 24 + 28ull * nc;
+    const uint64_t te = f0w + 16ull * nf + 16ull * ntrail;
+    if (f0w > dof || te > dof) { err = "its tables run into the data"; return false; }
+    f0 = (uint32_t)f0w;
     chunks.resize(nc); files.resize(nf); trail.resize(ntrail);
     for (uint32_t i = 0; i < nc; i++) for (int j = 0; j < 7; j++) chunks[i][j] = rd32(&d[tab + 24 + 28 * i + 4 * j]);
     for (uint32_t i = 0; i < nf; i++) for (int j = 0; j < 4; j++) files[i][j] = rd32(&d[f0 + 16 * i + 4 * j]);
@@ -295,12 +308,16 @@ inline bool Arc::load(const Bytes& d)
     data.assign(d.begin() + dof, d.begin() + dof + dsize);
     tail.assign(d.begin() + dof + dsize, d.end());
     for (const auto& f : files) if ((uint64_t)f[2] + f[1] > data.size()) { err = "a packed file is out of range"; return false; }
+    for (const auto& c : chunks) {   /* every chunk (not only link chunks): its files and its data are in the file */
+        if ((uint64_t)c[5] + c[6] > nf) { err = "a chunk names packed files that aren't there"; return false; }
+        if ((uint64_t)c[2] + c[1] > data.size()) { err = "a chunk is out of range"; return false; }
+    }
+    loc_budget = data.size() / 2 + 64;   /* (each word at most in a pointer list and a CID list) */
     for (const auto& c : chunks) {
         if (c[0] != 0xFF02) continue;
-        if ((uint64_t)c[5] + c[6] > nf) { err = "a link chunk names files that aren't there"; return false; }
         for (uint32_t fi = c[5]; fi < c[5] + c[6]; fi++) {
             LinkFile L;
-            if (!parse_link(*this, fi, L, err)) return false;
+            if (!parse_link(*this, fi, L, err, loc_budget)) return false;
             links.push_back(std::move(L));
         }
     }
@@ -313,6 +330,7 @@ inline bool Arc::load(const Bytes& d)
  * or trail entries beyond ntrail, grow the tables (the data moves on). */
 inline Bytes Arc::build() const
 {
+    if (tab < 24 || dof < 48 || head.size() < 48 || (uint64_t)tab + 24 > head.size() || f0 > head.size()) return Bytes();   /* (load checks these) */
     Arc A = *this;   /* (copy: link sizes move offsets) */
     for (const LinkFile& L : links) {
         Bytes blob;
@@ -435,7 +453,7 @@ static std::vector<Alias> aliases_of(const Arc& A)
     std::vector<Alias> v;
     for (size_t j = 0; j < A.chunks.size(); j++) {
         const auto& c = A.chunks[j];
-        if (c[0] == 0xFF02) continue;
+        if (c[0] == 0xFF02 || (uint64_t)c[5] + c[6] > A.files.size()) continue;   /* (load refuses such a chunk) */
         for (uint32_t t = 0; t < c[6]; t++) {
             const uint32_t fi = c[5] + t;
             if (!is_alias(A, j, fi)) continue;
@@ -458,6 +476,7 @@ static std::vector<Unit> units_of(const Arc& A, std::string& err)
     for (size_t j = 0; j < A.chunks.size(); j++) {
         const auto& c = A.chunks[j];
         if (c[0] == 0xFF02) continue;
+        if ((uint64_t)c[5] + c[6] > A.files.size() || (uint64_t)c[2] + c[1] > A.data.size()) { err = "a chunk is out of range"; return {}; }
         if (!c[6]) { if (c[1]) { err = "a chunk with data and no packed file"; return {}; } continue; }
         std::vector<uint32_t> own;
         for (uint32_t t = 0; t < c[6]; t++) if (!is_alias(A, j, c[5] + t)) own.push_back(c[5] + t);
@@ -472,7 +491,7 @@ static std::vector<Unit> units_of(const Arc& A, std::string& err)
     }
     {   /* every alias must sit inside some other chunk */
         size_t n = 0;
-        for (size_t j = 0; j < A.chunks.size(); j++) if (A.chunks[j][0] != 0xFF02)
+        for (size_t j = 0; j < A.chunks.size(); j++) if (A.chunks[j][0] != 0xFF02 && (uint64_t)A.chunks[j][5] + A.chunks[j][6] <= A.files.size())
             for (uint32_t t = 0; t < A.chunks[j][6]; t++) if (is_alias(A, j, A.chunks[j][5] + t)) n++;
         if (n != aliases_of(A).size()) { err = "a packed file outside every chunk"; return {}; }
     }

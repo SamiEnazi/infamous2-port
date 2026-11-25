@@ -1090,6 +1090,7 @@ bool Combine::place_copies()
         const uint32_t p0 = bpos[(size_t)bi];
         for (size_t ci : kv.second) {
             CopyOut& c = copies[ci];
+            if (c.align_mod >= 0x40 || (p0 + off) % 4 != c.align_mod % 4) return fail("a copy's alignment can't be met");   /* (would never end) */
             while ((p0 + off) % 0x40 != c.align_mod) off += 4;
             c.base = off;
             off += 4 * (uint32_t)c.words.size();

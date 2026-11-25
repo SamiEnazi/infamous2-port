@@ -1013,6 +1013,54 @@ static void test_alias()
     { std::lock_guard<std::mutex> lk(g.mx); g.use = true; g.list.clear(); g.gen++; }
 }
 
+/* Mod files are untrusted: a broken or hostile PACK file is refused, never read out of range. */
+static void test_hostile_pack()
+{
+    auto mk = [](uint32_t tab, uint32_t dof, uint32_t dsize, uint32_t nc, uint32_t nf, uint32_t nt, size_t size) {
+        xm::Bytes d(size, 0);
+        memcpy(d.data(), "PACK", 4);
+        auto w = [&](size_t at, uint32_t v) { if (at + 4 <= d.size()) xm::wr32(&d[at], v); };
+        w(24, tab); w(40, dof); w(44, dsize);
+        w((size_t)tab + 4, nc); w((size_t)tab + 12, nf); w((size_t)tab + 20, nt);
+        return d;
+    };
+    xm::Arc A;
+    CHECK(A.load(mk(48, 72, 0, 0, 0, 0, 72)));                                   /* empty, fine */
+    CHECK(!A.load(mk(48, 72, 0, 0x40000000u, 0, 0, 72)));                         /* 28 * nc wraps in 32 bits */
+    CHECK(!A.load(mk(48, 72, 0, 0, 0x10000000u, 0x10000000u, 72)));               /* counts past the file */
+    CHECK(!A.load(mk(8, 72, 0, 0, 0, 0, 72)));                                    /* tab < 24 */
+    {   /* dof < 48 (the header words it rewrites are past it) */
+        xm::Bytes d = mk(24, 48, 0, 0, 0, 0, 48);
+        xm::wr32(&d[40], 40);
+        CHECK(!A.load(d));
+    }
+    {   /* a texture chunk naming packed files that aren't there; one past the data */
+        xm::Bytes d = mk(48, 128, 16, 1, 1, 0, 144);
+        const uint32_t c[7] = { 0xFF00, 16, 0, 0, 0, 0, 2 };   /* 2 files, 1 listed */
+        for (int j = 0; j < 7; j++) xm::wr32(&d[72 + 4 * j], c[j]);
+        xm::wr32(&d[100 + 4], 16);                             /* file 0: size 16 at 0 */
+        CHECK(!A.load(d));
+        xm::wr32(&d[72 + 24], 1);                              /* 1 file: fine */
+        CHECK(A.load(d));
+        xm::wr32(&d[72 + 4], 4096);                            /* the chunk's data past the file's */
+        CHECK(!A.load(d));
+    }
+    {   /* location lists: in range, and a run token can't expand past the budget */
+        std::vector<uint32_t> out;
+        uint64_t budget = 100;
+        const uint16_t ok[] = { 0x0002, 0x8003 };
+        CHECK(xm::loc_decode(ok, 2, 10, budget, out) && out.size() == 4 && out[3] == 5 && budget == 96);
+        const uint16_t far[] = { 0x0000, 0xBFFF };
+        budget = 100000;
+        CHECK(!xm::loc_decode(far, 2, 10, budget, out));                         /* past the data */
+        budget = 10;
+        CHECK(!xm::loc_decode(far, 2, 1u << 20, budget, out));                   /* past the budget */
+        const uint16_t page[] = { 0xC3FF, 0x0001 };
+        budget = 10;
+        CHECK(!xm::loc_decode(page, 2, 1000, budget, out));
+    }
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: test_game_mods <work folder> [<downloads> [<game folder>] [<png> <jpg>]]\n"); return 2; }
@@ -1029,6 +1077,8 @@ int main(int argc, char** argv)
     fprintf(stderr, "+merge: %d ok, %d failed\n", g_pass, g_fail);
     test_conflicts();
     fprintf(stderr, "+conflicts: %d ok, %d failed\n", g_pass, g_fail);
+    test_hostile_pack();
+    fprintf(stderr, "+hostile files: %d ok, %d failed\n", g_pass, g_fail);
     test_alias();
     fprintf(stderr, "+file_alias: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 6) test_images(slashes(argv[4]), slashes(argv[5]));
