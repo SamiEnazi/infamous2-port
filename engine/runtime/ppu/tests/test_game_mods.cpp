@@ -51,7 +51,36 @@ extern "C" void ps3_host_restart(const char*) { g_restarts++; }
 
 #include "../ppu_fs_lang.h"
 #include "../ppu_fs_mods.h"
+/* the live mods' guest-memory hooks, which the game provides (unused here) */
+extern "C" { uint8_t* vm_base = nullptr; void (*g_vm_host_io_hook)(uint32_t, uint32_t, int) = nullptr; }
+/* the plugin host (ppu_mod_plugins.h, in the PPU loader): here it records what it was asked to load */
+static std::vector<std::string> g_plug_loaded;
+static std::map<std::string, int> g_plug_on;   /* mod folder -> on */
+static std::string g_plug_json, g_plug_dir, g_plug_pressed, g_plug_sha, g_plug_copy;
+extern "C" int ps3_mod_plugin_load(const char* dll, const char* sha, const char* copy_dir, const char* folder, const char*,
+                                   const char* json_text, const char* data_dir, char* err, size_t cap)
+{
+    g_plug_loaded.push_back(dll); g_plug_json = json_text ? json_text : ""; g_plug_dir = data_dir ? data_dir : "";
+    g_plug_sha = sha ? sha : ""; g_plug_copy = copy_dir ? copy_dir : "";
+    if (strstr(dll, "bad")) { snprintf(err, cap, "it has no ps3_mod_plugin_init"); return 0; }
+    g_plug_on[folder] = 1;
+    return 1;
+}
+extern "C" int ps3_mod_plugin_set_on(const char* folder, int on)
+{
+    if (!g_plug_on.count(folder)) return 0;
+    g_plug_on[folder] = on;
+    return 1;
+}
+extern "C" int ps3_mod_plugin_rows(const char* folder, ps3_mod_row* out, int cap)   /* one row while it is on */
+{
+    if (!g_plug_on.count(folder) || !g_plug_on[folder] || cap < 1) return 0;
+    snprintf(out[0].id, sizeof out[0].id, "go"); snprintf(out[0].label, sizeof out[0].label, "Go");
+    return 1;
+}
+extern "C" void ps3_mod_plugin_press(const char* folder, const char* id) { g_plug_pressed = std::string(folder) + "|" + id; }
 #include "../../../libs/video/mod_preview.h"
+#include "../ppu_mod_pe.h"
 
 using namespace gmods;
 
@@ -84,6 +113,12 @@ static void wipe(const std::string& p)   /* the test's own folders only */
     if (!(a & FILE_ATTRIBUTE_DIRECTORY)) { DeleteFileA(p.c_str()); return; }
     for (const std::string& n : list_dir(p)) wipe(join(p, n));
     RemoveDirectoryA(p.c_str());
+#else
+    struct stat st;
+    if (lstat(p.c_str(), &st) != 0) return;
+    if (!S_ISDIR(st.st_mode)) { unlink(p.c_str()); return; }   /* a file or a link: never followed */
+    for (const std::string& n : list_dir(p)) wipe(join(p, n));
+    rmdir(p.c_str());
 #endif
 }
 
@@ -661,6 +696,594 @@ static void test_real(const std::string& dl, const std::string& game)
     CHECK(check_alone(d, arcs).empty());
 }
 
+/* ---- merging: merge patches ("patch_for") and automatic packed-file merges ------ */
+static void seed_diff(const Mod& m, std::vector<int> changed)   /* what pf_diff would find against the game's file */
+{
+    PfDiff d;
+    d.ok = true; d.changed = changed;
+    const Part& f = m.files[0];
+    g_pf["v2\n" + sig_line("mod", f.path) + "target " + f.target + "\n"] = d;
+}
+
+static void test_merge()
+{
+    g.dir = join(W, "plan"); g.state_path = join(W, "merge_state.ini");
+    remove(g.state_path.c_str());
+    g.start.clear(); g.start_sig.clear(); g.use = true;
+    Mod a = mk("MA", {}, "i2.core.xpps"), b = mk("MB", {}, "i2.core.xpps"), p = mk("MP", {}, "i2.core.xpps");
+    p.patch_for = { "MA", "MB" };
+    Mod c1 = mk("MC1", {}, "zeke.xpps"), c2 = mk("MC2", {}, "zeke.xpps"), c3 = mk("MC3", {}, "zeke.xpps");
+    Mod t = mk("MT", { { "zeke.xpps", 0x40 } });
+    seed_diff(a, { 1, 2 }); seed_diff(b, { 2, 3 }); seed_diff(p, { 1, 2, 3 });
+    seed_diff(c1, { 5 }); seed_diff(c2, { 6 }); seed_diff(c3, { 6, 7 });
+    /* automatic: different packed files merge, the same one clashes, a texture patch always does */
+    CHECK(!mods_clash(c1, c2) && !mods_clash(c2, c1));
+    CHECK(mods_clash(c2, c3) && mods_clash(c3, c2));
+    CHECK(mods_clash(c1, t) && mods_clash(t, c1));
+    Xp x; x.target = "zeke.xpps"; x.index = 7; x.chunk = true; x.choff = 0; x.len = 4;
+    Mod xp7 = mk("MX", {}); xp7.xp.push_back(x); xp7.targets.insert("zeke.xpps");
+    CHECK(!mods_clash(c1, xp7) && mods_clash(c3, xp7));   /* a packed-file patch onto a file another mod replaces */
+    CHECK(mods_clash(a, b));
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.list = { a, b, c1, c2, p };
+        g.gen++;
+        plan_locked();
+        CHECK(g.plan.next[0] && g.plan.next[1] && g.plan.next[2] && g.plan.next[3] && g.plan.next[4]);   /* MP merges MA + MB */
+        std::vector<size_t> used = { 4, 0, 1 };
+        const std::map<size_t, std::set<std::string>> cv = patch_cover(g.list, used);
+        CHECK(cv.count(0) && cv.at(0).count("i2.core.xpps") && cv.count(1) && !cv.count(4));
+        g.list[1].on = false;   /* one of its mods off: the patch steps aside */
+        g.gen++;
+        plan_locked();
+        CHECK(g.plan.next[0] && !g.plan.next[1] && !g.plan.next[4]);
+        CHECK_HAS(g.plan.why[4], "a merge patch, used only while MA and MB are used");
+        g.list[1].on = true; g.list[4].on = false;   /* the patch off: they clash again */
+        g.gen++;
+        plan_locked();
+        CHECK(g.plan.next[0] && !g.plan.next[1]);
+        CHECK_HAS(g.plan.why[1], "same files as MA");
+        g.list.clear();
+        g.gen++;
+    }
+    g_pf.clear();
+}
+
+
+/* ---- conflicts: byte-by-byte merges and the player's choices, end to end ------- */
+static void be32_put(std::string& s, size_t at, uint32_t v) { s[at] = (char)(v >> 24); s[at + 1] = (char)(v >> 16); s[at + 2] = (char)(v >> 8); s[at + 3] = (char)v; }
+/* An XPPS PACK file: one chunk, packed files of the given bytes. */
+static std::string mk_xpps(const std::vector<std::string>& files)
+{
+    const size_t tab = 48, nf = files.size(), data = tab + 24 + 28 + nf * 16;
+    std::string d(data, '\0');
+    memcpy(&d[0], "PACK", 4);
+    uint32_t off = 0;
+    for (size_t i = 0; i < nf; i++) {
+        const size_t r = tab + 24 + 28 + i * 16;
+        be32_put(d, r + 4, (uint32_t)files[i].size()); be32_put(d, r + 8, off);
+        off += (uint32_t)files[i].size();
+    }
+    be32_put(d, 24, (uint32_t)tab); be32_put(d, 40, (uint32_t)data); be32_put(d, 44, off);
+    be32_put(d, tab + 4, 1); be32_put(d, tab + 12, (uint32_t)nf);
+    be32_put(d, tab + 24 + 4, off); be32_put(d, tab + 24 + 8, 0); be32_put(d, tab + 24 + 20, 0); be32_put(d, tab + 24 + 24, (uint32_t)nf);
+    for (const std::string& f : files) d += f;
+    return d;
+}
+/* A PSARC with these files, stored (not compressed). */
+static std::string mk_psarc(const std::vector<std::pair<std::string, std::string>>& files)
+{
+    std::vector<std::string> ent;
+    std::string names;
+    for (auto& f : files) names += "/" + f.first + "\n";
+    ent.push_back(names);
+    for (auto& f : files) ent.push_back(f.second);
+    const uint32_t bsz = 65536, n = (uint32_t)ent.size();
+    std::vector<uint32_t> blocks;
+    std::vector<uint32_t> first;
+    for (const std::string& e : ent) { first.push_back((uint32_t)blocks.size()); for (size_t q = 0; q < e.size() || q == 0; q += bsz) { blocks.push_back((uint32_t)(e.size() - q < bsz ? e.size() - q : 0)); if (e.empty()) break; } }
+    const uint32_t toclen = 32 + n * 30 + (uint32_t)blocks.size() * 2;
+    std::string h(32, '\0');
+    memcpy(&h[0], "PSAR", 4); be32_put(h, 4, 0x00010004); memcpy(&h[8], "zlib", 4);
+    be32_put(h, 12, toclen); be32_put(h, 16, 30); be32_put(h, 20, n); be32_put(h, 24, bsz);
+    std::string toc(n * 30, '\0'), tab;
+    uint64_t off = toclen;
+    for (uint32_t i = 0; i < n; i++) {
+        std::string& r = toc;
+        const size_t q = (size_t)i * 30;
+        be32_put(r, q + 16, first[i]);
+        const uint64_t usz = ent[i].size();
+        for (int k = 0; k < 5; k++) { r[q + 20 + k] = (char)(usz >> (8 * (4 - k))); r[q + 25 + k] = (char)(off >> (8 * (4 - k))); }
+        off += ent[i].size();
+    }
+    for (uint32_t b : blocks) { tab += (char)(b >> 8); tab += (char)b; }
+    std::string out = h + toc + tab;
+    for (const std::string& e : ent) out += e;
+    return out;
+}
+
+static void test_conflicts()
+{
+    /* the byte merge itself */
+    {
+        const uint8_t o[4] = { 1, 2, 3, 4 };
+        Bytes a = { 9, 2, 3, 4 }, b = { 1, 2, 3, 8 }, c = { 7, 2, 3, 4 }, m;
+        CHECK(merge_bytes(o, 4, a, b, m) && m == Bytes({ 9, 2, 3, 8 }));
+        CHECK(!merge_bytes(o, 4, a, c, m));           /* the same byte, two ways */
+        CHECK(merge_bytes(o, 4, a, a, m) && m == a);  /* the same change */
+        CHECK(!merge_bytes(o, 4, a, Bytes({ 1, 2, 3 }), m));
+    }
+    {   /* with changes of size: an insertion and a change elsewhere both kept; the same place: only with a preference */
+        Bytes o(4000);
+        uint32_t x = 12345;
+        for (uint8_t& c : o) { x = x * 1103515245u + 12345u; c = (uint8_t)(x >> 16); }
+        Bytes a = o, b = o, m, want = o;
+        const Bytes ins(37, 0xEE);
+        a.insert(a.begin() + 1000, ins.begin(), ins.end());     /* A inserts 37 bytes at 1000 */
+        b[3000] ^= 0xFF; b.erase(b.begin() + 3500, b.begin() + 3510);   /* B changes 3000, removes 3500..3510 */
+        want[3000] ^= 0xFF; want.erase(want.begin() + 3500, want.begin() + 3510); want.insert(want.begin() + 1000, ins.begin(), ins.end());
+        CHECK(merge3(o.data(), o.size(), a, b, -1, m) && m == want);
+        CHECK(merge3(o.data(), o.size(), b, a, -1, m) && m == want);
+        Bytes c = o; c.insert(c.begin() + 1000, 5, 0x11);      /* C inserts elsewhere-sized bytes at the same place */
+        int ov = 0;
+        CHECK(!merge3(o.data(), o.size(), a, c, -1, m));
+        CHECK(merge3(o.data(), o.size(), a, c, 1, m, &ov) && ov == 1 && m == c);
+        CHECK(merge3(o.data(), o.size(), a, c, 0, m, &ov) && ov == 1 && m == a);
+        Bytes d = o; d[10] = (uint8_t)~d[10];                  /* same size both, same byte: preferred one's */
+        Bytes e = o; e[10] = (uint8_t)(d[10] ^ 1); e[20] ^= 1;
+        CHECK(merge3(o.data(), o.size(), d, e, 0, m, &ov) && ov == 1 && m[10] == d[10] && m[20] == e[20]);
+    }
+    const std::string root = join(W, "cf");
+    wipe(root);
+    mkdirs(join(root, "game/PS3_GAME/USRDIR"));
+    std::vector<std::string> pf;
+    for (int i = 0; i < 3; i++) { std::string x(16, '\0'); for (int k = 0; k < 16; k++) x[k] = (char)(i * 16 + k); pf.push_back(x); }
+    put_file(join(root, "game/PS3_GAME/USRDIR/infamous2.psarc_s"), mk_psarc({ { "zeke.xpps", mk_xpps(pf) } }));
+    static std::string vfs;
+    vfs = join(root, "game");
+    ppu_vfs_root = vfs.c_str();
+    { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf_arcs = Arcs(); g_pf.clear(); g_bm.clear(); }
+    g.dir = join(root, "mods"); g.cache = join(g.dir, ".port_cache"); g.state_path = join(root, "cf_state.ini");
+    g.start.clear(); g.start_sig.clear(); g.use = true;
+    std::vector<std::string> fa = pf, fb = pf;
+    fa[1][0] = (char)0xA1; fa[2][3] = (char)0xA2;   /* A: packed file 1 byte 0, packed file 2 byte 3 */
+    fb[1][5] = (char)0xB1; fb[2][3] = (char)0xB2;   /* B: packed file 1 byte 5 (merges), packed file 2 byte 3 (conflicts) */
+    Mod a = mk("CA", {}, "zeke.xpps"), b = mk("CB", {}, "zeke.xpps");
+    a.path = join(g.dir, "CA"); b.path = join(g.dir, "CB");
+    a.files[0].path = join(a.path, "zeke.xpps"); b.files[0].path = join(b.path, "zeke.xpps");
+    put_file(a.files[0].path, mk_xpps(fa)); put_file(b.files[0].path, mk_xpps(fb));
+    std::vector<Clash> cl;
+    clash_items(a, b, cl);
+    CHECK(cl.size() == 2);
+    if (cl.size() == 2) {
+        CHECK(cl[0].item == "p1" && cl[0].merges);
+        CHECK(cl[1].item == "p2" && !cl[1].merges);
+    }
+    CHECK(mods_clash(a, b));
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.list = { a, b };
+        g.gen++;
+        plan_locked();
+        CHECK(g.plan.next[0] && !g.plan.next[1]);
+        CHECK(g.plan.unres[0] == 1 && g.plan.unres[1] == 1);
+    }
+    ps3_game_mod gm;
+    CHECK(ps3_game_mods_get(1, &gm) && gm.conflicts == 1 && !strcmp(gm.conflicts_with, "CA"));
+    ps3_game_mod_conflict c[8];
+    CHECK(ps3_game_mods_conflicts(1, c, 8) == 2);
+    CHECK(c[0].merges && !c[1].merges && c[1].winner == -1 && c[1].other == 0 && !strcmp(c[1].what, "zeke.xpps, packed file 2"));
+    const int w1[2] = { -1, 0 };   /* CB's version of packed file 2 */
+    CHECK(ps3_game_mods_resolve(1, w1, 2) == 2);   /* not live: a restart */
+    CHECK(ps3_game_mods_conflicts(1, c, 8) == 2 && c[1].winner == 0);
+    CHECK(ps3_game_mods_conflicts(0, c, 8) == 2 && c[1].winner == 1);
+    CHECK(ps3_game_mods_get(1, &gm) && gm.conflicts == 0 && gm.next && !strcmp(gm.merged_with, "CA"));
+    {   /* saved both ways in mods.ini, and read back */
+        const std::map<std::string, Saved> st = state_read();
+        CHECK(st.count("cb") && st.at("cb").res.count("ca|zeke.xpps|p2") && st.at("cb").res.at("ca|zeke.xpps|p2"));
+        CHECK(st.count("ca") && st.at("ca").res.count("cb|zeke.xpps|p2") && !st.at("ca").res.at("cb|zeke.xpps|p2"));
+        CHECK_HAS(get_file(g.state_path), "win = ca|zeke.xpps|p2");
+    }
+    auto served = [&]() {
+        std::vector<Mod> ms;
+        { std::lock_guard<std::mutex> lk(g.mx); ms = g.list; }
+        resolve(ms);
+        std::lock_guard<std::mutex> lk(g.mx);
+        auto it = g.serve.find("zeke.xpps");
+        return it == g.serve.end() ? std::string() : get_file(it->second);
+    };
+    {
+        std::vector<std::string> want = pf;
+        want[1][0] = (char)0xA1; want[1][5] = (char)0xB1; want[2][3] = (char)0xB2;
+        const std::string got = served();
+        CHECK(got == mk_xpps(want));
+        CHECK(g.start["ca"].active && g.start["cb"].active);
+    }
+    const int w2[2] = { -1, 1 };   /* now CA's */
+    CHECK(ps3_game_mods_resolve(1, w2, 2) == 2);
+    {
+        std::vector<std::string> want = pf;
+        want[1][0] = (char)0xA1; want[1][5] = (char)0xB1; want[2][3] = (char)0xA2;
+        CHECK(served() == mk_xpps(want));
+        CHECK(!ps3_game_mods_restart_needed());   /* this "session" now uses what is saved */
+    }
+    {   /* packed files of other sizes combine too: CA grows packed file 0, CB changes it elsewhere */
+        std::vector<std::string> base = pf;   /* packed file 0 made long and varied, as a real one */
+        { uint32_t x = 777; base[0].resize(800); for (char& ch : base[0]) { x = x * 1103515245u + 12345u; ch = (char)(x >> 16); } }
+        put_file(join(root, "game/PS3_GAME/USRDIR/infamous2.psarc_s"), mk_psarc({ { "zeke.xpps", mk_xpps(base) } }));
+        { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf_arcs = Arcs(); }
+        std::vector<std::string> ga = base, gb = base;
+        ga[0].insert(2, "INSERTED-BY-CA");
+        gb[0][300] = (char)0xB0;
+        /* new files (the caches key on name, size and time: a rewrite in the same second would look the same) */
+        auto put2 = [&](int which, const std::string& d, const char* nm) {
+            std::lock_guard<std::mutex> lk(g.mx);
+            Mod& m = g.list[(size_t)which];
+            m.files[0].path = join(m.path, nm);
+            put_file(m.files[0].path, d);
+        };
+        put2(0, mk_xpps(ga), "v2/zeke.xpps"); put2(1, mk_xpps(gb), "v2/zeke.xpps");
+        { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf.clear(); g_bm.clear(); }
+        {
+            std::lock_guard<std::mutex> lk(g.mx);
+            g.list[0].res.clear(); g.list[1].res.clear();
+            g.gen++;
+        }
+        std::vector<Clash> c4;
+        { std::lock_guard<std::mutex> lk(g.mx); clash_items(g.list[0], g.list[1], c4); }
+        CHECK(c4.size() == 1 && c4[0].item == "*" && c4[0].merges);   /* whole copies: combined by the format-aware merge */
+        std::vector<std::string> want = base;
+        want[0][300] = (char)0xB0; want[0].insert(2, "INSERTED-BY-CA");
+        CHECK(served() == mk_xpps(want));
+        CHECK_HAS(get_file(join(g.dir, "merge_log.txt")), "zeke.xpps: CA and CB combined (each one's additions kept)");
+        /* both change the same byte of packed file 0, CB resolved first: combined, CB's byte there */
+        gb[0][500] = (char)0xBB; ga[0][500 + 14] = (char)0xAA;   /* the game's byte 500 (in CA's copy 14 further on) */
+        put2(0, mk_xpps(ga), "v3/zeke.xpps"); put2(1, mk_xpps(gb), "v3/zeke.xpps");
+        { std::lock_guard<std::mutex> lk(g.mx); g.gen++; }
+        CHECK(ps3_game_mods_conflicts(1, c, 8) == 1 && !c[0].merges);
+        const int w3[1] = { 0 };
+        CHECK(ps3_game_mods_resolve(1, w3, 1) == 2);
+        std::vector<std::string> want2 = base;
+        want2[0][300] = (char)0xB0; want2[0][500] = (char)0xBB; want2[0].insert(2, "INSERTED-BY-CA");
+        CHECK(served() == mk_xpps(want2));
+        CHECK_HAS(get_file(join(g.dir, "merge_log.txt")), "CB's used there");
+        /* CA adds packed files at the end (as a new power does): CB's changes go into CA's copy */
+        std::vector<std::string> ga4 = base, gb4 = base;
+        ga4.push_back("NEW-PACKED-FILE-ONE"); ga4.push_back("NEW-PACKED-FILE-TWO");
+        ga4[1][1] = (char)0xA4;
+        gb4[0][300] = (char)0xB4; gb4[1][4] = (char)0xB5;
+        put2(0, mk_xpps(ga4), "v4/zeke.xpps"); put2(1, mk_xpps(gb4), "v4/zeke.xpps");
+        { std::lock_guard<std::mutex> lk(g.mx); g.list[0].res.clear(); g.list[1].res.clear(); g.gen++; }
+        std::vector<Clash> c5;
+        { std::lock_guard<std::mutex> lk(g.mx); clash_items(g.list[0], g.list[1], c5); }
+        CHECK(c5.size() == 1 && c5[0].item == "p1" && c5[0].merges);
+        std::vector<std::string> want4 = ga4;
+        want4[0][300] = (char)0xB4; want4[1][4] = (char)0xB5;
+        CHECK(served() == mk_xpps(want4));
+        CHECK_HAS(get_file(join(g.dir, "merge_log.txt")), "built from CA's copy (it adds 2 packed file(s))");
+        {   /* both add packed files: the whole file, one of them */
+            std::vector<std::string> gb5 = gb4;
+            gb5.push_back("CB-ADDS-ONE");
+            put2(1, mk_xpps(gb5), "v5/zeke.xpps");
+            std::vector<Clash> c6;
+            { std::lock_guard<std::mutex> lk(g.mx); g.gen++; clash_items(g.list[0], g.list[1], c6); }
+            CHECK(c6.size() == 1 && c6[0].item == "*" && !c6[0].merges);
+        }
+    }
+    {   /* a texture patch onto a file another mod replaces: the whole file is the part */
+        Mod t = mk("CT", { { "zeke.xpps", 0x10 } });
+        std::vector<Clash> c2;
+        clash_items(a, t, c2);
+        CHECK(c2.size() == 1 && c2[0].item == "*" && !c2[0].merges);
+        t.res["ca|zeke.xpps|*"] = true;
+        CHECK(!mods_clash(a, t));
+        std::vector<Mod> fm = { a, t };
+        merge_used(fm, { 0, 1 }, {});
+        CHECK(fm[0].files.empty() && fm[1].tex.size() == 1);
+    }
+    {   /* a live mod against a regular one: no question asked, the regular mod keeps every part
+           (the live mod leaves its overlapping windows out), even with an old "live wins" line */
+        Mod l = b; l.live = true; l.folder = "CL"; l.name = "CL";
+        std::vector<Clash> c3;
+        clash_items(a, l, c3);
+        CHECK(!c3.empty());
+        bool all = true;
+        for (const Clash& k : c3) all = all && k.merges;
+        CHECK(all && !mods_clash(a, l));
+        l.res["ca|zeke.xpps|p0"] = true; a.res["cl|zeke.xpps|p0"] = false;
+        std::vector<Mod> fm = { a, l };
+        merge_used(fm, { 0 }, {}, { 1 });
+        CHECK(fm[0].files.size() == a.files.size());
+        bool nodrop = true;
+        for (const Part& p : fm[0].files) nodrop = nodrop && p.drop.empty();
+        CHECK(nodrop);
+    }
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.list.clear(); g.gen++;
+    }
+    g.cache.clear();
+    ppu_vfs_root = ".";
+    { std::lock_guard<std::mutex> lk(g_pf_mx); g_pf_arcs = Arcs(); g_pf.clear(); g_bm.clear(); }
+}
+
+/* ---- mod.json "plugin": a mod's own code runs only once the player allowed that very file, and goes on
+ * and off with the mod at once ---------------------------------------------------------------------- */
+static void test_plugins()
+{
+    const std::string d = join(W, "plug");
+    wipe(d);
+    put_file(join(d, "Dash/mod.json"), "{\"game\": \"inf2\", \"name\": \"Dash\", \"plugin\": \"plugin.dll\", \"dash\": {\"speed\": 2}}");
+    put_file(join(d, "Dash/plugin.dll"), "MZ one");
+    put_file(join(d, "Dash/files/x.xpps"), "x");
+    put_file(join(d, "Out/mod.json"), "{\"game\": \"inf2\", \"name\": \"Out\", \"plugin\": \"../Dash/plugin.dll\"}");
+    put_file(join(d, "Gone/mod.json"), "{\"game\": \"inf2\", \"name\": \"Gone\", \"plugin\": \"none.dll\"}");
+    put_file(join(d, "Bad/mod.json"), "{\"game\": \"inf2\", \"name\": \"Bad\", \"plugin\": \"bad.dll\"}");
+    put_file(join(d, "Bad/bad.dll"), "MZ bad");
+    put_file(join(d, "Only/mod.json"), "{\"game\": \"inf2\", \"name\": \"Only\", \"plugin\": \"plugin.dll\"}");   /* code only */
+    put_file(join(d, "Only/plugin.dll"), "MZ only");
+    g.dir = d; g.state_path = join(W, "plug_state.ini"); g.use = true; g.cache = join(d, ".port_cache"); g.code_on = false;
+    remove(g.state_path.c_str());
+    g_plug_loaded.clear(); g_plug_on.clear();
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.code_loaded.clear(); g.code_path.clear(); g.code_state.clear(); g.code_failed.clear(); g.code_fail_msg.clear(); g.start.clear();
+        g.list = scan(); g.gen++;
+    }
+    auto idx = [](const char* f) { for (size_t i = 0; i < g.list.size(); i++) if (g.list[i].folder == f) return (int)i; return -1; };
+    const int ia = idx("Dash"), io = idx("Out"), ig = idx("Gone"), ib = idx("Bad");
+    CHECK(ia >= 0 && io >= 0 && ig >= 0 && ib >= 0);
+    if (ia < 0 || io < 0 || ig < 0 || ib < 0) return;
+    const std::string dash = g.list[(size_t)ia].path;
+    CHECK(!g.list[(size_t)ia].plugin.empty() && g.list[(size_t)ia].plugin_hash == sha256::hex("MZ one", 6));
+    auto allow = [](int i) {   /* as the dialog does: the hash it showed */
+        ps3_game_mod_code c;
+        return ps3_game_mods_code_info(i, &c) && ps3_game_mods_allow_code(i, 1, c.sha256);
+    };
+    {
+        ps3_game_mod_code c;
+        CHECK(ps3_game_mods_code_info(ia, &c) && !strcmp(c.file, "plugin.dll") && c.size == 6 && strlen(c.sha256) == 64 && !c.signer[0]);
+        CHECK(!ps3_game_mods_code_info(io, &c));
+    }
+    CHECK(g.list[(size_t)io].plugin.empty() && !g.list[(size_t)io].plugin_err.empty());   /* out of its folder: refused */
+    CHECK(g.list[(size_t)ig].plugin.empty() && !g.list[(size_t)ig].plugin_err.empty());   /* no such file */
+    { std::lock_guard<std::mutex> lk(g.mx); code_sync_locked(g.list); }
+    CHECK(g_plug_loaded.empty());                                               /* nothing allowed: nothing loaded */
+    CHECK(g.code_state["dash"].find("not allowed") != std::string::npos);
+    CHECK(!ps3_game_mods_code_enabled());                                       /* "Mods may run code": off by default */
+    CHECK(!ps3_game_mods_allow_code(ia, 1, nullptr));                           /* no hash shown: not allowed */
+    CHECK(!ps3_game_mods_allow_code(ia, 1, std::string(64, '0').c_str()));      /* another file's hash: not allowed */
+    CHECK(g.list[(size_t)ia].code_ok.empty());
+    CHECK(allow(ia));                                                           /* allowed, but code may not run yet */
+    CHECK(g_plug_loaded.empty() && g.code_state["dash"].find("may not run code") != std::string::npos);
+    {
+        ps3_game_mod m;
+        CHECK(ps3_game_mods_get(ia, &m) && m.code_allowed && strstr(m.code_msg, "Mods may run code"));
+    }
+    ps3_game_mods_set_code_enabled(1);                                          /* loaded at once */
+    CHECK(g_plug_loaded.size() == 1 && g_plug_on[dash] == 1 && g.code_loaded.count("dash"));
+    CHECK(g_plug_sha == g.list[(size_t)ia].plugin_hash && g_plug_copy == join(g.cache, "plugins") && is_dir(g_plug_copy));
+    {   /* saved in mods.ini, read back */
+        std::vector<std::string> zd;
+        bool con = false;
+        state_read(&zd, &con);
+        CHECK(con);
+    }
+    ps3_game_mods_set_code_enabled(0);                                          /* the switch off: every plugin off at once */
+    CHECK(g_plug_on[dash] == 0 && g_plug_loaded.size() == 1);
+    {
+        std::vector<std::string> zd;
+        bool con = true;
+        state_read(&zd, &con);
+        CHECK(!con);
+    }
+    ps3_game_mods_set_code_enabled(1);
+    CHECK(g_plug_on[dash] == 1 && g_plug_loaded.size() == 1);
+    CHECK(g_plug_json.find("\"dash\"") != std::string::npos);                 /* the plugin gets its mod.json */
+    {
+        ps3_game_mod m;
+        CHECK(ps3_game_mods_get(ia, &m) && m.has_code && m.code_allowed && strstr(m.code_msg, "running"));
+    }
+    ps3_game_mods_set_on(ia, 0);                                                /* off at once, not unloaded */
+    CHECK(g_plug_on[dash] == 0 && g_plug_loaded.size() == 1);
+    ps3_game_mods_set_on(ia, 1);                                                /* on again: not loaded twice */
+    CHECK(g_plug_on[dash] == 1 && g_plug_loaded.size() == 1);
+    {   /* saved: a new start reads the allowed hash */
+        std::vector<Mod> L = scan();
+        for (const Mod& m : L) if (m.folder == "Dash") CHECK(m.code_ok == m.plugin_hash);
+    }
+    ps3_game_mods_allow_code(ia, 0, nullptr);                                   /* not allowed: off at once */
+    CHECK(g_plug_on[dash] == 0);
+    CHECK(allow(ia));
+    CHECK(g_plug_on[dash] == 1);
+    {   /* a changed file: the loaded one keeps running until a restart; allowed again, the next start uses it */
+        put_file(join(d, "Dash/plugin.dll"), "MZ two");
+        ps3_game_mods_rescan();
+        CHECK(g.code_state["dash"].find("not allowed") != std::string::npos || g.code_state["dash"].find("allow it again") != std::string::npos);
+        CHECK(g_plug_on[dash] == 0);
+        CHECK(!ps3_game_mods_allow_code(idx("Dash"), 1, sha256::hex("MZ one", 6).c_str()));   /* the old file's hash */
+        CHECK(allow(idx("Dash")));
+        CHECK(g_plug_on[dash] == 1 && g.code_state["dash"].find("next start") != std::string::npos && g_plug_loaded.size() == 1);
+    }
+    {   /* a plugin that does not set up: logged */
+        CHECK(allow(idx("Bad")));
+        CHECK(g.code_state["bad"].find("no ps3_mod_plugin_init") != std::string::npos);
+        const size_t tries = g_plug_loaded.size();
+        ps3_game_mods_set_on(idx("Bad"), 0); ps3_game_mods_set_on(idx("Bad"), 1);   /* not tried again */
+        CHECK(g_plug_loaded.size() == tries && g.code_state["bad"].find("no ps3_mod_plugin_init") != std::string::npos);
+    }
+    {   /* code only: a mod of its own (no files needed), on and off at once; its own data folder; its menu rows */
+        const int iy = idx("Only");
+        CHECK(iy >= 0 && g.list[(size_t)iy].err.empty());
+        ps3_game_mod m;
+        CHECK(ps3_game_mods_get(iy, &m) && m.code_only && strstr(m.status, "not allowed"));
+        ps3_mod_row rows[4];
+        CHECK(ps3_game_mods_rows(iy, rows, 4) == 0);                            /* not allowed: no rows */
+        CHECK(allow(iy));
+        const std::string only = g.list[(size_t)iy].path;
+        CHECK(g_plug_on[only] == 1 && g_plug_dir == join(g.cache, "only") && is_dir(g_plug_dir));
+        CHECK(ps3_game_mods_get(iy, &m) && strstr(m.status, "running"));
+        CHECK(ps3_game_mods_rows(iy, rows, 4) == 1 && !strcmp(rows[0].id, "go"));
+        ps3_game_mods_row_press(iy, "go");
+        CHECK(g_plug_pressed == only + "|go");
+        ps3_game_mods_set_on(iy, 0);
+        CHECK(g_plug_on[only] == 0 && ps3_game_mods_rows(iy, rows, 4) == 0 && ps3_game_mods_get(iy, &m) && !strcmp(m.status, "Off"));
+        g_plug_pressed.clear();
+        ps3_game_mods_row_press(iy, "go");                                      /* off: not passed on */
+        CHECK(g_plug_pressed.empty());
+    }
+    {   /* its mod gone from the folder: off */
+        wipe(join(d, "Dash"));
+        ps3_game_mods_rescan();
+        CHECK(g_plug_on[dash] == 0);
+    }
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        g.list.clear(); g.start.clear(); g.code_loaded.clear(); g.code_path.clear(); g.code_state.clear(); g.code_failed.clear(); g.code_fail_msg.clear(); g.gen++;
+        g.code_on = false;
+    }
+}
+
+/* ---- the plugin host's own checks: SHA-256, and the DLLs a plugin imports (ppu_mod_pe.h) ---- */
+static Bytes tiny_pe(const char* imp, const char* delay, uint16_t machine = 0x8664)
+{
+    Bytes b(0x400, 0);
+    auto w16 = [&](size_t o, uint32_t v) { b[o] = (uint8_t)v; b[o + 1] = (uint8_t)(v >> 8); };
+    auto w32 = [&](size_t o, uint32_t v) { for (int k = 0; k < 4; k++) b[o + k] = (uint8_t)(v >> (8 * k)); };
+    b[0] = 'M'; b[1] = 'Z'; w32(0x3C, 0x40);
+    b[0x40] = 'P'; b[0x41] = 'E';
+    w16(0x44, machine); w16(0x46, 1); w16(0x54, 240);           /* x64, one section, PE32+ optional header */
+    const size_t opt = 0x58;
+    w16(opt, 0x20B); w32(opt + 108, 16);
+    if (imp) { w32(opt + 112 + 8, 0x1000); w32(opt + 112 + 12, 40); }
+    if (delay) { w32(opt + 112 + 8 * 13, 0x1040); w32(opt + 112 + 8 * 13 + 4, 64); }
+    const size_t sec = opt + 240;
+    w32(sec + 8, 0x200); w32(sec + 12, 0x1000); w32(sec + 16, 0x200); w32(sec + 20, 0x200);
+    if (imp) { w32(0x200 + 12, 0x1100); memcpy(&b[0x300], imp, strlen(imp)); }
+    if (delay) { w32(0x240 + 4, 0x1120); memcpy(&b[0x320], delay, strlen(delay)); }
+    return b;
+}
+static void test_plugin_checks()
+{
+    CHECK(sha256::hex("abc", 3) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    CHECK(sha256::hex("", 0) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    {
+        const char* m = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        CHECK(sha256::hex(m, strlen(m)) == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+        const std::string a(1000000, 'a');
+        CHECK(sha256::hex(a.data(), a.size()) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    }
+    std::vector<std::string> nm;
+    std::string err;
+    Bytes p = tiny_pe("KERNEL32.dll", "local.dll");
+    CHECK(modpe::imports(p.data(), p.size(), nm, err) && nm.size() == 2 && nm[0] == "KERNEL32.dll" && nm[1] == "local.dll");
+    p = tiny_pe(nullptr, nullptr);
+    CHECK(modpe::imports(p.data(), p.size(), nm, err) && nm.empty());
+    p = tiny_pe("KERNEL32.dll", nullptr, 0x14C);
+    CHECK(!modpe::imports(p.data(), p.size(), nm, err) && has(err, "64-bit"));
+    p = tiny_pe("KERNEL32.dll", nullptr);
+    CHECK(!modpe::imports(p.data(), 0x210, nm, err));                          /* cut short */
+    p[0x200 + 12] = 0xF0; p[0x200 + 13] = 0xFF;                                 /* a name outside the file */
+    CHECK(!modpe::imports(p.data(), p.size(), nm, err) && has(err, "import table"));
+    p = tiny_pe("KERNEL32.dll", nullptr);
+    for (size_t k = 0x300; k < 0x400; k++) p[k] = 'A';                          /* a name with no end */
+    CHECK(!modpe::imports(p.data(), p.size(), nm, err));
+    p = tiny_pe("KERNEL32.dll", nullptr);
+    p[0x46] = 200;                                                              /* 200 sections */
+    CHECK(!modpe::imports(p.data(), p.size(), nm, err));
+    const uint8_t junk[8] = { 'M', 'Z', 1, 2, 3 };
+    CHECK(!modpe::imports(junk, sizeof junk, nm, err));
+    CHECK(modpe::plain_name("user32.dll") && !modpe::plain_name("..\\x.dll") && !modpe::plain_name("C:/x.dll") && !modpe::plain_name(""));
+    CHECK(modpe::api_set("API-MS-Win-Core-Synch-L1-2-0.dll") && modpe::api_set("ext-ms-win-x.dll") && !modpe::api_set("apims.dll"));
+}
+
+/* mod.json "file_alias": a USRDIR file the game lacks is read from another of
+ * its files while the mod is on; never when the game has the file, never a
+ * path out of the game folder. */
+static void test_alias()
+{
+    g.dir = join(W, "alias"); g.state_path = join(W, "alias_state.ini");
+    remove(g.state_path.c_str());
+    g.start.clear(); g.start_sig.clear(); g.use = true;
+    wipe(g.dir);
+    put_file(join(g.dir, "P/mod.json"), "{\"game\": \"inf2\", \"name\": \"P\", \"file_alias\": {"
+             "\"movies/ui/powerk_bolt9.bik\": \"movies/ui/powerk_fatbolt.bik\", "
+             "\"Movies\\\\UI\\\\powerk_bolt0.bik\": \"movies/ui/powerk_autobolt.bik\", "
+             "\"movies/ui/powerk_r2_8.bik\": \"movies/../../secret.bik\", "
+             "\"movies/ui/powerk_r2_9.bik\": \"movies/ui/powerk_none.bik\", "
+             "\"movies/ui/powerk_fatbolt.bik\": \"movies/ui/powerk_autobolt.bik\"}}");
+    put_file(join(g.dir, "P/files/x.xpps"), "x");
+    const std::string U = join(W, "alias_game/USRDIR/");
+    put_file(U + "movies/ui/powerk_fatbolt.bik", "magnum");
+    put_file(U + "movies/ui/powerk_autobolt.bik", "stream");
+    { std::lock_guard<std::mutex> lk(g.mx); g.list = scan(); g.gen++; }
+    CHECK(g.list.size() == 1 && g.list[0].err.empty() && g.list[0].alias.size() == 4);   /* the ../ one is refused */
+    auto at = [&](const char* rel) {
+        char out[1100];
+        snprintf(out, sizeof out, "%s%s", U.c_str(), rel);
+        redirect((std::string("/dev_bdvd/PS3_GAME/USRDIR/") + rel).c_str(), out, sizeof out);
+        return std::string(out);
+    };
+    CHECK(at("movies/ui/powerk_bolt9.bik") == U + "movies/ui/powerk_fatbolt.bik");
+    CHECK(at("movies/ui/POWERK_BOLT0.bik") == U + "movies/ui/powerk_autobolt.bik");   /* any case, '\\' in mod.json */
+    CHECK(at("movies/ui/powerk_r2_9.bik") == U + "movies/ui/powerk_r2_9.bik");        /* the target is missing too */
+    CHECK(at("movies/ui/powerk_fatbolt.bik") == U + "movies/ui/powerk_fatbolt.bik");  /* the game has it: kept */
+    CHECK(at("movies/ui/powerk_bolt8.bik") == U + "movies/ui/powerk_bolt8.bik");
+    { std::lock_guard<std::mutex> lk(g.mx); g.list[0].on = false; }
+    CHECK(at("movies/ui/powerk_bolt9.bik") == U + "movies/ui/powerk_bolt9.bik");      /* mod off */
+    { std::lock_guard<std::mutex> lk(g.mx); g.list[0].on = true; g.use = false; }
+    CHECK(at("movies/ui/powerk_bolt9.bik") == U + "movies/ui/powerk_bolt9.bik");      /* mods off */
+    { std::lock_guard<std::mutex> lk(g.mx); g.use = true; g.list.clear(); g.gen++; }
+}
+
+/* Mod files are untrusted: a broken or hostile PACK file is refused, never read out of range. */
+static void test_hostile_pack()
+{
+    auto mk = [](uint32_t tab, uint32_t dof, uint32_t dsize, uint32_t nc, uint32_t nf, uint32_t nt, size_t size) {
+        xm::Bytes d(size, 0);
+        memcpy(d.data(), "PACK", 4);
+        auto w = [&](size_t at, uint32_t v) { if (at + 4 <= d.size()) xm::wr32(&d[at], v); };
+        w(24, tab); w(40, dof); w(44, dsize);
+        w((size_t)tab + 4, nc); w((size_t)tab + 12, nf); w((size_t)tab + 20, nt);
+        return d;
+    };
+    xm::Arc A;
+    CHECK(A.load(mk(48, 72, 0, 0, 0, 0, 72)));                                   /* empty, fine */
+    CHECK(!A.load(mk(48, 72, 0, 0x40000000u, 0, 0, 72)));                         /* 28 * nc wraps in 32 bits */
+    CHECK(!A.load(mk(48, 72, 0, 0, 0x10000000u, 0x10000000u, 72)));               /* counts past the file */
+    CHECK(!A.load(mk(8, 72, 0, 0, 0, 0, 72)));                                    /* tab < 24 */
+    {   /* dof < 48 (the header words it rewrites are past it) */
+        xm::Bytes d = mk(24, 48, 0, 0, 0, 0, 48);
+        xm::wr32(&d[40], 40);
+        CHECK(!A.load(d));
+    }
+    {   /* a texture chunk naming packed files that aren't there; one past the data */
+        xm::Bytes d = mk(48, 128, 16, 1, 1, 0, 144);
+        const uint32_t c[7] = { 0xFF00, 16, 0, 0, 0, 0, 2 };   /* 2 files, 1 listed */
+        for (int j = 0; j < 7; j++) xm::wr32(&d[72 + 4 * j], c[j]);
+        xm::wr32(&d[100 + 4], 16);                             /* file 0: size 16 at 0 */
+        CHECK(!A.load(d));
+        xm::wr32(&d[72 + 24], 1);                              /* 1 file: fine */
+        CHECK(A.load(d));
+        xm::wr32(&d[72 + 4], 4096);                            /* the chunk's data past the file's */
+        CHECK(!A.load(d));
+    }
+    {   /* location lists: in range, and a run token can't expand past the budget */
+        std::vector<uint32_t> out;
+        uint64_t budget = 100;
+        const uint16_t ok[] = { 0x0002, 0x8003 };
+        CHECK(xm::loc_decode(ok, 2, 10, budget, out) && out.size() == 4 && out[3] == 5 && budget == 96);
+        const uint16_t beyond[] = { 0x0000, 0xBFFF };
+        budget = 100000;
+        CHECK(!xm::loc_decode(beyond, 2, 10, budget, out));                         /* past the data */
+        budget = 10;
+        CHECK(!xm::loc_decode(beyond, 2, 1u << 20, budget, out));                   /* past the budget */
+        const uint16_t page[] = { 0xC3FF, 0x0001 };
+        budget = 10;
+        CHECK(!xm::loc_decode(page, 2, 1000, budget, out));
+    }
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: test_game_mods <work folder> [<downloads> [<game folder>] [<png> <jpg>]]\n"); return 2; }
@@ -673,6 +1296,17 @@ int main(int argc, char** argv)
     fprintf(stderr, "+plan: %d ok, %d failed\n", g_pass, g_fail);
     test_state();
     fprintf(stderr, "+mods.ini: %d ok, %d failed\n", g_pass, g_fail);
+    test_merge();
+    fprintf(stderr, "+merge: %d ok, %d failed\n", g_pass, g_fail);
+    test_conflicts();
+    fprintf(stderr, "+conflicts: %d ok, %d failed\n", g_pass, g_fail);
+    test_hostile_pack();
+    fprintf(stderr, "+hostile files: %d ok, %d failed\n", g_pass, g_fail);
+    test_plugins();
+    test_plugin_checks();
+    fprintf(stderr, "+plugins: %d ok, %d failed\n", g_pass, g_fail);
+    test_alias();
+    fprintf(stderr, "+file_alias: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 6) test_images(slashes(argv[4]), slashes(argv[5]));
     fprintf(stderr, "+images: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 3) test_real(slashes(argv[2]), argc >= 4 ? slashes(argv[3]) : std::string());
