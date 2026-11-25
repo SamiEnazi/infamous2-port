@@ -36,7 +36,23 @@ typedef struct {
     int  clash;           /* left out from the next start by a clash, and "Use this one instead" would use it */
     char prefer[240];     /* with clash: what that does ("Climbing Gloves and Karmic Logo Tshirt will be left out") */
     char status[300];     /* one line for the menu: what it changes, or why it is not used */
+    int  live;            /* mod.json "live": true -- on and off at once, no restart (patched in memory) */
+    int  conflicts;       /* parts it and other mods that are on both change, not resolved (ps3_game_mods_conflicts) */
+    char conflicts_with[200]; /* ... with whom ("Climbing Gloves and Karmic Logo Tshirt") */
+    char merged_with[200];    /* the mods it is merged with: every part both change merges or was resolved */
 } ps3_game_mod;
+
+/* A part of a game file that a mod and another mod that is on both change. */
+typedef struct {
+    int  other;           /* the other mod's index */
+    char other_name[96];
+    char file[128];       /* the game file ("cole.xpps") */
+    char part[24];        /* "p80" packed file 80, "t1a000" the texture at that data offset, "*" the whole file */
+    char what[200];       /* "cole.xpps, packed file 80" */
+    int  merges;          /* merged byte by byte (they change different bytes of it): nothing to choose */
+    int  winner;          /* the player's choice: 0 this mod's version, 1 the other's, -1 none yet */
+    int  live;            /* one of the two is a live mod: the choice applies at once for it */
+} ps3_game_mod_conflict;
 
 typedef struct {
     char id[64];
@@ -69,6 +85,14 @@ void ps3_game_mods_set_on(int i, int on);    /* saved; next start */
 void ps3_game_mods_pick(int i, int k, int on); /* an option on/off (a dropdown's: chosen) */
 int  ps3_game_mods_prefer(int i);            /* "Use this one instead": saved; 1 = done */
 int  ps3_game_mods_restart_needed(void);     /* the saved choices differ from what this session uses */
+/* Conflicts (the Mods page asks when a mod is turned on): the parts mod i and the
+ * other mods that are on both change, at most cap of them; returns how many there
+ * are. ps3_game_mods_resolve saves whose version each part uses (winners[k] for the
+ * list's k-th part, in the same order: 0 mod i's, 1 the other mod's, -1 unchanged);
+ * the rest of both mods is used, merged. Returns 0 nothing saved, 1 saved and in
+ * use now (live mods only), 2 saved: the game must restart to use it. */
+int  ps3_game_mods_conflicts(int i, ps3_game_mod_conflict* out, int cap);
+int  ps3_game_mods_resolve(int i, const int* winners, int n);
 int  ps3_game_mods_image(int i, char* out, size_t cap); /* the preview picture's path; 1 = one to show */
 unsigned ps3_game_mods_generation(void);     /* changes whenever the list or a choice changes */
 void ps3_game_mods_rescan(void);             /* re-read the folder for the menu */

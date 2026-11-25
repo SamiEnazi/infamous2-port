@@ -56,10 +56,14 @@ The page also says why a mod is not used:
 - its `mod.json` doesn't name the game,
 - one of its files is broken (for example, a texture whose header doesn't
   match its name),
-- it changes the same file as a mod that comes before it.
+- it changes the same file as a mod that comes before it, and the two can't
+  be merged,
+- it is a merge patch and not every mod it names is used.
 
 When two mods change the same thing, the Manager refuses to turn on the second
-one. Here the one that comes first is used and the other is left out whole.
+one. Here the port first tries to merge them (see **Merging** below); only
+when that can't be done is the one that comes first used and the other left
+out whole.
 First means: the mods you put first with **Use this one instead** (each goes
 above every mod it clashes with), then the rest by folder name. "The same thing" means the same
 whole file, a texture at the same offset, an overlapping packed-file patch, or
@@ -69,6 +73,66 @@ works alone, the last one in that order is left out. The page's view of the
 next start uses the clash rule only (nothing is built while you choose); the
 start itself builds everything, and a mod whose file could not be built this
 time stays shown as not used until it or the mods it failed with change.
+
+### Merging
+
+Two mods that change the same file are both used when the port can merge them:
+
+- **Different packed files, merged by themselves.** An `.xpps` file holds
+  packed files. When mods replace the same whole file (or one replaces it and
+  another patches packed files in it with `xpps_patches`), each mod's copy is
+  compared with the game's, packed file by packed file. If they changed
+  different packed files, the game gets its own file with each mod's changed
+  packed files put in (as `file_<i>_...` patches would) and the other mods'
+  packed-file patches on top. A copy that adds packed files at the end (a
+  new power usually does) is fine too: then the others' changed packed files
+  go into that copy instead of the game's. Two copies that both add packed
+  files, or a texture patch onto such a file, can't be combined. The comparison reads both files once; it is cached in
+  `mods\.port_cache\merge` (by the mod file's size and time) for the next
+  starts. Log lines start with `[mods] merge:`.
+- **A merge patch, for mods that change the same parts.** A third mod can
+  carry the file with both mods' changes and say which mods it merges:
+
+  ```
+  {"game": "inf2", "name": "Lightning Bolt + Electric Dash patch", "patch_for": ["Lightning Bolt", "Electric Dash"], ...}
+  ```
+
+  Each name is a mod's folder or name. The patch is used only while every
+  mod it names is used. Then its files replace theirs for the files it has,
+  those files are no longer a clash between them (or with the patch), and
+  their other files are used as always. With one of them off, the page says
+  "a merge patch, used only while ... are used" and the other is used alone;
+  with the patch off, they clash as before. The Manager ignores the key.
+- **The same packed file, combined.** When two mods change the same packed
+  file in different places, the port combines it: the game's copy with both
+  mods' changes (a three-way merge). Bytes a mod inserted or removed are
+  fine: the copies are matched on 16-byte runs that occur once in both, so
+  everything after an insertion moves with it. Changes closer together than
+  about 16 bytes count as one place.
+- **Conflicts: the same place.** When both change the very same place of a
+  packed file (or something that can't be combined: a texture at the same
+  offset, a texture patch onto a file the other replaces, two copies that
+  both add packed files), turning the second mod on asks **Combine these
+  mods?**. **Combine** combines everything as above, and where both change
+  the same place the mod you just turned on is used there (a checkbox gives
+  those places to the other mod instead); a part that can't be combined uses
+  that mod's version. **Turn ... off** keeps the other one; **Later** leaves
+  the mod out until you press **Combine** on its row. The choice is saved in
+  `mods.ini` in both mods' sections (`win = <other folder>|<file>|<part>`,
+  `lose = ...`); **Change** on the mod's **Combined** row changes it.
+- **Restart, and taking a mod back out.** Regular mods are built at start,
+  so after **Combine** the page offers **Restart now** or **Later** (a mod
+  that combines on its own when you turn it on gets the same question). Live
+  mods take it at once. Nothing is ever written into the game's or the mods'
+  files: every start builds the combined files again from the game's own and
+  the mods that are on, so turning a mod off takes its changes back out.
+  What each file got from which mod is written to `merge_log.txt` in the
+  mods folder at every start (and to the session log, `[mods] merge:`).
+  Live mods are never combined byte by byte and never asked about with a
+  regular mod: the regular mod's file is used whole and the live mod's
+  bytes are written on top in memory wherever its own windows are found
+  there (where the regular mod changed those very bytes, they are not).
+  Between two live mods, the mod you turned on keeps a part both change.
 
 Downloaded mods are treated as untrusted:
 
@@ -148,6 +212,10 @@ applied), and the new one waits for the old one to end.
 
 ```
 <mod>/mod.json        {"game": "inf2", "name": ..., "author": ..., "version": ...}
+                      port only: "patch_for": [mods] (a merge patch, see Merging),
+                      "discover_powers": [power numbers], "file_alias": {missing: stand-in}
+                      (see New powers),
+                      "karma_patches" (see Karma patches)
 <mod>/files/          .xpps files that replace the game's (by file name, any subfolder;
                       a mod with no files/ folder keeps them in the mod folder itself)
 <files>/texture_patches/<target>.xpps/[data]<OFFSET>_..._<W>x<H>_<DXTn>_m<mips>.dds
@@ -168,6 +236,124 @@ applied), and the new one waits for the old one to end.
 
 The game's file names are flat (`cole_default.xpps`, `zeke.xpps`), so a file is
 matched by its name.
+
+## Live mods (port only)
+
+A mod whose `mod.json` has `"live": true` is switched on and off at once, with
+no restart (the Mods page marks it **Instant**). Such a mod may only patch
+bytes in place: texture patches and `xpps_patches` with `_offset_` (no whole
+files, no whole packed files, nothing that changes a file's size). The
+Manager and older ports ignore the key and apply the patches at load as usual.
+
+The game loads its own files; a worker thread
+(`runtime/ppu/ppu_fs_mods.h`, `live_*`) diffs each patch against the game's
+original file (out of the archives) into windows of at least 32 bytes, finds
+them in guest main memory (`0x30000000`-`0x50000000`) and RSX local memory
+(`0xC0000000`-`0xD0000000`, where the textures are), and writes the mod's bytes
+over them; turned off, it writes the originals back. Writes are bracketed by
+`g_vm_host_io_hook`, so the draw engine's write tracking sees the new texture
+bytes. Every live mod's windows are made at start (a few seconds, on or off),
+then a pass every 4 s (`PS3_GAME_MODS_LIVE_SECS`; ~0.4 s over ~380 MB) also
+patches what the game loads later. The status line counts the places changed.
+Log lines start `[mods] live:`.
+
+### Karma levels
+
+A live mod can change with Cole's karma level. `karma_levels` names a folder
+for any of the seven levels (`Infamous`, `Outlaw`, `Thug`, `Neutral`,
+`Guardian`, `Champion`, `Hero`); each folder holds `files/` with patches, as
+the mod's own:
+
+```json
+{
+  "game": "inf2", "name": "Karma Lightning", "live": true,
+  "karma_levels": { "Infamous": "levels/infamous", "Hero": "levels/hero" }
+}
+```
+
+The worker reads the karma level every half second the way the game finds it
+(the karma float at `0x00A64E40`, the first of the seven ranges at
+`0x00745EC8` that holds it, else Neutral) and puts the level's bytes in when
+it changes. A level the mod does not name uses the mod's own `files/`, which
+is also what the Manager and older ports apply at load.
+
+### Karma patches
+
+A mod (live or not) can make some of its own bytes depend on Cole's karma
+level with `karma_patches`: at the listed levels the place in guest memory
+that holds `find` gets `replace`'s bytes, at the other levels it gets
+`find`'s bytes back.
+
+```json
+"karma_patches": [
+  { "levels": ["Thug", "Neutral", "Guardian", "Champion", "Hero"],
+    "find":    "1e070000 28000030 1f010000 01040400 00000009 ...",
+    "replace": "???????? ???????? ???????? ???????? 00000251 ..." }
+]
+```
+
+- `find` and `replace` are hex of the same length (16-4096 bytes, a multiple
+  of 4; spaces are ignored). `??` in `find` is any byte: use it for bytes the
+  game's loader fills in (pointers, native call and class words, which differ
+  from the file). `??` in `replace` leaves the byte as it is; a byte
+  `replace` sets must be known in `find`.
+- `find` must hold 8 known bytes in a row (at a multiple of 4) that `replace`
+  leaves alone; they are what is searched for. It must be unique to the mod's
+  bytes, or every place that matches is changed.
+- While a save is being played (Cole's character object at `0x00A6E9E4` is
+  set), the live-mods worker looks for the place in either form in guest main
+  memory and RSX local memory (again at most every 5 s while it is not
+  found), remembers it and checks the karma level every half second.
+
+Custom Powers uses it for Lightning Bolt's head explosion (Skull Bolt's
+headshot call, copied into its bolt's script): below Outlaw the call's
+character class check is pointed at a class no character has, so the call is
+skipped. Log lines start `[mods] karma_patches:`. The Manager and older ports
+ignore the key (the mod's bytes stay as its files have them).
+
+### Black bolts
+
+`"dark_bolts": true` (or a list of karma levels, e.g. `["Infamous", "Outlaw"]`)
+draws Cole's electric arcs with the game's own dark (evil) lightning shader
+while the mod is on: a black core with the outside colour of the evil bolt
+textures. It is the same draw swap as Cheats > Black lightning
+(`cheats/cheats.cpp`, `hook_arc_draw`), switched by the mod. Additive
+glows cannot be black (black adds no light), so a mod made for black
+bolts should give the glows' cores the outside colour instead.
+
+## New powers (port only)
+
+A mod that adds a power (a new slot in the Powers menu) can list it in
+`discover_powers`, so it shows as found in any save, not only in a new game:
+
+```json
+{ "game": "inf2", "name": "My Power", "version": "1.0", "discover_powers": [0, 9] }
+```
+
+A power is found at a story moment, which a save made before the mod never
+reaches again, so the menu would show it as "Undiscovered power". While the
+mod is on and a save is being played (Cole's character object at
+`0x00A6E9E4` is set), the live-mods worker checks every listed power's word
+(`0x00A64E60` + 4 x power: 1 found, 2 its requirement met, 4 bought, 0x20 new)
+every few seconds and gives one without the found bit `0x23`: found, ready to
+buy and marked new. The game saves it with the rest, so the power stays found
+if the mod is turned off later. The mod does not need `"live": true`. Log
+lines start `[mods] discover_powers:`.
+
+The Powers menu plays `movies/ui/powerk_<name>.bik` for the power under the
+cursor, where `<name>` is the power's entry in the game's power-name table
+(lower case), e.g. `powerk_bolt9.bik` for power 9 and `powerk_r2_8.bik` for
+power 0x30. A new power has no such movie, and one failed open leaves the
+menu's movie player blank for every power until the game restarts. List a
+stand-in in `file_alias` (paths under `USRDIR`; any game file can stand in):
+
+```json
+"file_alias": { "movies/ui/powerk_bolt9.bik": "movies/ui/powerk_fatbolt.bik" }
+```
+
+While the mod is on, a read of the first path that the game does not have
+reads the second instead (a file the game has is never replaced this way).
+The first read logs `[mods] movies/ui/powerk_bolt9.bik -> ... (file_alias of <mod>)`.
 
 ## How it works
 
