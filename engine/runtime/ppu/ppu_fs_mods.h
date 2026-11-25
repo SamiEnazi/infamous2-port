@@ -820,9 +820,6 @@ struct Mod {
     std::vector<int> discover;           /* "discover_powers": powers (0-95) this mod adds, shown as discovered in any save */
     std::map<std::string, bool> res;     /* conflicts the player resolved: "<other folder>|<file>|<part>" (lower) -> this mod's
                                             version is used (mods.ini win / lose, res_winner) */
-    bool ed = false;                     /* "electric_dash": the Electric Dash power's engine side (cheats.cpp ed_*) */
-    float ed_speed = 2.0f, ed_anim = 1.3f, ed_drain = 15.0f;
-    int ed_glow = 1, ed_glowskip = 11000;
     std::vector<Module> modules;
     bool on = true;                      /* the saved choice */
     bool have_pick = false;
@@ -1318,22 +1315,6 @@ static std::vector<Mod> scan()
             if (dp->t == 4)
                 for (const J& a : dp->a)
                     if (a.t == 2) { const int v = atoi(a.s.c_str()); if (v >= 0 && v < 96) m.discover.push_back(v); }
-        if (const J* ej = j.get("electric_dash")) {   /* true, or {"speed", "anim", "drain", "glow", "glowskip"} */
-            if (ej->t == 1) m.ed = ej->s == "true";
-            else if (ej->t == 5) {
-                m.ed = true;
-                for (size_t i = 0; i < ej->ok.size(); i++) {
-                    const J& v = ej->ov[i];
-                    const double x = v.t == 2 ? atof(v.s.c_str()) : v.t == 1 ? (v.s == "true" ? 1.0 : 0.0) : -1.0;
-                    if (x < 0) continue;
-                    if (ieq(ej->ok[i], "speed")) m.ed_speed = (float)x;
-                    else if (ieq(ej->ok[i], "anim")) m.ed_anim = (float)x;
-                    else if (ieq(ej->ok[i], "drain")) m.ed_drain = (float)x;
-                    else if (ieq(ej->ok[i], "glow")) m.ed_glow = x != 0.0;
-                    else if (ieq(ej->ok[i], "glowskip")) m.ed_glowskip = (int)x;
-                }
-            }
-        }
         if (const J* pj = j.get("patch_for"))      /* the mods this patch merges: used only while all of them are */
             if (pj->t == 4)
                 for (const J& a : pj->a)
@@ -4028,21 +4009,6 @@ static void test_start()
 /* ---- for the in-game menu (vk_overlay.cpp) --------------------------------- */
 
 extern "C" const char* ps3_game_mods_dir(void) { gmods::init(); return gmods::g.dir.c_str(); }
-
-/* Electric Dash (cheats.cpp): 1 and its settings when a mod this session uses has "electric_dash". */
-extern "C" int ps3_game_mods_electric_dash(float* speed, float* anim, float* drain, int* glow, int* glowskip)
-{
-    gmods::init();
-    std::lock_guard<std::mutex> lk(gmods::g.mx);
-    for (const gmods::Mod& m : gmods::g.list) {
-        if (!m.ed) continue;
-        auto it = gmods::g.start.find(gmods::lower(m.folder));
-        if (it == gmods::g.start.end() || !it->second.active) continue;
-        *speed = m.ed_speed; *anim = m.ed_anim; *drain = m.ed_drain; *glow = m.ed_glow; *glowskip = m.ed_glowskip;
-        return 1;
-    }
-    return 0;
-}
 
 extern "C" int ps3_game_mods_count(void)
 {
