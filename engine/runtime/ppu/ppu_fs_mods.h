@@ -807,14 +807,26 @@ struct Part { std::string path, target; std::set<int> drop; };      /* a mod fil
                                                                       drop: packed files of it left out (conflicts the player resolved) */
 struct Tex : Part { uint32_t off = 0; int w = 0, h = 0, mips = 0; std::string fmt, name; };
 struct Xp : Part { int index = 0; uint32_t abs = 0, choff = 0, len = 0; bool chunk = false; std::string name; };
+/* Cole's karma levels, as the game orders them (its rank table, live_karma_level) */
+static const char* const kKarmaLevels[7] = { "Infamous", "Outlaw", "Thug", "Neutral", "Guardian", "Champion", "Hero" };
 struct Mod {
     std::string folder, path, name, author, version, game, err;
     std::string image;                   /* mod.json "image", as written (image_path checks it) */
     bool for_game = false;
     bool live = false;                   /* mod.json "live": true -- patched in memory, on and off at once (live_*) */
+    std::vector<std::pair<int, std::string>> levels;   /* a live mod's "karma_levels": karma level (0-6) -> its folder */
+    int dark = 0;                        /* a live mod's "dark_bolts": bit r = karma level r, 0x80 = always */
     std::vector<std::string> patch_for;  /* "patch_for": a patch that makes these mods (folder or name) work together */
+    std::vector<int> discover;           /* "discover_powers": powers (0-95) this mod adds, shown as discovered in any save */
+    struct KarmaPatch { std::vector<int> find, rep; int levels = 0; };   /* bytes; -1 = ?? */
+    std::vector<KarmaPatch> kpatch;      /* "karma_patches": bytes of the mod's own that change with Cole's karma level */
+    std::vector<std::pair<std::string, std::string>> alias;   /* "file_alias": lower USRDIR path the game lacks -> the
+                                                                 game file read in its place (alias_redirect) */
     std::map<std::string, bool> res;     /* conflicts the player resolved: "<other folder>|<file>|<part>" (lower) -> this mod's
                                             version is used (mods.ini win / lose, res_winner) */
+    bool ed = false;                     /* "electric_dash": the Electric Dash power's engine side (cheats.cpp ed_*) */
+    float ed_speed = 2.0f, ed_anim = 1.3f, ed_drain = 15.0f;
+    int ed_glow = 1, ed_glowskip = 11000;
     std::vector<Module> modules;
     bool on = true;                      /* the saved choice */
     bool have_pick = false;
@@ -1269,6 +1281,17 @@ static void state_write_locked()
     if (!write_all(g.state_path, b)) fprintf(stderr, "[mods] could not save %s\n", g.state_path.c_str());
 }
 
+/* A live mod's karma level: its patches, out of <mod>/<folder> (files/ in it, as a mod's). */
+static Mod live_level_mod(const Mod& m, const std::string& folder)
+{
+    Mod x = m;
+    x.path = join(m.path, folder);
+    x.modules.clear(); x.levels.clear();
+    if (folder.find("..") != std::string::npos || !is_dir(x.path)) { x.err = "its folder (" + folder + ") is not in the mod"; return x; }
+    read_parts(x);
+    return x;
+}
+
 /* The mod folders: <dir>/<x>/mod.json, or <dir>/<x>/<y>/mod.json (a zip
  * unpacked into a folder of its own name). Dot folders are skipped. */
 static std::vector<Mod> scan()
@@ -1289,10 +1312,95 @@ static std::vector<Mod> scan()
         m.for_game = m.game == "inf2";
         m.image = j.str("image");
         if (const J* lj = j.get("live")) m.live = lj->t == 1 ? lj->s == "true" : (lj->t == 2 && lj->s != "0");
+        if (const J* kj = j.get("karma_levels"))
+            if (kj->t == 5)
+                for (size_t i = 0; i < kj->ok.size(); i++)
+                    for (int q = 0; q < 7; q++)
+                        if (ieq(kj->ok[i], kKarmaLevels[q]) && kj->ov[i].t == 3 && !kj->ov[i].s.empty()) m.levels.push_back({ q, kj->ov[i].s });
+        if (const J* dp = j.get("discover_powers"))   /* the power numbers a mod adds: a save made before it never
+                                                         * reaches their story moment, so they would stay undiscovered */
+            if (dp->t == 4)
+                for (const J& a : dp->a)
+                    if (a.t == 2) { const int v = atoi(a.s.c_str()); if (v >= 0 && v < 96) m.discover.push_back(v); }
+        if (const J* kj = j.get("karma_patches"))   /* [{"levels": ["Thug", ...], "find": "<hex>", "replace": "<hex>"}] */
+            if (kj->t == 4)
+                for (const J& e : kj->a) {
+                    auto hex = [](const J* h, std::vector<int>& out) {
+                        if (!h || h->t != 3) return false;
+                        auto dig = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+                        std::string t;
+                        for (char c : h->s) if (c != ' ') t += c;
+                        if (t.size() % 2) return false;
+                        for (size_t i = 0; i < t.size(); i += 2) {
+                            if (t[i] == '?' && t[i + 1] == '?') { out.push_back(-1); continue; }
+                            const int a = dig(t[i]), b = dig(t[i + 1]);
+                            if (a < 0 || b < 0) return false;
+                            out.push_back(a * 16 + b);
+                        }
+                        return true;
+                    };
+                    Mod::KarmaPatch kp;
+                    bool ok = e.t == 5;
+                    if (ok) {
+                        if (const J* lj = e.get("levels"))
+                            if (lj->t == 4)
+                                for (const J& a : lj->a)
+                                    for (int q = 0; q < 7; q++) if (a.t == 3 && ieq(a.s, kKarmaLevels[q])) kp.levels |= 1 << q;
+                        ok = kp.levels && hex(e.get("find"), kp.find) && hex(e.get("replace"), kp.rep) && kp.find.size() == kp.rep.size() &&
+                             kp.find.size() >= 16 && kp.find.size() <= 4096 && kp.find.size() % 4 == 0;
+                        bool key = false, any = false;
+                        for (size_t i = 0; ok && i < kp.find.size(); i++) {
+                            if (kp.rep[i] >= 0) { any = true; if (kp.find[i] < 0) ok = false; }   /* a replaced byte must be known */
+                            if (i % 4 == 0 && i + 8 <= kp.find.size()) {
+                                bool k8 = true;
+                                for (size_t q = i; q < i + 8; q++) if (kp.find[q] < 0 || kp.rep[q] >= 0) k8 = false;
+                                key = key || k8;
+                            }
+                        }
+                        ok = ok && any && key;
+                    }
+                    if (ok) m.kpatch.push_back(std::move(kp));
+                    else fprintf(stderr, "[mods] %s: a karma_patches entry is not used (it needs \"levels\", and \"find\" and \"replace\" "
+                                         "as hex of the same length, 16-4096 bytes, 8 known bytes in a row that replace leaves alone)\n", m.name.c_str());
+                }
+        if (const J* ej = j.get("electric_dash")) {   /* true, or {"speed", "anim", "drain", "glow", "glowskip"} */
+            if (ej->t == 1) m.ed = ej->s == "true";
+            else if (ej->t == 5) {
+                m.ed = true;
+                for (size_t i = 0; i < ej->ok.size(); i++) {
+                    const J& v = ej->ov[i];
+                    const double x = v.t == 2 ? atof(v.s.c_str()) : v.t == 1 ? (v.s == "true" ? 1.0 : 0.0) : -1.0;
+                    if (x < 0) continue;
+                    if (ieq(ej->ok[i], "speed")) m.ed_speed = (float)x;
+                    else if (ieq(ej->ok[i], "anim")) m.ed_anim = (float)x;
+                    else if (ieq(ej->ok[i], "drain")) m.ed_drain = (float)x;
+                    else if (ieq(ej->ok[i], "glow")) m.ed_glow = x != 0.0;
+                    else if (ieq(ej->ok[i], "glowskip")) m.ed_glowskip = (int)x;
+                }
+            }
+        }
+        if (const J* aj = j.get("file_alias"))     /* {"movies/ui/powerk_bolt9.bik": "movies/ui/powerk_fatbolt.bik"}: a file
+                                                      * the game asks for and does not have, read from another of its files */
+            if (aj->t == 5)
+                for (size_t i = 0; i < aj->ok.size(); i++) {
+                    std::string from, to;
+                    if (aj->ov[i].t != 3 || !safe_rel(norm_rel(aj->ok[i]), from, nullptr) || !safe_rel(norm_rel(aj->ov[i].s), to, nullptr)) {
+                        fprintf(stderr, "[mods] %s: file_alias \"%s\" not used (not a path inside the game folder)\n", m.name.c_str(), aj->ok[i].c_str());
+                        continue;
+                    }
+                    m.alias.push_back({ lower(from), to });
+                }
         if (const J* pj = j.get("patch_for"))      /* the mods this patch merges: used only while all of them are */
             if (pj->t == 4)
                 for (const J& a : pj->a)
                     if (a.t == 3 && !a.s.empty()) m.patch_for.push_back(a.s);
+        if (const J* dj = j.get("dark_bolts")) {   /* true, or the karma levels it is for */
+            if (dj->t == 1 && dj->s == "true") m.dark = 0x80;
+            else if (dj->t == 4)
+                for (const J& a : dj->a)
+                    for (int q = 0; q < 7; q++)
+                        if (a.t == 3 && ieq(a.s, kKarmaLevels[q])) m.dark |= 1 << q;
+        }
         auto it = st.find(lower(folder));
         if (it != st.end()) {
             if (it->second.have_on) m.on = it->second.on;
@@ -1302,6 +1410,12 @@ static std::vector<Mod> scan()
         }
         if (!jerr.empty()) m.err = jerr;
         else if (m.for_game) { read_modules(m); read_parts(m); }
+        if (m.live && !m.levels.empty() && m.err.empty())
+            for (const auto& l : m.levels) {   /* every level's patches must read; their files are part of the mod's key */
+                const Mod x = live_level_mod(m, l.second);
+                if (!x.err.empty()) { m.err = std::string("karma level ") + kKarmaLevels[l.first] + ": " + x.err; break; }
+                m.stamp = (m.stamp ^ x.stamp) * 1099511628211ull + (uint64_t)l.first;
+            }
         out.push_back(std::move(m));
     };
     for (const std::string& n : list_dir(g.dir)) {
@@ -2570,6 +2684,11 @@ static std::string settings_dir()
  *   PS3_GAME_MODS_LIVE_SECS    seconds between passes (default 4; a pass
  *                              takes longer apart from that when one pass
  *                              is slow: at most ~5% of a core)
+ * mod.json "karma_levels": { "Hero": "<folder>", ... } (the 7 levels:
+ * Infamous, Outlaw, Thug, Neutral, Guardian, Champion, Hero) gives a live mod
+ * other patches for each of Cole's karma levels, in <mod>/<folder>/files as a
+ * mod's own; the worker reads the karma level every half second and puts the
+ * level's bytes in when it changes (a level not named uses the mod's own).
  * Log lines start "[mods] live:". */
 
 extern "C" { extern uint8_t* vm_base; extern void (*g_vm_host_io_hook)(uint32_t ea, uint32_t len, int end); }
@@ -2585,6 +2704,8 @@ struct LivePair { std::vector<Bytes> v; std::vector<uint32_t> k; std::vector<cha
 struct LiveMod {
     std::string key, name;
     std::vector<LivePair> pairs;
+    std::vector<int> var;               /* "karma_levels": karma level (0-6) -> variant; empty: one variant (1) */
+    int dark = 0;                       /* "dark_bolts" (Mod::dark) */
     bool want = false, built = false, building = false;
     int revert = 0;                     /* passes left that write the originals back */
     int target = 0;                     /* the variant the last pass put in (0: the game's own) */
@@ -2599,6 +2720,7 @@ static struct {
     std::map<std::string, LiveMod> mods;   /* lower(folder) */
     std::vector<LiveMod> retired;          /* an old build of a mod (options or files changed), still to undo */
     bool started = false, kick = false;
+    int rank = -1;                         /* Cole's karma level as last read (-1: not known) */
 } lv;
 
 /* Too plain to look for: fewer than 4 different byte values in the whole window (a black or zeroed run of
@@ -2685,10 +2807,22 @@ static void live_windows(const Bytes& o, const std::vector<bool>& dm, const std:
     }
 }
 
-/* A live mod's windows: variant 1 is the mod's own patches (v[0]: the game's). */
-static bool live_build(const Mod& m, std::vector<LivePair>& out, std::string& err)
+/* A live mod's windows: variant 1 is the mod's own patches; a mod with
+ * "karma_levels" adds one variant per level (var: level -> variant; a level
+ * it does not name uses variant 1). */
+static bool live_build(const Mod& m, std::vector<LivePair>& out, std::vector<int>& var, std::string& err)
 {
     std::vector<Mod> vm(1, m);
+    var.clear();
+    if (!m.levels.empty()) {
+        var.assign(7, 1);
+        for (const auto& l : m.levels) {
+            Mod x = live_level_mod(m, l.second);
+            if (!x.err.empty()) { err = std::string("karma level ") + kKarmaLevels[l.first] + ": " + x.err; return false; }
+            var[(size_t)l.first] = (int)vm.size() + 1;   /* vm[i] is variant i + 1 (v[0]: the game's) */
+            vm.push_back(std::move(x));
+        }
+    }
     std::set<std::string> targets;
     for (const Mod& x : vm) targets.insert(x.targets.begin(), x.targets.end());
     Arcs arcs;
@@ -2788,7 +2922,7 @@ static void live_sync_locked()
             if (L.built && (L.want || L.revert)) { LiveMod old = L; old.want = false; old.revert = 3; lv.retired.push_back(std::move(old)); }
             L = LiveMod();
         }
-        L.key = key; L.name = m.name;
+        L.key = key; L.name = m.name; L.dark = m.dark;
         const bool want = ok && m.on && use;
         if (L.want && !want) L.revert = 3;
         if (want) L.revert = 0;
@@ -2801,8 +2935,191 @@ static void live_sync_locked()
         }
 }
 
+/* "dark_bolts": the arcs' dark shader, as the Black lightning cheat draws them (cheats.cpp sets the hook) */
+extern "C" void (*g_mods_dark_bolts_hook)(int on);
+void (*g_mods_dark_bolts_hook)(int on) = nullptr;
+
+static bool live_dark_for(const LiveMod& m, int rank)
+{
+    return m.want && m.built && m.err.empty() && !m.pairs.empty() &&
+           ((m.dark & 0x80) || (rank >= 0 && ((m.dark >> rank) & 1)));
+}
+
+static void live_dark_update()
+{
+    static int last = -1;
+    int on = 0;
+    {
+        std::lock_guard<std::mutex> lk(lv.mx);
+        for (auto& kv : lv.mods) if (live_dark_for(kv.second, lv.rank)) on = 1;
+    }
+    if (on != last && g_mods_dark_bolts_hook) {
+        g_mods_dark_bolts_hook(on);
+        fprintf(stderr, "[mods] live: dark bolts %s\n", on ? "on" : "off");
+        last = on;
+    }
+}
+
 #ifdef _WIN32
 struct LiveEnt { LivePair* p; LiveMod* m; int from, to; };   /* v[from] -> v[to]; from == to: count only (in place) */
+
+/* Cole's karma level (0-6) as the game finds it: the first of its 7 ranges
+ * (0x00745EC8, (min, max) big-endian floats) that holds the karma
+ * (0x00A64E40), else Neutral; -1 when it cannot be read. */
+static int live_karma_level()
+{
+    uint8_t t[56], k[4];
+    SIZE_T g1 = 0, g2 = 0;
+    const HANDLE me = GetCurrentProcess();
+    if (!vm_base || !ReadProcessMemory(me, vm_base + 0x00745EC8u, t, sizeof t, &g1) || g1 != sizeof t) return -1;
+    if (!ReadProcessMemory(me, vm_base + 0x00A64E40u, k, sizeof k, &g2) || g2 != sizeof k) return -1;
+    auto f = [](const uint8_t* p) { const uint32_t u = be32(p); float x; memcpy(&x, &u, 4); return x; };
+    const float kv = f(k);
+    if (kv != kv) return -1;
+    for (int i = 0; i < 7; i++) if (!(f(t + 8 * i) <= f(t + 8 * i + 4))) return -1;   /* not the table (yet) */
+    for (int i = 0; i < 7; i++) if (f(t + 8 * i) <= kv && kv <= f(t + 8 * i + 4)) return i;
+    return 3;
+}
+
+/* mod.json "discover_powers": while a save is being played (Cole's character object at 0x00A6E9E4 is set),
+ * each listed power whose word (0x00A64E60 + 4 * power, the save's power state: 1 discovered, 2 its
+ * requirement met, 4 bought, 0x20 new) lacks the 1 bit gets 0x23: discovered, buyable, marked new. The game
+ * saves it with the rest, so the power stays found when the mod is later turned off. Only mods in use. */
+static void live_discover()
+{
+    std::set<int> want;
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        if (!g.use) return;
+        for (const Mod& m : g.list)
+            if (m.on && m.for_game && m.err.empty()) for (int p : m.discover) want.insert(p);
+    }
+    if (want.empty() || !vm_base) return;
+    const HANDLE me = GetCurrentProcess();
+    uint8_t c[4], w[4 * 96];
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(me, vm_base + 0x00A6E9E4u, c, sizeof c, &got) || got != sizeof c || !be32(c)) return;
+    if (!ReadProcessMemory(me, vm_base + 0x00A64E60u, w, sizeof w, &got) || got != sizeof w) return;
+    for (int p : want) {
+        const uint32_t v = be32(w + 4 * p);
+        if (v & 1) continue;
+        uint8_t nv[4];
+        put_be32(nv, v | 0x23);
+        SIZE_T put = 0;
+        const bool ok = WriteProcessMemory(me, vm_base + 0x00A64E60u + 4u * (uint32_t)p, nv, sizeof nv, &put) && put == sizeof nv;
+        fprintf(stderr, "[mods] discover_powers: power %d %08x -> %08x%s\n", p, v, v | 0x23, ok ? "" : " (write failed)");
+    }
+}
+
+/* mod.json "karma_patches": [{"levels": ["Thug", "Neutral", ...], "find": "<hex>", "replace": "<hex>"}]. While
+ * a save is being played and Cole's karma level is one of "levels", the place in guest memory that holds "find"
+ * gets "replace"'s bytes; at the other levels it gets "find"'s bytes back. ?? in "find" is any byte (bytes the
+ * loader fills in: pointers, native calls); ?? in "replace" leaves that byte as it is. For a mod's own script or
+ * data that should behave differently with karma (Custom Powers: Lightning Bolt's head explosion only at Outlaw
+ * and Infamous). "find" must be unique to the mod's bytes; the place is looked for in either form, remembered,
+ * and checked again every half second (looked for again at most every 5 s while it is not found). */
+static std::atomic<bool> g_kp_any{false};   /* a mod in use has "karma_patches" (the worker ticks every half second) */
+struct KpPlace { std::vector<uint32_t> at; std::chrono::steady_clock::time_point next{}; int last = -2; };
+static std::map<std::string, KpPlace> g_kp;
+static void live_karma_patches()
+{
+    std::vector<std::pair<std::string, Mod::KarmaPatch>> want;
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        if (!g.use) return;
+        for (const Mod& m : g.list)
+            if (m.on && m.for_game && m.err.empty())
+                for (size_t i = 0; i < m.kpatch.size(); i++) want.push_back({ m.name + " #" + std::to_string(i + 1), m.kpatch[i] });
+    }
+    g_kp_any.store(!want.empty(), std::memory_order_relaxed);
+    if (want.empty() || !vm_base) return;
+    const HANDLE me = GetCurrentProcess();
+    uint8_t c[4];
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(me, vm_base + 0x00A6E9E4u, c, sizeof c, &got) || got != sizeof c || !be32(c)) return;
+    const int rank = live_karma_level();
+    if (rank < 0) return;
+    const auto now = std::chrono::steady_clock::now();
+    void (*const io)(uint32_t, uint32_t, int) = g_vm_host_io_hook;
+    for (auto& w : want) {
+        const Mod::KarmaPatch& p = w.second;
+        KpPlace& st = g_kp[w.first];
+        const size_t n = p.find.size();
+        auto form = [&](const uint8_t* b) {   /* 1: find's form, 2: replace's, 0: neither */
+            bool f = true, r = true;
+            for (size_t i = 0; i < n && (f || r); i++) {
+                if (p.find[i] >= 0 && b[i] != p.find[i]) f = false;
+                const int x = p.rep[i] >= 0 ? p.rep[i] : p.find[i];
+                if (x >= 0 && b[i] != x) r = false;
+            }
+            return f ? 1 : r ? 2 : 0;
+        };
+        std::vector<uint8_t> cur(n);
+        std::vector<uint32_t> keep;
+        for (uint32_t a : st.at)
+            if (ReadProcessMemory(me, vm_base + a, cur.data(), n, &got) && got == n && form(cur.data())) keep.push_back(a);
+        st.at.swap(keep);
+        if (st.at.empty()) {
+            if (now < st.next) continue;
+            st.next = now + std::chrono::seconds(5);
+            size_t k = 0;   /* 8 known bytes that are the same in both forms */
+            for (size_t i = 0; i + 8 <= n; i += 4) {
+                bool ok = true;
+                for (size_t q = i; q < i + 8; q++) if (p.find[q] < 0 || p.rep[q] >= 0) ok = false;
+                if (ok) { k = i; break; }
+            }
+            uint8_t key[8];
+            for (int q = 0; q < 8; q++) key[q] = (uint8_t)p.find[k + (size_t)q];
+            static const uint32_t kRegions[][2] = { { 0x30000000u, 0x50000000u }, { 0xC0000000u, 0xD0000000u } };
+            const size_t kChunk = 4u << 20;
+            std::vector<uint8_t> buf(kChunk + 8);
+            for (const auto& r : kRegions) {
+                uint64_t ea = r[0];
+                while (ea < r[1] && st.at.size() < 8) {
+                    MEMORY_BASIC_INFORMATION mbi;
+                    if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
+                    const uint64_t rb = (uint64_t)((uint8_t*)mbi.BaseAddress - vm_base), re = (std::min<uint64_t>)(rb + mbi.RegionSize, r[1]);
+                    const DWORD pr = mbi.Protect;
+                    const bool readable = mbi.State == MEM_COMMIT && !(pr & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                                          (pr & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE));
+                    if (readable)
+                        for (uint64_t cb = (std::max)(ea, rb); cb < re; cb += kChunk) {
+                            const size_t len = (size_t)(std::min<uint64_t>)(kChunk, re - cb);
+                            if (!ReadProcessMemory(me, vm_base + cb, buf.data(), len, &got) || got < 8) continue;
+                            for (size_t o = 0; o + 8 <= got; o += 4) {
+                                if (memcmp(buf.data() + o, key, 8)) continue;
+                                if (cb + o < k) continue;
+                                const uint64_t at = cb + o - k;
+                                if (at < r[0] || at + n > r[1]) continue;
+                                if (!ReadProcessMemory(me, vm_base + at, cur.data(), n, &got) || got != n || !form(cur.data())) continue;
+                                if (std::find(st.at.begin(), st.at.end(), (uint32_t)at) == st.at.end()) st.at.push_back((uint32_t)at);
+                            }
+                        }
+                    ea = re;
+                }
+            }
+            if (st.at.empty()) continue;
+            fprintf(stderr, "[mods] karma_patches: %s found at 0x%08X%s\n", w.first.c_str(), (unsigned)st.at[0],
+                    st.at.size() > 1 ? " (and more places)" : "");
+        }
+        const bool r = (p.levels >> rank) & 1;
+        for (uint32_t a : st.at) {
+            if (!ReadProcessMemory(me, vm_base + a, cur.data(), n, &got) || got != n) continue;
+            std::vector<uint8_t> t(cur);
+            for (size_t i = 0; i < n; i++) {
+                const int x = r && p.rep[i] >= 0 ? p.rep[i] : p.rep[i] >= 0 ? p.find[i] : -1;
+                if (x >= 0) t[i] = (uint8_t)x;
+            }
+            if (t == cur) continue;
+            if (io) io(a, (uint32_t)n, 0);
+            SIZE_T put = 0;
+            const bool ok = WriteProcessMemory(me, vm_base + a, t.data(), n, &put) && put == n;
+            if (io) io(a, (uint32_t)n, 1);
+            fprintf(stderr, "[mods] karma_patches: %s at 0x%08X -> %s (karma level %s)%s\n", w.first.c_str(), (unsigned)a,
+                    r ? "replace" : "find", kKarmaLevels[rank], ok ? "" : " (write failed)");
+        }
+    }
+}
 
 static void live_pass()
 {
@@ -2830,7 +3147,7 @@ static void live_pass()
         m->tmp = 0;
         if (m->pairs.empty()) continue;
         int t;
-        if (m->want) t = 1;
+        if (m->want) t = m->var.empty() ? 1 : lv.rank >= 0 ? m->var[(size_t)lv.rank] : m->target > 0 ? m->target : 1;
         else if (m->revert > 0) t = 0;
         else continue;
         m->target = t;
@@ -2970,6 +3287,10 @@ static void live_pass()
     g_live_last_ms = ms_;
 }
 #else
+static int live_karma_level() { return -1; }
+static void live_discover() {}
+static std::atomic<bool> g_kp_any{false};
+static void live_karma_patches() {}
 static void live_pass() {}
 #endif
 
@@ -2982,11 +3303,29 @@ static void live_worker()
     const double secs = s && atof(s) > 0.2 ? atof(s) : 4.0;
     for (;;) {
         {
+            /* a mod with karma levels on: the karma level is read every half second,
+             * and a change is put in at once */
             const double wait = (std::max)(secs, g_live_last_ms * 20.0 / 1000.0);
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds((int64_t)(wait * 1000));
             std::unique_lock<std::mutex> lk(lv.mx);
-            lv.cv.wait_for(lk, std::chrono::milliseconds((int64_t)(wait * 1000)), [] { return lv.kick; });
+            while (!lv.kick) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= until) break;
+                bool lev = g_kp_any.load(std::memory_order_relaxed);   /* "karma_patches" are checked every half second too */
+                for (auto& kv : lv.mods) if (kv.second.want && kv.second.built && (!kv.second.var.empty() || (kv.second.dark & 0x7F))) lev = true;
+                const auto step = lev ? (std::min)(until, now + std::chrono::milliseconds(500)) : until;
+                lv.cv.wait_until(lk, step, [] { return lv.kick; });
+                if (lev && !lv.kick) {
+                    lk.unlock();
+                    const int r = live_karma_level();
+                    live_karma_patches();
+                    lk.lock();
+                    if (r >= 0 && r != lv.rank) { lv.rank = r; break; }
+                }
+            }
             lv.kick = false;
         }
+        { const int r = live_karma_level(); if (r >= 0) { std::lock_guard<std::mutex> lk(lv.mx); lv.rank = r; } }
         { std::lock_guard<std::mutex> lk(g.mx); live_sync_locked(); }
         /* builds: every live mod's pairs, once, on or off (reading the archives takes a few
          * seconds each). The mods switched on are built first and put in by a pass at once;
@@ -3023,10 +3362,11 @@ static void live_worker()
                     }
             }
             std::vector<LivePair> pairs;
+            std::vector<int> var;
             std::string err;
             bool ok = false;
             if (found) {
-                try { ok = live_build(m, pairs, err); }
+                try { ok = live_build(m, pairs, var, err); }
                 catch (const std::exception& e) { err = std::string("could not be read (") + e.what() + ")"; }
             }
             std::lock_guard<std::mutex> lk(lv.mx);
@@ -3037,10 +3377,12 @@ static void live_worker()
             L.built = true;
             if (ok) {
                 L.pairs.swap(pairs);
+                L.var.swap(var);
                 L.err.clear();
                 size_t bytes = 0;
                 for (const LivePair& p : L.pairs) bytes += p.v[0].size();
-                fprintf(stderr, "[mods] live: \"%s\" ready: %zu place(s) to find (%zu bytes)\n", L.name.c_str(), L.pairs.size(), bytes);
+                fprintf(stderr, "[mods] live: \"%s\" ready: %zu place(s) to find (%zu bytes)%s\n", L.name.c_str(), L.pairs.size(), bytes,
+                        L.var.empty() ? "" : ", with karma levels");
             } else {
                 L.err = found ? err : "it changed while it was read";
                 fprintf(stderr, "[mods] live: \"%s\" not used: %s\n", L.name.c_str(), L.err.c_str());
@@ -3049,6 +3391,9 @@ static void live_worker()
         };
         while (build_one(true)) {}
         live_pass();
+        live_dark_update();
+        live_discover();
+        live_karma_patches();
         if (build_one(false)) { std::lock_guard<std::mutex> lk(lv.mx); lv.kick = true; }   /* the next one soon */
     }
 }
@@ -3077,8 +3422,11 @@ static std::string live_status_locked(const Mod& m)
     if (!m.on) return L && L->revert ? "Off: putting the game's own back" : "Off. A live mod: it changes the game at once, no restart";
     if (!L || !L->built) return "On: getting ready (a few seconds after the game starts)";
     if (!L->err.empty()) return "Not used: " + L->err;
-    if (!L->in_place) return "On: waiting for the game to load what it changes";
-    return "On now: " + std::to_string(L->in_place) + " place(s) in memory changed";
+    std::string lvl;
+    if (!L->var.empty() || (L->dark & 0x7F)) lvl = lv.rank >= 0 ? std::string(" (karma level: ") + kKarmaLevels[lv.rank] + ")" : " (karma level not known yet)";
+    if (!L->in_place) return "On" + lvl + ": waiting for the game to load what it changes";
+    return "On now" + lvl + ": " + std::to_string(L->in_place) + " place(s) in memory changed" +
+           (live_dark_for(*L, lv.rank) ? ", black bolts" : "");
 }
 
 static void init_body();
@@ -3147,8 +3495,8 @@ static void init_body()
         }
         {
             bool any = false;
-            { std::lock_guard<std::mutex> lk(g.mx); for (const Mod& m : g.list) if (m.live) any = true; }
-            if (any) live_kick();
+            { std::lock_guard<std::mutex> lk(g.mx); for (const Mod& m : g.list) if (m.live || !m.discover.empty() || !m.kpatch.empty()) any = true; }
+            if (any) live_kick();   /* (the worker also finds "discover_powers" powers and puts "karma_patches" in) */
         }
         test_start();
     }
@@ -3168,15 +3516,47 @@ static std::string serve_key(const std::string& k)
     return lower(std::string("lang_") + g_lang.text + ".xpps");
 }
 
+/* mod.json "file_alias": a loose USRDIR file the game asks for and does not
+ * have (out names no file) is read from the game file a mod in use names
+ * instead. A power a mod adds has no preview movie (movies/ui/powerk_<its
+ * name in the game's power table>.bik), and one failed open leaves the Powers
+ * menu's movie player showing nothing for every power until a restart. */
+static void alias_redirect(const char* u, char* out, size_t cap)
+{
+    const std::string rel = lower(u + 8);   /* past "/USRDIR/" */
+    std::string to, by;
+    {
+        std::lock_guard<std::mutex> lk(g.mx);
+        if (!g.use) return;
+        for (const Mod& m : g.list) {
+            if (!m.on || !m.for_game || !m.err.empty()) continue;
+            for (const auto& a : m.alias) if (a.first == rel) { to = a.second; by = m.name; break; }
+            if (!to.empty()) break;
+        }
+    }
+    if (to.empty() || finfo(out).ok) return;   /* the game has the file: it is used */
+    const std::string o = out;
+    if (o.size() < rel.size() || lower(o.substr(o.size() - rel.size())) != rel) return;
+    const std::string host = o.substr(0, o.size() - rel.size()) + to;
+    const FInfo f = finfo(host);
+    if (!f.ok || f.dir || host.size() >= cap) {
+        log_once("alias-miss:" + rel, "file_alias of %s: %s -> %s, which the game does not have either; not used", by.c_str(), rel.c_str(), to.c_str());
+        return;
+    }
+    snprintf(out, cap, "%s", host.c_str());
+    log_once("alias:" + rel, "%s -> %s (file_alias of %s)", rel.c_str(), to.c_str(), by.c_str());
+}
+
 /* A guest open (read-only) or stat of a loose file under USRDIR whose name a
  * mod changes: the mod's file (or the build) instead. */
 static void redirect(const char* guest, char* out, size_t cap)
 {
     init();
-    if (!g.nserve.load(std::memory_order_acquire)) return;
     const char* u = nullptr;
     for (const char* p = guest; *p; p++) if (lang_ieq_n(p, "/USRDIR/", 8)) { u = p; break; }
     if (!u) return;
+    alias_redirect(u, out, cap);
+    if (!g.nserve.load(std::memory_order_acquire)) return;
     const char* b = strrchr(guest, '/');
     const std::string key = serve_key(lower(b + 1));
     std::string host, by;
@@ -3850,6 +4230,21 @@ static void test_start()
 /* ---- for the in-game menu (vk_overlay.cpp) --------------------------------- */
 
 extern "C" const char* ps3_game_mods_dir(void) { gmods::init(); return gmods::g.dir.c_str(); }
+
+/* Electric Dash (cheats.cpp): 1 and its settings when a mod this session uses has "electric_dash". */
+extern "C" int ps3_game_mods_electric_dash(float* speed, float* anim, float* drain, int* glow, int* glowskip)
+{
+    gmods::init();
+    std::lock_guard<std::mutex> lk(gmods::g.mx);
+    for (const gmods::Mod& m : gmods::g.list) {
+        if (!m.ed) continue;
+        auto it = gmods::g.start.find(gmods::lower(m.folder));
+        if (it == gmods::g.start.end() || !it->second.active) continue;
+        *speed = m.ed_speed; *anim = m.ed_anim; *drain = m.ed_drain; *glow = m.ed_glow; *glowskip = m.ed_glowskip;
+        return 1;
+    }
+    return 0;
+}
 
 extern "C" int ps3_game_mods_count(void)
 {
