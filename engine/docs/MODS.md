@@ -214,7 +214,6 @@ applied), and the new one waits for the old one to end.
 <mod>/mod.json        {"game": "inf2", "name": ..., "author": ..., "version": ...}
                       port only: "patch_for": [mods] (a merge patch, see Merging),
                       "discover_powers": [power numbers] (see New powers)
-                      "electric_dash" (see Electric Dash)
 <mod>/files/          .xpps files that replace the game's (by file name, any subfolder;
                       a mod with no files/ folder keeps them in the mod folder itself)
 <files>/texture_patches/<target>.xpps/[data]<OFFSET>_..._<W>x<H>_<DXTn>_m<mips>.dds
@@ -304,39 +303,6 @@ every few seconds and gives one without the found bit `0x23`: found, ready to
 buy and marked new. The game saves it with the rest, so the power stays found
 if the mod is turned off later. The mod does not need `"live": true`. Log
 lines start `[mods] discover_powers:`.
-### Electric Dash
-
-`"electric_dash": true` (or an object with settings) turns on the engine side
-of a mod that adds a Misc power as power `0x30` (slot kind `0xB`, after
-Firebird Strike). The mod itself adds the power with `xpps_patches` (its
-definition, icon, menu entry); the engine side is in `cheats/cheats.cpp`
-(`ed_*`) and runs while that power is equipped and its button (R2) is held,
-Cole has energy and is not climbing:
-
-```json
-{
-  "game": "inf2", "name": "Electric Dash",
-  "electric_dash": { "speed": 2, "anim": 1.3, "drain": 15, "glow": true, "glowskip": 11000 }
-}
-```
-
-- `speed` (1-20, default 2): Cole moves that many times as far each frame, on
-  the ground and in the air (through the game's own SetWorldPosition and the
-  jump/fall controller's air speed). Jumps on the move keep their take-off
-  speed; the landing roll keeps the speed he landed with.
-- `anim` (0.1-10, default 1.3): his animations run that much faster on the
-  ground (1 leaves the animation update alone).
-- `drain` (0-1000, default 15): energy taken each second (the bar is 330);
-  none comes back while the button is held, and at 0 the dash stays off until
-  the button is let go.
-- `glow` (default true): the charged-body look of Overload while dashing; it
-  fades out once the button is let go (`glowskip` ticks are skipped, default
-  11000). While the game's own Overload runs (Bio Leech, Ionic Drain) it is
-  left alone, so that still refills the bar.
-
-The power is marked discovered in any save while the mod is used. The setting
-is read once at start, so turning the mod on or off needs a restart. Nothing
-is hooked unless a used mod asks for it. `PS3_ED_LOG=1` logs the steps.
 
 ## How it works
 
