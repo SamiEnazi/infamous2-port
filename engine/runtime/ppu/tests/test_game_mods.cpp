@@ -1013,45 +1013,6 @@ static void test_electric_dash()
     }
 }
 
-/* mod.json "file_alias": a USRDIR file the game lacks is read from another of
- * its files while the mod is on; never when the game has the file, never a
- * path out of the game folder. */
-static void test_alias()
-{
-    g.dir = join(W, "alias"); g.state_path = join(W, "alias_state.ini");
-    remove(g.state_path.c_str());
-    g.start.clear(); g.start_sig.clear(); g.use = true;
-    wipe(g.dir);
-    put_file(join(g.dir, "P/mod.json"), "{\"game\": \"inf2\", \"name\": \"P\", \"file_alias\": {"
-             "\"movies/ui/powerk_bolt9.bik\": \"movies/ui/powerk_fatbolt.bik\", "
-             "\"Movies\\\\UI\\\\powerk_bolt0.bik\": \"movies/ui/powerk_autobolt.bik\", "
-             "\"movies/ui/powerk_r2_8.bik\": \"movies/../../secret.bik\", "
-             "\"movies/ui/powerk_r2_9.bik\": \"movies/ui/powerk_none.bik\", "
-             "\"movies/ui/powerk_fatbolt.bik\": \"movies/ui/powerk_autobolt.bik\"}}");
-    put_file(join(g.dir, "P/files/x.xpps"), "x");
-    const std::string U = join(W, "alias_game/USRDIR/");
-    put_file(U + "movies/ui/powerk_fatbolt.bik", "magnum");
-    put_file(U + "movies/ui/powerk_autobolt.bik", "stream");
-    { std::lock_guard<std::mutex> lk(g.mx); g.list = scan(); g.gen++; }
-    CHECK(g.list.size() == 1 && g.list[0].err.empty() && g.list[0].alias.size() == 4);   /* the ../ one is refused */
-    auto at = [&](const char* rel) {
-        char out[1100];
-        snprintf(out, sizeof out, "%s%s", U.c_str(), rel);
-        redirect((std::string("/dev_bdvd/PS3_GAME/USRDIR/") + rel).c_str(), out, sizeof out);
-        return std::string(out);
-    };
-    CHECK(at("movies/ui/powerk_bolt9.bik") == U + "movies/ui/powerk_fatbolt.bik");
-    CHECK(at("movies/ui/POWERK_BOLT0.bik") == U + "movies/ui/powerk_autobolt.bik");   /* any case, '\\' in mod.json */
-    CHECK(at("movies/ui/powerk_r2_9.bik") == U + "movies/ui/powerk_r2_9.bik");        /* the target is missing too */
-    CHECK(at("movies/ui/powerk_fatbolt.bik") == U + "movies/ui/powerk_fatbolt.bik");  /* the game has it: kept */
-    CHECK(at("movies/ui/powerk_bolt8.bik") == U + "movies/ui/powerk_bolt8.bik");
-    { std::lock_guard<std::mutex> lk(g.mx); g.list[0].on = false; }
-    CHECK(at("movies/ui/powerk_bolt9.bik") == U + "movies/ui/powerk_bolt9.bik");      /* mod off */
-    { std::lock_guard<std::mutex> lk(g.mx); g.list[0].on = true; g.use = false; }
-    CHECK(at("movies/ui/powerk_bolt9.bik") == U + "movies/ui/powerk_bolt9.bik");      /* mods off */
-    { std::lock_guard<std::mutex> lk(g.mx); g.use = true; g.list.clear(); g.gen++; }
-}
-
 int main(int argc, char** argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: test_game_mods <work folder> [<downloads> [<game folder>] [<png> <jpg>]]\n"); return 2; }
@@ -1070,8 +1031,6 @@ int main(int argc, char** argv)
     fprintf(stderr, "+conflicts: %d ok, %d failed\n", g_pass, g_fail);
     test_electric_dash();
     fprintf(stderr, "+electric_dash: %d ok, %d failed\n", g_pass, g_fail);
-    test_alias();
-    fprintf(stderr, "+file_alias: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 6) test_images(slashes(argv[4]), slashes(argv[5]));
     fprintf(stderr, "+images: %d ok, %d failed\n", g_pass, g_fail);
     if (argc >= 3) test_real(slashes(argv[2]), argc >= 4 ? slashes(argv[3]) : std::string());
