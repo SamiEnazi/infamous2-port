@@ -667,6 +667,12 @@ static void page_effects(Rows& R)
       mrow_choice(R, "glow", "Glow and blur", vs({ "PS3 smooth", "PS3", "Render res" }), cur, [](int i) { fx_set("PS3RECOMP_FX_GLOW", kVal[i]); })
           .d("Bloom around lights and powers.").c(1).ex("PS3RECOMP_FX_GLOW").cm(CMP_F3).off(cmp)
           .st(cmp ? "Showing the PS3 look: press F3 for yours." : "", cmp); }
+    { static const char* const kVal[] = { "0", "1" };   /* (dofres) */
+      const char* e = getenv("PS3RECOMP_DOF_RES");
+      const int cur = e && (!strcmp(e, "1") || !strcmp(e, "render") || !strcmp(e, "full")) ? 1 : 0;
+      mrow_choice(R, "dofres", "Depth of field resolution", vs({ "PS3", "Render res" }), cur, [](int i) { fx_set("PS3RECOMP_DOF_RES", kVal[i]); })
+          .d("The background blur's own pictures. Render res: smooth, not blocky.").c(1).ex("PS3RECOMP_DOF_RES").cm(CMP_F3).off(cmp)
+          .st(cmp ? "Showing the PS3 look: press F3 for yours." : "", cmp); }
 }
 
 /* the zip installs' report, once per new one (a new mod may be in the list: the pictures again) */
@@ -1001,7 +1007,7 @@ static const PageFn kPageFn[TAB_ABOUT + 1] = { page_display, page_graphics, page
 static const char* const kMenuExtras[] = {
     "PS3RECOMP_SOFT_SHADOWS", "PS3RECOMP_SSAO", "PS3RECOMP_SSAO_STRENGTH", "PS3RECOMP_LIGHT_DITHER",
     "PS3RECOMP_TONE_SHADOWS", "PS3RECOMP_TONE_MIDTONES", "PS3RECOMP_TONE_HIGHLIGHTS", "PS3RECOMP_CLARITY",
-    "PS3RECOMP_FX_RES", "PS3RECOMP_FX_GLOW", "PS3_MOUSE_MODE", "PS3_MOUSE_SENS", "PS3_MOUSE_AIM_SENS",
+    "PS3RECOMP_FX_RES", "PS3RECOMP_FX_GLOW", "PS3RECOMP_DOF_RES", "PS3_MOUSE_MODE", "PS3_MOUSE_SENS", "PS3_MOUSE_AIM_SENS",
     "PS3_MODS", "PS3_MODS_DUMP", "PS3_UPDATE_CHECK", "PS3RECOMP_SHADOW_RES" };
 
 /* Every page built once: a loud warning for any setting without a row; the startup line. */

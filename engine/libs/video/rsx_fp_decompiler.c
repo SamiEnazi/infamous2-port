@@ -2378,6 +2378,78 @@ int rsx_fp_alpha_aa_lod(char* hlsl, u32 out_size)
     return 1;
 }
 
+/* (dofres) PS3RECOMP_DOF_RES (rsx_draw_engine.c "the depth of field at the
+ * render resolution"): each 2D Sample of the units in `units` goes through a
+ * helper that averages the k x k texels making up one guest texel round the
+ * tap, k = the image's size over the guest's (gw[u] x gh[u]) per axis, at
+ * most 4 taps an axis; k <= 1 is the plain tap. SampleLevel 0: the targets
+ * have no mips, and no implicit derivatives inside the helper's branches. */
+int rsx_fp_prefilter(char* hlsl, u32 out_size, u32 units, const u16* gw, const u16* gh)
+{
+    if (!hlsl || !units || !gw || !gh) return 0;
+    const int arr = strstr(hlsl, "Texture2D    rsx_tex[16] : register(t0);\n") != NULL;
+    const size_t len0 = strlen(hlsl);
+    char decl[16 * 900];
+    size_t dn = 0;
+    u32 done = 0;
+    for (u32 u = 0; u < 16; u++) {
+        if (!((units >> u) & 1u) || !gw[u] || !gh[u]) continue;
+        char d[64], call[48];
+        if (!arr) {
+            snprintf(d, sizeof d, "Texture2D   rsx_tex%u : register(t%u);\n", u, u);
+            if (!strstr(hlsl, d)) continue;               /* a cube or a volume */
+        }
+        snprintf(call, sizeof call, arr ? "rsx_tex[%u].Sample(rsx_samp[%u], " : "rsx_tex%u.Sample(rsx_samp[%u], ", u, u);
+        if (!strstr(hlsl, call)) continue;
+        char tex[24];
+        snprintf(tex, sizeof tex, arr ? "rsx_tex[%u]" : "rsx_tex%u", u);
+        const int w = snprintf(decl + dn, sizeof decl - dn,
+            "float4 _rsx_pf%u(float2 _rsx_uv) {\n"
+            "    uint _pw, _ph; %s.GetDimensions(_pw, _ph);\n"
+            "    const float2 _g = float2(%u.0, %u.0);\n"
+            "    const int2 _n = clamp(int2(ceil(float2(_pw, _ph) / _g - 0.01)), int2(1, 1), int2(4, 4));\n"
+            "    const float2 _st = 1.0 / (_g * float2(_n));\n"
+            "    const float2 _o = _rsx_uv - 0.5 / _g + 0.5 * _st;\n"
+            "    float4 _a = float4(0.0, 0.0, 0.0, 0.0);\n"
+            "    [unroll] for (int _j = 0; _j < 4; _j++) {\n"
+            "        if (_j < _n.y) {\n"
+            "            [unroll] for (int _i = 0; _i < 4; _i++) {\n"
+            "                if (_i < _n.x) _a += %s.SampleLevel(rsx_samp[%u], _o + _st * float2(_i, _j), 0.0);\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    return _a / float(_n.x * _n.y);\n"
+            "}\n", u, tex, (unsigned)gw[u], (unsigned)gh[u], tex, u);
+        if (w < 0 || (size_t)w >= sizeof decl - dn) return -1;
+        dn += (size_t)w;
+        done |= 1u << u;
+    }
+    if (!done) return 0;
+    char* dp = fp_aa_decl_point(hlsl);
+    if (!dp) return -1;
+    char* out = (char*)malloc(len0 + dn + 1);
+    if (!out) return -1;
+    size_t o = 0;
+    for (const char* q = hlsl; *q; ) {
+        if (q == dp) { memcpy(out + o, decl, dn); o += dn; }
+        int hit = 0;
+        for (u32 u = 0; u < 16 && !hit; u++) {
+            if (!((done >> u) & 1u)) continue;
+            char call[48];
+            const int cl = snprintf(call, sizeof call, arr ? "rsx_tex[%u].Sample(rsx_samp[%u], " : "rsx_tex%u.Sample(rsx_samp[%u], ", u, u);
+            if (strncmp(q, call, (size_t)cl)) continue;
+            const int rl = snprintf(out + o, 16, "_rsx_pf%u(", u);   /* shorter than the call */
+            o += (size_t)rl; q += cl; hit = 1;
+        }
+        if (!hit) out[o++] = *q++;
+    }
+    out[o] = 0;
+    if (o + 1 > out_size) { free(out); return -1; }
+    memcpy(hlsl, out, o + 1);
+    free(out);
+    return 1;
+}
+
 /* --- kept from this tree when adopting the newer decompiler ---------------
  * rsx_d3d12_backend.c calls both of these: extract_consts feeds the per-draw
  * fp_k[] slots, code_hash keys the PSO cache on the ucode rather than the
