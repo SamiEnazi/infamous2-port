@@ -85,6 +85,7 @@ int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
  * into guest RAM and register their exports. stubs.cpp has the empty version
  * a game with no lifted PRX wants. */
 void     ps3_load_prx_modules(void);
+void     cellPad_host_sdl_preinit(void);      /* initialize SDL input before the frame clock */
 
 extern const char* ppu_vfs_root;              /* host dir the PS3 mount points map into */
 
@@ -497,6 +498,8 @@ int main(int argc, char** argv)
     ppu_sysprx_register();   /* boot-critical CRT */
     ppu_fs_register();       /* cellFs over the game directory */
     lv2_init_syscalls();     /* the lv2 syscall table */
+
+    cellPad_host_sdl_preinit();
 
     /* Install the guest-callback hook, then start the frame clock. It no-ops
      * until the title registers its vblank and flip handlers during init. */

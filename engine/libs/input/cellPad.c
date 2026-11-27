@@ -1288,6 +1288,16 @@ static int pad_sdl_init_subsystem(void)
     return 1;
 }
 
+/* SDL2-compat initializes its SDL3 joystick backend while Vulkan's present
+ * thread is already allocating driver resources. Start that subsystem before
+ * the video backend on Linux; cellPadInit will still scan and open pads later. */
+void cellPad_host_sdl_preinit(void)
+{
+#if PAD_BACKEND_SDL2 && defined(PS3RECOMP_RSX_VULKAN)
+    if (!pad_sdl_off()) pad_sdl_init_subsystem();
+#endif
+}
+
 /* ---- PS3_PAD_VIRTUAL: a scripted controller through the REAL SDL path ------
  *   PS3_PAD_VIRTUAL="<sec>:<input>=<value>,<sec>:<input>=<value>,..."
  * attaches an SDL virtual game controller (an "Xbox One" pad: family xbox)
