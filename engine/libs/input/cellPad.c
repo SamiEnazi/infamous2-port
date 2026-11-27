@@ -1288,6 +1288,15 @@ static int pad_sdl_init_subsystem(void)
     return 1;
 }
 
+#if defined(__linux__) && defined(PS3RECOMP_RSX_VULKAN)
+/* Finish SDL controller setup before the frame thread starts using SDL. */
+void cellPad_host_sdl_preinit(void)
+{
+    if (!pad_sdl_off())
+        pad_sdl_init_subsystem();
+}
+#endif
+
 /* ---- PS3_PAD_VIRTUAL: a scripted controller through the REAL SDL path ------
  *   PS3_PAD_VIRTUAL="<sec>:<input>=<value>,<sec>:<input>=<value>,..."
  * attaches an SDL virtual game controller (an "Xbox One" pad: family xbox)

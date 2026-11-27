@@ -1,0 +1,14 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -79,2 +79,5 @@
+ void     ppu_recomp_register(void);           /* generated: lifted table -> address map */
++#if defined(__linux__) && defined(PS3RECOMP_RSX_VULKAN)
++void     cellPad_host_sdl_preinit(void);
++#endif
+ void     ppu_hle_init(void);                  /* firmware import NID -> HLE handler */
+@@ -758,2 +761,5 @@
+     g_ps3_guest_caller = harness_guest_caller;
++#if defined(__linux__) && defined(PS3RECOMP_RSX_VULKAN)
++    cellPad_host_sdl_preinit();
++#endif
+     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
