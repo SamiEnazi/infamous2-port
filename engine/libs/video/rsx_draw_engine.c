@@ -7172,6 +7172,7 @@ static int eng_wide_covers(const float* b, float* out)
     if (out) { out[0] = xn; out[1] = xx; out[2] = yn; out[3] = yx; }
     return xn <= -0.98f && xx >= 0.98f && yn <= -0.98f && yx >= 0.98f;
 }
+static u32 s_hud_comp_off = ~0u;           /* (wide) the target the composite drew into (the screen) */
 static int s_wide_fill = 1;               /* (dofov) PS3RECOMP_WIDE_FILL, read with PS3_ASPECT_HUD_AFTER */
 static unsigned long long s_wide_filled;  /* (dofov) draws after the composite that filled (the [widelog] line) */
 static int s_hud_n = -1, s_hud_after;
@@ -8091,13 +8092,41 @@ static void sink_end_body(void* user, const rsx_dispatch* r)
         float wbx[6] = { 0 }, wcb[4] = { 0 };   /* (dofov) a UI quad's position box and its clip box */
         if (s_hud_n) {
             if (g.frames != s_hud_frame) { s_hud_frame = g.frames; s_hud_slice++; s_hud_after = 0; }
+            /* A draw that tests and writes depth into a display-sized target other than the one the
+             * composite drew into is the next frame's scene, never a HUD piece. The composite's "every
+             * display-sized draw after me is the HUD" lasted until the host presented (g.frames above);
+             * when the title drew two frames between two presents (every second or so), the second
+             * frame's scene and light passes were pinned into the 16:9 rectangle like the HUD, and that
+             * frame came out black but for a squeezed strip in the middle (a one-frame blink, wide
+             * pictures only). Not the composite's own target: the title's HUD draws into the screen
+             * with depth writes on (fp 2921adcb9c915692). Not other sizes: the HUD rule pins nothing
+             * else, and the next frame's shadow maps say nothing about it.
+             * PS3RECOMP_WIDE_ZRESET=0: the old rule (the host's present alone ends the HUD). */
+            { static int zr = -1;
+              if (zr < 0) { const char* e = getenv("PS3RECOMP_WIDE_ZRESET"); zr = !(e && e[0] == '0'); }
+              if (zr && s_hud_after && rs.depth_test && rs.depth_write && zslot != ENG_INVALID &&
+                  g.surfaces[target].w == g.width && g.surfaces[target].h == g.height &&
+                  g.surfaces[target].offset != s_hud_comp_off) {
+                  s_hud_after = 0;
+                  static u32 said, n_reset, last_report;
+                  n_reset++;
+                  if (said < 4u) { said++;
+                      fprintf(stderr, "[engine] aspect: frame %u: a depth-writing draw into 0x%08X %ux%u after the composite: "
+                              "the next frame's scene, the HUD rule ends (PS3RECOMP_WIDE_ZRESET)\n", g.frames,
+                              g.surfaces[target].offset, g.surfaces[target].w, g.surfaces[target].h); }
+                  if (g.frames - last_report >= 1000u) {
+                      if (last_report) fprintf(stderr, "[engine] aspect: the HUD rule ended early %u time(s) in the last %u frames\n",
+                                               n_reset, g.frames - last_report);
+                      last_report = g.frames; n_reset = 0; }
+              } }
             const eng_fp_memo* hfm = NULL; const eng_vp_memo* hvm = NULL;
             const u64 fk = eng_guest_programs(&hvm, &hfm) && hfm ? hfm->structural : 0;
             const u64 vk = hfm && hvm ? hvm->hash : 0;
             int composite = 0;
             for (int k = 0; k < s_hud_n; k++) if (fk && fk == s_hud_fp[k]) composite = 1;
             display = g.surfaces[target].w == g.width && g.surfaces[target].h == g.height;
-            if (composite) { s_hud_after = 1; s_hud_seen = s_hud_slice; s_hud_comp_vp = vk; s_ov_mode = 0; s_ov_cnt = 0; }
+            if (composite) { s_hud_after = 1; s_hud_seen = s_hud_slice; s_hud_comp_vp = vk; s_ov_mode = 0; s_ov_cnt = 0;
+                             s_hud_comp_off = g.surfaces[target].offset; }
             else if (display) hud = s_hud_after || s_ov_mode;
             /* (dofov) PS3RECOMP_WIDE_FILL (default 1): a draw after the composite that covers the whole guest
              * screen is a full-screen effect (the hurt overlay, fades, colour flashes), not a HUD piece: it fills
